@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.env
+.venv
+.envrc
+poetry.lock
+
+# Node
+node_modules/
+.pnp*
+frontend/.next/
+frontend/out/
+frontend/dist/
+frontend/node_modules/
+frontend/pnpm-lock.yaml
+
+# Editors
+.idea/
+.vscode/
+.DS_Store
+
+# Testing artifacts
+.coverage
+htmlcov/
+pytest_cache/
