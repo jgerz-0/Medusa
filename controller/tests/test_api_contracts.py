@@ -27,7 +27,9 @@ class InMemoryQueue(QueueClient):
 
 
 @pytest.fixture()
-def api_client() -> Generator[Tuple[TestClient, InMemoryQueue, sessionmaker], None, None]:
+def api_client() -> (
+    Generator[Tuple[TestClient, InMemoryQueue, sessionmaker], None, None]
+):
     get_settings.cache_clear()  # type: ignore[attr-defined]
     settings = Settings(
         database_url="sqlite+pysqlite:///:memory:",
@@ -79,7 +81,9 @@ def auth_headers() -> dict[str, str]:
     return {"X-API-Key": "test-key"}
 
 
-def test_target_create_and_scan_flow(api_client: Tuple[TestClient, InMemoryQueue, sessionmaker]) -> None:
+def test_target_create_and_scan_flow(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker],
+) -> None:
     client, queue, _session_factory = api_client
 
     response = client.post(
@@ -128,7 +132,9 @@ def test_target_create_and_scan_flow(api_client: Tuple[TestClient, InMemoryQueue
     assert collection_payload["data"][0]["id"] == scan_payload["id"]
 
 
-def test_finding_contracts(api_client: Tuple[TestClient, InMemoryQueue, sessionmaker]) -> None:
+def test_finding_contracts(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker],
+) -> None:
     client, _, session_factory = api_client
 
     with session_factory() as session:

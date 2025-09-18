@@ -1,4 +1,5 @@
 """Create principal credentials table"""
+
 from __future__ import annotations
 
 from alembic import op
@@ -20,7 +21,12 @@ def upgrade() -> None:
         sa.Column("key_hash", sa.String(length=128), nullable=True),
         sa.Column("roles", sa.JSON(), nullable=False, server_default=sa.text("'[]'")),
         sa.Column("description", sa.String(length=255), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
     )
 

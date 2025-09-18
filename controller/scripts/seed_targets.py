@@ -1,4 +1,5 @@
 """Seed the database with authorized targets for local testing."""
+
 from __future__ import annotations
 
 import logging
