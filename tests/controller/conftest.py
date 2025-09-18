@@ -4,14 +4,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from controller.db.models import Base, PrincipalCredential
 from controller.main import (
-    Base,
-    PrincipalCredential,
     QueueClient,
     Settings,
-    _engine_from_url,
     _hash_secret,
-    _session_factory_from_url,
     app,
     get_db_session,
     get_queue_client,
@@ -30,8 +27,6 @@ class FakeQueueClient(QueueClient):
 @pytest.fixture()
 def client():
     get_settings.cache_clear()  # type: ignore[attr-defined]
-    _engine_from_url.cache_clear()  # type: ignore[attr-defined]
-    _session_factory_from_url.cache_clear()  # type: ignore[attr-defined]
 
     settings = Settings(
         database_url="sqlite+pysqlite:///:memory:",
@@ -108,5 +103,3 @@ def client():
 
     app.dependency_overrides.clear()
     get_settings.cache_clear()  # type: ignore[attr-defined]
-    _session_factory_from_url.cache_clear()  # type: ignore[attr-defined]
-    _engine_from_url.cache_clear()  # type: ignore[attr-defined]
