@@ -1,12 +1,21 @@
 # Contributing Guidelines
 
-Thank you for investing in Medusa. We focus on security-first automation, deterministic scanner outputs, and transparent enrichment. Contributions should maintain those principles.
+The Medusa platform orchestrates automated penetration testing, binary analysis, and CVE enrichment
+pipelines. This repository is the coordination point for the controller services, scanning workers,
+frontend portal, and supporting infrastructure-as-code. Follow the practices below to keep
+contributions deterministic, auditable, and secure.
 
 ## Getting Started
 1. Fork the repository and create a feature branch.
 2. Install dependencies using the instructions in [README.md](../README.md).
 3. Copy `.env.example` files to `.env` per service and populate local-only secrets.
-4. Run the full lint/test suite before opening a pull request.
+4. Apply database migrations and seed local scope data:
+   ```bash
+   cd controller
+   poetry run alembic upgrade head
+   poetry run python scripts/seed_targets.py
+   ```
+5. Run the full lint/test suite before opening a pull request.
 
 ## Development Standards
 - **Python**
@@ -28,6 +37,11 @@ Thank you for investing in Medusa. We focus on security-first automation, determ
 5. Document operational notes in `docs/SCANNERS.md` and link from the README.
 6. Add unit/integration tests plus fixtures demonstrating deterministic findings.
 
+## Database migrations
+- Generate schema changes with `poetry run alembic revision --autogenerate -m "describe_change"`.
+- Validate that models and migrations are in sync before pushing: `poetry run python scripts/check_migrations.py`.
+- Ensure seed data stays within authorized test scope; update `scripts/seed_targets.py` for new demo assets.
+
 ## Pull Request Checklist
 - Tests and linters pass locally and in CI.
 - Documentation updated alongside code changes.
@@ -38,3 +52,68 @@ Thank you for investing in Medusa. We focus on security-first automation, determ
 - Use GitHub Issues for roadmap tasks aligned with the phase milestones.
 - Join the weekly architecture sync to review upcoming changes.
 - For urgent security topics, escalate to the security engineering channel.
+
+
+### Python toolchain
+
+- Install [Poetry 1.7+](https://python-poetry.org/docs/#installation) for dependency management.
+- Use Python **3.11** (CPython) for all controller and worker services. We recommend
+  [`pyenv`](https://github.com/pyenv/pyenv) or the system package manager to manage interpreters.
+- Bootstrap environments:
+
+  ```bash
+  cd controller
+  poetry install --with dev
+
+  cd ../workers/web/nuclei
+  poetry install --with dev
+  ```
+
+### Node.js toolchain
+
+- Install Node.js **20.0+** and [pnpm 8+](https://pnpm.io/installation).
+- Install frontend dependencies from the repository root:
+
+  ```bash
+  cd frontend
+  pnpm install
+  ```
+
+## Linting and testing
+
+Security automation must be deterministic. Always run the following before opening a pull request:
+
+```bash
+poetry run ruff check controller workers/web/nuclei
+poetry run mypy controller workers/web/nuclei
+poetry run pytest controller/tests workers/web/nuclei/tests
+
+cd frontend
+pnpm lint
+pnpm run typecheck
+```
+
+## Commit hygiene
+
+- Enable the provided pre-commit hooks:
+
+  ```bash
+  pre-commit install
+  ```
+
+- Use descriptive commit messages that explain intent and potential risk reductions.
+- Do not commit secrets, credentials, or production scope definitions.
+
+## Code review expectations
+
+- Changes touching `infra/` must include Terraform/Helm/Docker validation steps.
+- New agents or workers must document JSON request/response schemas.
+- Frontend PRs should attach screenshots or recordings when user-facing changes occur.
+
+## Security posture
+
+- Assume adversarial conditions: validate inputs, enforce RBAC, and log decisions.
+- Deterministic scanner results remain the source of truth; AI enrichment is additive only.
+- Follow least privilege when modifying Kubernetes manifests or Terraform modules.
+
+Thank you for helping to evolve Medusa's automated security testing platform.
