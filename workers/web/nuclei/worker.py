@@ -497,9 +497,6 @@ def post_callback(
     if config.callback_token:
         headers["X-Callback-Token"] = config.callback_token
     try:
-        headers = {}
-        if config.callback_token:
-            headers["X-Callback-Token"] = config.callback_token
         response = session.post(
             job.callback_url,
             json=payload,
