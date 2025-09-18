@@ -1,12 +1,13 @@
 """FastAPI controller for coordinating scan workflows.
 
 This module exposes routes for managing scan targets, enqueueing nuclei scan
-jobs, and retrieving findings. It couples HTTP requests to a queue backend
-(Redis) and an SQLAlchemy/Postgres persistence layer, while emitting structured
-audit events for each call.
+jobs, ingesting worker callbacks, and retrieving findings. It couples HTTP
+requests to a queue backend (Redis) and an SQLAlchemy/Postgres persistence
+layer, while emitting structured audit events for each call.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -16,9 +17,20 @@ from typing import Any, Dict, Iterable, List, Optional
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import AnyHttpUrl, BaseModel, BaseSettings, Field, root_validator
+from pydantic import AnyHttpUrl, BaseModel, BaseSettings, Field, root_validator, validator
 from redis import Redis
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import (
+    JSON,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    event,
+    inspect,
+)
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
@@ -43,6 +55,9 @@ class Settings(BaseSettings):
     )
     jwt_secret: str = Field(..., description="JWT secret used to validate bearer tokens.")
     api_keys: List[str] = Field(default_factory=list, description="Static API keys for service accounts.")
+    nuclei_callback_token: str = Field(
+        ..., description="Shared secret token required for nuclei worker callbacks."
+    )
 
     class Config:
         env_prefix = "MEDUSA_"
@@ -81,6 +96,9 @@ class Scan(Base):
     requested_hosts = Column(JSON, nullable=False)
     initiated_by = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    worker_metadata = Column(JSON, nullable=False, default=dict)
+    worker_error = Column(Text, nullable=True)
 
     target = relationship("Target", back_populates="scans")
     findings = relationship("Finding", back_populates="scan", cascade="all,delete")
@@ -94,9 +112,14 @@ class Finding(Base):
     severity = Column(String(32), nullable=False)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=False)
+    cve_id = Column(String(64), nullable=True)
+    metadata_json = Column(JSON, nullable=False, default=dict)
+    evidence = Column(JSON, nullable=False, default=dict)
+    evidence_hash = Column(String(64), nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
 
     scan = relationship("Scan", back_populates="findings")
+    artifacts = relationship("FindingArtifact", back_populates="finding", cascade="all,delete")
 
 
 class AuditEvent(Base):
@@ -109,6 +132,77 @@ class AuditEvent(Base):
     resource_id = Column(String(64), nullable=True)
     metadata_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
+
+
+class FindingArtifact(Base):
+    __tablename__ = "finding_artifacts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    finding_id = Column(Integer, ForeignKey("findings.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(255), nullable=False)
+    artifact_type = Column(String(64), nullable=False)
+    content_type = Column(String(255), nullable=True)
+    location = Column(String(1024), nullable=True)
+    data = Column(Text, nullable=False)
+    data_hash = Column(String(64), nullable=False)
+    metadata_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
+
+    finding = relationship("Finding", back_populates="artifacts")
+
+
+def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ensure payloads used for hashing are deterministic dictionaries."""
+
+    if payload is None:
+        return {}
+    return payload
+
+
+def _hash_payload(payload: Dict[str, Any]) -> str:
+    """Generate a SHA-256 hash from a JSON-serialised payload."""
+
+    normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+@event.listens_for(Finding, "before_insert", propagate=True)
+def _finding_set_hash(mapper, connection, target: Finding) -> None:  # pragma: no cover - SQLAlchemy hook
+    metadata_payload = _normalize_payload(target.metadata_json)
+    evidence_payload = _normalize_payload(target.evidence)
+    target.metadata_json = metadata_payload
+    target.evidence = evidence_payload
+    target.evidence_hash = _hash_payload({"metadata": metadata_payload, "evidence": evidence_payload})
+
+
+@event.listens_for(Finding, "before_update", propagate=True)
+def _finding_prevent_mutation(mapper, connection, target: Finding) -> None:  # pragma: no cover - SQLAlchemy hook
+    state = inspect(target)
+    if (
+        state.attrs.metadata_json.history.has_changes()
+        or state.attrs.evidence.history.has_changes()
+        or state.attrs.evidence_hash.history.has_changes()
+    ):
+        raise ValueError("Finding evidence payloads are immutable once persisted.")
+
+
+@event.listens_for(FindingArtifact, "before_insert", propagate=True)
+def _artifact_set_hash(mapper, connection, target: FindingArtifact) -> None:  # pragma: no cover - SQLAlchemy hook
+    target.metadata_json = _normalize_payload(target.metadata_json)
+    if not target.data:
+        raise ValueError("Artifact data cannot be empty.")
+    target.data_hash = hashlib.sha256(target.data.encode("utf-8")).hexdigest()
+
+
+@event.listens_for(FindingArtifact, "before_update", propagate=True)
+def _artifact_prevent_mutation(mapper, connection, target: FindingArtifact) -> None:  # pragma: no cover - SQLAlchemy hook
+    state = inspect(target)
+    if (
+        state.attrs.data.history.has_changes()
+        or state.attrs.data_hash.history.has_changes()
+        or state.attrs.metadata_json.history.has_changes()
+    ):
+        raise ValueError("Finding artifacts are immutable once persisted.")
 
 
 class ScopeDefinition(BaseModel):
@@ -180,16 +274,78 @@ class ScanResponse(BaseModel):
         orm_mode = True
 
 
+class FindingArtifactResponse(BaseModel):
+    id: int
+    name: str
+    artifact_type: str
+    content_type: Optional[str]
+    location: Optional[str]
+    metadata_json: Dict[str, Any]
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
 class FindingResponse(BaseModel):
     id: int
     scan_id: int
     severity: str
     title: str
     description: str
+    cve_id: Optional[str]
+    metadata_json: Dict[str, Any]
+    evidence: Dict[str, Any]
+    evidence_hash: str
+    artifacts: List[FindingArtifactResponse] = Field(default_factory=list)
     created_at: datetime
 
     class Config:
         orm_mode = True
+
+
+class CallbackArtifact(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    artifact_type: str = Field(..., min_length=1, max_length=64)
+    content_type: Optional[str] = Field(None, max_length=255)
+    location: Optional[str] = Field(None, max_length=1024)
+    data: str = Field(..., min_length=1)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CallbackFinding(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    severity: str = Field(..., min_length=1, max_length=32)
+    description: str = Field(..., min_length=1)
+    cve_id: Optional[str] = Field(None, max_length=64)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    artifacts: List[CallbackArtifact] = Field(default_factory=list)
+
+    @validator("severity")
+    def validate_severity(cls, value: str) -> str:
+        allowed = {"critical", "high", "medium", "low", "info"}
+        lowered = value.lower()
+        if lowered not in allowed:
+            raise ValueError("Unsupported severity level")
+        return lowered
+
+
+class NucleiCallbackRequest(BaseModel):
+    scan_id: int
+    status: str = Field(..., min_length=1, max_length=32)
+    findings: List[CallbackFinding] = Field(default_factory=list)
+    worker_metadata: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = Field(default=None)
+    completed_at: Optional[datetime] = None
+
+    @validator("status")
+    def validate_status(cls, value: str) -> str:
+        allowed = {"completed", "failed"}
+        lowered = value.lower()
+        if lowered not in allowed:
+            raise ValueError("Unsupported scan status")
+        return lowered
 
 
 class Principal(BaseModel):
@@ -275,6 +431,19 @@ def authenticate(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
 
     return Principal(subject=subject, auth_method="jwt")
+
+
+def authenticate_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> Principal:
+    """Authenticate nuclei worker callbacks using a shared secret header."""
+
+    token = request.headers.get("X-Callback-Token")
+    if not token or token != settings.nuclei_callback_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid callback token")
+
+    return Principal(subject="worker:nuclei", auth_method="shared_secret")
 
 
 def get_db_session(settings: Settings = Depends(get_settings)):
@@ -409,6 +578,79 @@ def enqueue_scan(
     return ScanResponse.from_orm(scan)
 
 
+@app.post("/internal/nuclei/callback", status_code=status.HTTP_204_NO_CONTENT)
+def nuclei_callback(
+    payload: NucleiCallbackRequest,
+    principal: Principal = Depends(authenticate_worker),
+    db: Session = Depends(get_db_session),
+) -> None:
+    """Persist nuclei worker results while enforcing evidence immutability."""
+
+    scan = db.query(Scan).get(payload.scan_id)
+    if scan is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found")
+
+    if scan.status in {"completed", "failed"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Scan already finalized")
+
+    if scan.findings:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Scan findings already recorded")
+
+    scan.status = payload.status
+    scan.worker_metadata = _normalize_payload(payload.worker_metadata)
+    scan.worker_error = payload.error
+    if payload.status in {"completed", "failed"}:
+        scan.completed_at = payload.completed_at or datetime.now(tz=timezone.utc)
+
+    findings_persisted = 0
+    for finding_payload in payload.findings:
+        finding = Finding(
+            scan_id=scan.id,
+            severity=finding_payload.severity,
+            title=finding_payload.title,
+            description=finding_payload.description,
+            cve_id=finding_payload.cve_id,
+            metadata_json=_normalize_payload(finding_payload.metadata),
+            evidence=_normalize_payload(finding_payload.evidence),
+        )
+        db.add(finding)
+        db.flush()  # ensure primary key is available for artifacts
+
+        for artifact_payload in finding_payload.artifacts:
+            artifact = FindingArtifact(
+                finding_id=finding.id,
+                name=artifact_payload.name,
+                artifact_type=artifact_payload.artifact_type,
+                content_type=artifact_payload.content_type,
+                location=artifact_payload.location,
+                data=artifact_payload.data,
+                metadata_json=_normalize_payload(artifact_payload.metadata),
+            )
+            db.add(artifact)
+
+        findings_persisted += 1
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:  # pragma: no cover - exercised in error handling tests
+        db.rollback()
+        LOGGER.exception("Failed to persist nuclei callback payload", extra={"scan_id": payload.scan_id})
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to persist callback") from exc
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="nuclei_callback",
+        resource_type="scan",
+        resource_id=str(scan.id),
+        metadata={
+            "status": payload.status,
+            "findings_count": findings_persisted,
+            "error": payload.error,
+        },
+    )
+
+
 @app.get("/findings", response_model=List[FindingResponse])
 def list_findings(
     target_id: Optional[int] = None,
@@ -443,6 +685,7 @@ __all__ = [
     "Target",
     "Scan",
     "Finding",
+    "FindingArtifact",
     "AuditEvent",
     "get_db_session",
     "get_queue_client",

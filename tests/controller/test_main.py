@@ -40,6 +40,7 @@ def client() -> Generator[Tuple[TestClient, FakeQueueClient, sessionmaker], None
         nuclei_queue_channel="test-nuclei",
         jwt_secret="unit-test-secret",
         api_keys=["test-key"],
+        nuclei_callback_token="callback-secret",
     )
 
     engine = create_engine(settings.database_url, future=True)
