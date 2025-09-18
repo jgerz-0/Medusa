@@ -10,11 +10,13 @@ from controller.db.models import AuditLog, Base, Scan, Target
 from controller.main import (
     AuditEvent,
     Base,
+    PrincipalCredential,
     Finding,
     QueueClient,
     Scan,
     Settings,
     _engine_from_url,
+    _hash_secret,
     _session_factory_from_url,
     app,
     get_db_session,
@@ -49,6 +51,25 @@ def client() -> Generator[Tuple[TestClient, FakeQueueClient, sessionmaker], None
     TestingSessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
     Base.metadata.create_all(bind=engine)
 
+    with TestingSessionLocal() as session:
+        session.add_all(
+            [
+                PrincipalCredential(
+                    subject="svc-admin",
+                    auth_method="api_key",
+                    key_hash=_hash_secret("test-key"),
+                    roles=["admin", "scan:enqueue", "targets:write", "findings:read"],
+                ),
+                PrincipalCredential(
+                    subject="svc-analyst",
+                    auth_method="api_key",
+                    key_hash=_hash_secret("analyst-key"),
+                    roles=["analyst", "findings:read"],
+                ),
+            ]
+        )
+        session.commit()
+
     queue = FakeQueueClient()
 
     def override_settings() -> Settings:
@@ -77,8 +98,8 @@ def client() -> Generator[Tuple[TestClient, FakeQueueClient, sessionmaker], None
     _engine_from_url.cache_clear()  # type: ignore[attr-defined]
 
 
-def auth_headers() -> dict[str, str]:
-    return {"X-API-Key": "test-key"}
+def auth_headers(api_key: str = "test-key") -> dict[str, str]:
+    return {"X-API-Key": api_key}
 
 
 def test_target_creation_rejects_blank_scope(client):
@@ -174,21 +195,58 @@ def test_scan_rejects_unauthorized_target(client):
     assert not queue.calls
 
 
+def test_scan_enqueue_requires_role(client):
+    test_client, queue, _ = client
+
+    create_resp = test_client.post(
+        "/targets",
+        json={
+            "name": "prod-web",
+            "url": "https://prod.internal.example.com",
+            "scope": {"allowed_hosts": ["prod.internal.example.com"]},
+        },
+        headers=auth_headers(),
+    )
+    assert create_resp.status_code == 201
+    target_id = create_resp.json()["id"]
+
+    denied_resp = test_client.post(
+        "/scan",
+        json={
+            "target_id": target_id,
+            "profile": "full",
+            "requested_hosts": ["prod.internal.example.com"],
+        },
+        headers=auth_headers("analyst-key"),
+    )
+
+    assert denied_resp.status_code == 403
+    assert not queue.calls
+
+
+def test_invalid_api_key_rejected(client):
+    test_client, _, _ = client
+
+    response = test_client.get("/findings", headers=auth_headers("bad-key"))
+
+    assert response.status_code == 401
+
+
 def test_audit_logging_records_events(client, caplog):
     caplog.set_level(logging.INFO, logger="medusa.audit")
     test_client, _, session_factory = client
 
-    # seed target directly in DB for the read-only route
     with session_factory() as session:
         target = Target(
             name="prod-web",
-            scope="prod.internal.example.com",
+            url="https://prod.internal.example.com",
+            scope={"allowed_hosts": ["prod.internal.example.com"]},
             is_authorized=True,
         )
         session.add(target)
         session.commit()
 
-    response = test_client.get("/findings", headers=auth_headers())
+    response = test_client.get("/findings", headers=auth_headers("analyst-key"))
     assert response.status_code == 200
     assert response.json() == {"data": []}
 
@@ -201,6 +259,7 @@ def test_audit_logging_records_events(client, caplog):
             .all()
         )
         assert len(events) == 1
+        assert events[0].actor == "svc-analyst"
         assert events[0].actor.startswith("apikey:")
         assert events[0].evidence_snapshot["metadata"] == {
             "target_id": None,

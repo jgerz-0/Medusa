@@ -370,6 +370,41 @@ class NucleiCallbackRequest(BaseModel):
 class Principal(BaseModel):
     subject: str
     auth_method: str
+    roles: List[str] = Field(default_factory=list)
+
+    def has_role(self, role: str) -> bool:
+        return role in self.roles
+
+    def has_any_role(self, roles: Iterable[str]) -> bool:
+        role_set = set(self.roles)
+        return any(role in role_set for role in roles)
+
+
+class PrincipalCredential(Base):
+    __tablename__ = "principal_credentials"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    subject = Column(String(255), nullable=False, unique=True)
+    auth_method = Column(String(32), nullable=False)
+    key_hash = Column(String(128), nullable=True)
+    roles = Column(JSON, nullable=False, default=list)
+    description = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+
+def _hash_secret(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
+    if principal.has_role("admin"):
+        return
+    if not principal.has_any_role(required_roles):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient role for this operation",
+        )
 
 
 @lru_cache()
@@ -421,6 +456,17 @@ class RedisQueueClient(QueueClient):
         self.client.rpush(channel, serialized)
 
 
+def get_db_session(settings: Settings = Depends(get_settings)):
+    """Yield a SQLAlchemy session bound to the configured engine."""
+
+    session_factory = get_session_factory(settings)
+    session = session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
 security_scheme = HTTPBearer(auto_error=False)
 
 
@@ -428,12 +474,36 @@ def authenticate(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
 ) -> Principal:
     """Authenticate caller via JWT bearer token or API key headers."""
 
     api_key = request.headers.get("X-API-Key")
-    if api_key and api_key in settings.api_keys:
-        return Principal(subject=f"apikey:{api_key}", auth_method="api_key")
+    if api_key:
+        key_hash = _hash_secret(api_key)
+        record = (
+            db.query(PrincipalCredential)
+            .filter(
+                PrincipalCredential.auth_method == "api_key",
+                PrincipalCredential.key_hash == key_hash,
+                PrincipalCredential.revoked_at.is_(None),
+            )
+            .first()
+        )
+        if record:
+            return Principal(
+                subject=record.subject,
+                auth_method="api_key",
+                roles=list(record.roles or []),
+            )
+        if api_key in settings.api_keys:
+            LOGGER.warning("Using legacy static API key configuration", extra={"subject": api_key})
+            return Principal(
+                subject=f"apikey:{api_key}",
+                auth_method="api_key",
+                roles=["legacy"],
+            )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
@@ -449,7 +519,17 @@ def authenticate(
     if not subject:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
 
-    return Principal(subject=subject, auth_method="jwt")
+    record = (
+        db.query(PrincipalCredential)
+        .filter(
+            PrincipalCredential.auth_method == "jwt",
+            PrincipalCredential.subject == subject,
+            PrincipalCredential.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subject not authorized")
 
 
 def authenticate_worker(
@@ -468,12 +548,7 @@ def authenticate_worker(
 def get_db_session(settings: Settings = Depends(get_settings)):
     """Yield a SQLAlchemy session bound to the configured engine."""
 
-    session_factory = get_session_factory(settings)
-    session = session_factory()
-    try:
-        yield session
-    finally:
-        session.close()
+    return Principal(subject=subject, auth_method="jwt", roles=roles)
 
 
 def get_queue_client(settings: Settings = Depends(get_settings)) -> QueueClient:
@@ -574,7 +649,8 @@ def enqueue_scan(
     queue: QueueClient = Depends(get_queue_client),
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
-    target = db.get(Target, request.target_id)
+    enforce_roles(principal, ["scan:enqueue"])
+    target = db.query(Target).get(request.target_id)
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
 
@@ -786,6 +862,7 @@ __all__ = [
     "AuditLog",
     "FindingArtifact",
     "AuditEvent",
+    "PrincipalCredential",
     "ScanResponse",
     "ScanCollectionResponse",
     "FindingResponse",
@@ -794,6 +871,7 @@ __all__ = [
     "get_queue_client",
     "RedisQueueClient",
     "QueueClient",
+    "_hash_secret",
     "serialize_scan",
     "serialize_finding",
 ]
