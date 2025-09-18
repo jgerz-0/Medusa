@@ -113,12 +113,11 @@ class NucleiJob:
     job_id: str
     target: str
     templates: List[str]
-    scan_id: int
+    scan_id: str
     callback_url: str
     attempts: int = 0
     tags: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    scan_id: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -156,18 +155,24 @@ class NucleiJob:
         metadata_payload = data.get("metadata") or {}
         if not isinstance(metadata_payload, dict):
             raise FatalJobError("Job metadata must be a JSON object")
-        scan_id = data.get("scan_id") or metadata_payload.get("scan_id")
+        scan_id_value = data.get("scan_id") or metadata_payload.get("scan_id")
+        if scan_id_value is None:
+            raise FatalJobError("Job payload missing 'scan_id'")
+        try:
+            int(scan_id_value)
+        except (TypeError, ValueError) as exc:
+            raise FatalJobError("Job payload contains invalid 'scan_id'") from exc
+        scan_id_str = str(scan_id_value)
 
         return cls(
             job_id=job_id,
             target=target,
             templates=[str(t) for t in templates],
-            scan_id=scan_id,
+            scan_id=scan_id_str,
             callback_url=callback_url,
             attempts=attempts,
             tags=[str(tag) for tag in tags],
             metadata=metadata_payload,
-            scan_id=str(scan_id) if scan_id else None,
             raw=data,
         )
 
@@ -348,7 +353,7 @@ def _coerce_tags(value: Any) -> List[str]:
 
 def _coerce_cve(info: Dict[str, Any]) -> Optional[str]:
     candidates: List[str] = []
-    for key in ("cve", "cveID", "cveId"):
+    for key in ("cve", "cveID", "cveId", "cve-id"):
         value = info.get(key)
         if isinstance(value, str):
             return value
@@ -363,80 +368,74 @@ def _coerce_cve(info: Dict[str, Any]) -> Optional[str]:
 def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> List[Dict[str, Any]]:
     """Convert nuclei JSON records into the controller callback schema."""
 
-    severity_map = {"critical", "high", "medium", "low", "info"}
+    allowed_severities = {"critical", "high", "medium", "low", "info"}
     findings: List[Dict[str, Any]] = []
     for record in records:
         info = record.get("info") or {}
         template_id = record.get("templateID") or record.get("template-id")
+
         severity = str(info.get("severity") or "info").lower()
-        title = info.get("name") or template_id or f"nuclei finding for {job.target}"
-        description = info.get("description") or f"Template {template_id or title} matched {job.target}."
-        info_tags = _coerce_tags(info.get("tags"))
-        combined_tags = sorted({*job.tags, *info_tags})
+        if severity not in allowed_severities:
+            severity = "info"
+
+        title_value = info.get("name") or template_id or f"nuclei finding for {job.target}"
+        title = str(title_value)
+
         description_value = info.get("description")
-        description = str(description_value).strip() if description_value else ""
+        if isinstance(description_value, str):
+            description = description_value.strip()
+        else:
+            description = ""
         if not description:
             description = (
                 f"Nuclei template {template_id or 'unknown'} reported a {severity} finding "
                 f"for job {job.job_id} targeting {job.target}."
             )
 
-        classification = info.get("classification") or {}
-        cve_id = (
-            classification.get("cve-id")
-            or classification.get("cveId")
-            or info.get("cve")
-            or record.get("cve")
-        )
-
-        evidence = {
+        evidence_source = {
             "matched_at": record.get("matched-at") or record.get("matchedAt"),
             "extracted_results": record.get("extracted-results")
-            or record.get("extractedResults")
-            or [],
+            or record.get("extractedResults"),
             "curl_command": record.get("curl-command") or record.get("curlCommand"),
             "matcher_name": record.get("matcher-name") or record.get("matcherName"),
             "timestamp": record.get("timestamp"),
             "ip": record.get("ip"),
             "port": record.get("port"),
         }
+        evidence = {k: v for k, v in evidence_source.items() if v}
 
-        metadata = {
+        info_tags = _coerce_tags(info.get("tags"))
+        combined_tags = sorted({*job.tags, *info_tags})
+        metadata_source = {
             "job_id": job.job_id,
             "template_id": template_id,
             "template_path": record.get("template-path") or record.get("templatePath"),
-            "matcher_name": record.get("matcher-name") or record.get("matcherName"),
-            "matched_at": evidence["matched_at"],
+            "matcher_name": evidence.get("matcher_name"),
+            "matched_at": evidence.get("matched_at"),
             "host": record.get("host"),
-            "tags": info.get("tags") or job.tags,
+            "tags": combined_tags,
         }
+        metadata = {k: v for k, v in metadata_source.items() if v}
 
-        artifact_payload = {
-            "name": f"nuclei-record-{index}",
-            "artifact_type": "nuclei-json",
-            "content_type": "application/json",
-            "data": json.dumps(record, sort_keys=True),
-            "metadata": {"template_id": template_id},
-        }
+        classification = info.get("classification") or {}
+        cve_id = (
+            _coerce_cve(classification)
+            or _coerce_cve(info)
+            or record.get("cve")
+        )
+        if isinstance(cve_id, list):
+            cve_id = next((str(item) for item in cve_id if item), None)
+        elif cve_id is not None:
+            cve_id = str(cve_id)
 
-        finding = {
-            "title": title,
-            "severity": severity,
-            "description": description,
-            "cve_id": cve_id,
-            "metadata": metadata,
-            "evidence": {k: v for k, v in evidence.items() if v},
-            "artifacts": [artifact_payload],
-        }
         findings.append(
             {
-                "title": str(title),
+                "title": title,
                 "severity": severity,
-                "description": str(description),
-                "cve_id": _coerce_cve(info),
-                "metadata": {k: v for k, v in metadata.items() if v},
-                "evidence": {k: v for k, v in evidence.items() if v},
-                "artifacts": [],
+                "description": description,
+                "cve_id": cve_id,
+                "metadata": metadata,
+                "evidence": evidence,
             }
         )
     return findings
@@ -545,15 +544,12 @@ def process_job(
     if extra_metadata:
         worker_metadata["job_metadata"] = extra_metadata
     if artifacts:
-        worker_metadata["artifacts"] = artifacts
+        worker_metadata["artifact_locations"] = artifacts
 
+    if job.metadata:
+        worker_metadata.update({k: v for k, v in job.metadata.items() if k != "scan_id"})
     payload = {
         "scan_id": scan_id,
-        "artifact_locations": artifact_locations,
-    }
-    worker_metadata.update(job.metadata)
-    payload = {
-        "scan_id": job.scan_id,
         "status": "completed",
         "findings": findings,
         "worker_metadata": worker_metadata,
