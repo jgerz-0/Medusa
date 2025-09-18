@@ -1,0 +1,41 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.9
+    hooks:
+      - id: ruff
+        name: ruff (python lint)
+      - id: ruff-format
+        name: ruff (python format)
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        name: mypy (typed api)
+        args: ["--config-file=pyproject.toml"]
+        files: ^(controller|workers/web/nuclei)/
+  - repo: local
+    hooks:
+      - id: pytest-controller
+        name: pytest (controller)
+        entry: poetry run pytest
+        language: system
+        pass_filenames: false
+        files: ^controller/
+      - id: pytest-nuclei-worker
+        name: pytest (nuclei worker)
+        entry: poetry run pytest
+        language: system
+        pass_filenames: false
+        files: ^workers/web/nuclei/
+      - id: frontend-lint
+        name: pnpm lint (frontend)
+        entry: pnpm lint
+        language: system
+        pass_filenames: false
+        files: ^frontend/
+      - id: frontend-typecheck
+        name: pnpm typecheck (frontend)
+        entry: pnpm run typecheck
+        language: system
+        pass_filenames: false
+        files: ^frontend/
