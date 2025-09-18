@@ -1,18 +1,24 @@
 [tool.poetry]
-name = "controller"
+name = "medusa-controller"
 version = "0.1.0"
-description = "Controller service orchestrating Medusa automated pentesting workflows."
-authors = ["Medusa Team <security@medusa.local>"]
+description = "Medusa controller service"
+authors = ["Medusa Security Engineering"]
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "3.11.*"
+python = "^3.11"
+sqlalchemy = "^2.0.29"
+alembic = "^1.13.1"
+psycopg = {version = "^3.1.18", extras = ["binary"]}
+pydantic = "^2.6"
+python-dotenv = "^1.0"
 fastapi = "^0.110.0"
 
 [tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-cov = "^4.1"
 mypy = "^1.8.0"
 ruff = "^0.1.9"
-pytest = "^8.0.0"
 
 [build-system]
 requires = ["poetry-core>=1.8.0"]
@@ -46,8 +52,13 @@ strict_optional = true
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 minversion = "8.0"
 addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    ]
 testpaths = [
   "tests",
-]
+    ]
+

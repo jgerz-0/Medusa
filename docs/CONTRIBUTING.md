@@ -1,11 +1,58 @@
-# Contributing to Medusa
+# Contributing Guidelines
 
 The Medusa platform orchestrates automated penetration testing, binary analysis, and CVE enrichment
 pipelines. This repository is the coordination point for the controller services, scanning workers,
 frontend portal, and supporting infrastructure-as-code. Follow the practices below to keep
 contributions deterministic, auditable, and secure.
 
-## Prerequisites
+## Getting Started
+1. Fork the repository and create a feature branch.
+2. Install dependencies using the instructions in [README.md](../README.md).
+3. Copy `.env.example` files to `.env` per service and populate local-only secrets.
+4. Apply database migrations and seed local scope data:
+   ```bash
+   cd controller
+   poetry run alembic upgrade head
+   poetry run python scripts/seed_targets.py
+   ```
+5. Run the full lint/test suite before opening a pull request.
+
+## Development Standards
+- **Python**
+  - Format with `black` and check typing with `mypy`.
+  - Prefer explicit imports and avoid wildcard patterns.
+  - Write docstrings for public functions describing validation and security considerations.
+- **Node/TypeScript**
+  - Use `pnpm lint` and `pnpm test`.
+  - Keep API clients typed and document any unsafe casting.
+- **Infrastructure-as-code**
+  - Validate Terraform via `terraform fmt` and `terraform validate`.
+  - Run `helm lint` and `kubeconform` for Kubernetes manifests.
+
+## Adding a New Scanner or Agent
+1. Create a new worker under `workers/<domain>/<tool>` with a `Dockerfile` and entrypoint.
+2. Define the JSON schema for the worker's output in `docs/interfaces/` and include sample payloads.
+3. Implement controller-side validation to ensure scope compliance before dispatching jobs.
+4. Update Docker Compose or Helm manifests if the scanner requires additional services.
+5. Document operational notes in `docs/SCANNERS.md` and link from the README.
+6. Add unit/integration tests plus fixtures demonstrating deterministic findings.
+
+## Database migrations
+- Generate schema changes with `poetry run alembic revision --autogenerate -m "describe_change"`.
+- Validate that models and migrations are in sync before pushing: `poetry run python scripts/check_migrations.py`.
+- Ensure seed data stays within authorized test scope; update `scripts/seed_targets.py` for new demo assets.
+
+## Pull Request Checklist
+- Tests and linters pass locally and in CI.
+- Documentation updated alongside code changes.
+- Security implications discussed in the PR description.
+- Include screenshots or CLI transcripts when modifying UX flows.
+
+## Communication
+- Use GitHub Issues for roadmap tasks aligned with the phase milestones.
+- Join the weekly architecture sync to review upcoming changes.
+- For urgent security topics, escalate to the security engineering channel.
+
 
 ### Python toolchain
 
