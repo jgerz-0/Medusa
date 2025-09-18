@@ -48,10 +48,12 @@ post-incident review of every permitted or denied operation.
 
 ## Operational Workflow
 
-1. Provision a credential record with roles using SQL migrations or an
+1. Apply the latest Alembic migrations (`poetry run alembic upgrade head`) so
+   the `principal_credentials` table is present.
+2. Provision a credential record with roles using SQL migrations or an
    automated secrets workflow.
-2. Distribute the API key (or JWT) to the service needing access.
-3. Monitor audit logs for `insufficient role` or `invalid API key` events to
+3. Distribute the API key (or JWT) to the service needing access.
+4. Monitor audit logs for `insufficient role` or `invalid API key` events to
    detect misconfigurations or malicious use.
 
 Treat API key material as sensitive. Rotate credentials by inserting a new
