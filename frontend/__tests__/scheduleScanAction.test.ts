@@ -60,11 +60,13 @@ describe('scheduleScanAction', () => {
     const now = new Date().toISOString();
     (createScan as jest.Mock).mockResolvedValue({
       id: 'scan-1',
+      target_id: '7',
       target: 'https://app.medusa.local',
-      profile: 'web-baseline',
+      scanner: 'nuclei',
       status: 'queued',
       created_at: now,
       updated_at: now,
+      initiated_by: 'analyst@example.com',
       findings_count: 0
     });
 
@@ -76,8 +78,11 @@ describe('scheduleScanAction', () => {
 
     expect(createScan).toHaveBeenCalledWith({
       target_id: '7',
-      profile: 'web-baseline',
-      requested_hosts: ['www.medusa.local', 'api.medusa.local']
+      scanner: 'nuclei',
+      parameters: {
+        profile: 'web-baseline',
+        requested_hosts: ['www.medusa.local', 'api.medusa.local']
+      }
     });
     expect(result.ok).toBe(true);
     expect(result.message).toContain('Scan queued');

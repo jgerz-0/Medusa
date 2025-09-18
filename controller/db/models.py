@@ -1,4 +1,5 @@
 """SQLAlchemy models for Medusa controller persistence."""
+
 from __future__ import annotations
 
 import datetime
@@ -11,6 +12,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Integer,
     ForeignKey,
     String,
     Text,
@@ -84,7 +86,9 @@ class Scan(TimestampMixin, Base):
     scanner: Mapped[str] = mapped_column(String(64), nullable=False)
     initiated_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
-    parameters: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    parameters: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     started_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -114,6 +118,9 @@ class Finding(TimestampMixin, Base):
     severity: Mapped[str] = mapped_column(String(32), nullable=False)
     cve_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
     evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 
@@ -138,7 +145,9 @@ class AuditLog(Base):
     actor: Mapped[str] = mapped_column(String(128), nullable=False)
     action: Mapped[str] = mapped_column(String(128), nullable=False)
     message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    evidence_snapshot: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    evidence_snapshot: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), default=func.now(), nullable=False
@@ -150,17 +159,27 @@ class AuditLog(Base):
 
 @event.listens_for(Finding, "before_insert", propagate=True)
 def _finding_set_hash(mapper, connection, target: Finding) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
     if not target.evidence_hash:
-        target.evidence_hash = _hash_evidence(target.evidence)
+        payload = {
+            "metadata": target.metadata_json,
+            "evidence": target.evidence,
+        }
+        target.evidence_hash = _hash_evidence(payload)
 
 
 @event.listens_for(Finding, "before_update", propagate=True)
 def _finding_prevent_evidence_mutation(mapper, connection, target: Finding) -> None:
     state = inspect(target)
+    metadata_attr = state.attrs.metadata_json
     evidence_attr = state.attrs.evidence
     hash_attr = state.attrs.evidence_hash
-    if evidence_attr.history.has_changes() or hash_attr.history.has_changes():
+    if (
+        metadata_attr.history.has_changes()
+        or evidence_attr.history.has_changes()
+        or hash_attr.history.has_changes()
+    ):
         raise ValueError("Finding evidence payloads are immutable once persisted.")
 
 
@@ -178,3 +197,22 @@ def _auditlog_prevent_evidence_mutation(mapper, connection, target: AuditLog) ->
     hash_attr = state.attrs.evidence_hash
     if evidence_attr.history.has_changes() or hash_attr.history.has_changes():
         raise ValueError("Audit log evidence is immutable by design.")
+
+
+class PrincipalCredential(Base):
+    """Authentication material for API keys and JWT principals."""
+
+    __tablename__ = "principal_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    auth_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    key_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), nullable=False
+    )
+    revoked_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

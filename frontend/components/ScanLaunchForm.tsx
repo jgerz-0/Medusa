@@ -154,7 +154,7 @@ export function ScanLaunchForm({ targets }: ScanLaunchFormProps) {
             <option value="">Select an authorized target</option>
             {targets.map((target) => (
               <option key={target.id} value={target.id} disabled={!target.is_authorized}>
-                {target.name} — {target.url}
+                {target.name} — {target.scope}
                 {!target.is_authorized ? ' (unauthorized)' : ''}
               </option>
             ))}

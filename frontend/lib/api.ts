@@ -164,17 +164,20 @@ export async function fetchTargets(): Promise<Target[]> {
 
 export interface CreateScanPayload {
   target_id: string;
-  profile: string;
-  requested_hosts?: string[];
+  scanner: string;
+  parameters?: Record<string, unknown>;
 }
 
 export async function createScan(payload: CreateScanPayload): Promise<Scan> {
-  const response = await request<ApiItemResponse<Scan>>('/scans', {
+  const response = await request<ApiItemResponse<Scan>>('/scan', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      ...payload,
+      parameters: payload.parameters ?? {}
+    })
   });
 
   return response.data;

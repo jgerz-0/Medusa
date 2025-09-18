@@ -1,4 +1,4 @@
-# Docker Setup (Work in Progress)
+# Docker Setup
 
 This guide covers the Phase 1 local Docker Compose environment. It stands up every service referenced in the repository README so engineers can exercise the controller API, persistence tier, and analyst dashboard without hand-configuring dependencies.
 
