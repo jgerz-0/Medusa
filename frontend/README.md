@@ -12,7 +12,8 @@ pnpm dev
 ```
 
 Configure credentials in `.env.local` (copy from `.env.example`). Requests to the controller include the API key and optional
-JWT automatically.
+JWT automatically. The default middleware credentials are `analyst` / `analyst`; override `DASHBOARD_BASIC_USER` and `DASHBOARD_BASIC_PASSWORD`
+for your environment.
 
 ## Testing
 

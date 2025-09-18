@@ -18,15 +18,20 @@ describe('ScansTable', () => {
     const scans: Scan[] = [
       {
         id: 'scan-001',
+        target_id: 'target-001',
         target: 'https://app-1.medusa.local',
+        scanner: 'nuclei',
         status: 'running',
+        initiated_by: 'analyst@example.com',
         created_at: '2023-12-31T23:50:00Z',
         updated_at: '2023-12-31T23:59:00Z',
         findings_count: 3
       },
       {
         id: 'scan-002',
+        target_id: 'target-002',
         target: 'https://api-1.medusa.local',
+        scanner: 'nuclei',
         status: 'completed',
         created_at: '2023-12-30T11:00:00Z',
         updated_at: '2023-12-30T11:30:00Z',

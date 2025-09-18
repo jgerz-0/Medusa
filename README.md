@@ -16,8 +16,9 @@ Phase 1 establishes the local development baseline that every later milestone bu
 | --- | --- | --- |
 | Repository skeleton | Controller, worker, docs, and infrastructure directories with lint/test scaffolding. | ✅ Complete – directories and tooling land in `controller/`, `workers/`, `frontend/`, and `infra/`. |
 | FastAPI controller | `/scan` endpoint validating scope and enqueueing jobs. | ✅ Complete – `controller/main.py` exposes authenticated CRUD + queue integration. |
-| Redis + nuclei worker | Local Docker Compose wiring to execute proof-of-concept web scans. | ⚠️ In progress – worker logic exists in `workers/web/nuclei/`, but Compose wiring and consistent queue/channel defaults remain TODO. |
-| Postgres schema | Minimum tables for scans, targets, findings, and audit log. | ⚠️ In progress – Alembic migrations exist, yet models and migrations diverge and need reconciliation before end-to-end runs. |
+| Docker Compose stack | Local environment booting Postgres, Redis, MinIO, Qdrant, the controller, nuclei worker, and frontend. | ✅ Complete – `infra/docker/docker-compose.yml` + `.env` defaults stand up the full stack with hot-reload mounts. |
+| Redis + nuclei worker | Local Docker Compose wiring to execute proof-of-concept web scans. | ✅ Complete – worker container subscribes to shared queue defaults and reports back through authenticated callbacks. |
+| Postgres schema | Minimum tables for scans, targets, findings, and audit log. | ✅ Complete – SQLAlchemy models now align with Alembic migrations (including finding metadata hashing and principal credentials). |
 | Minimal Next.js UI | Read-only list of scans and findings surfaced from Postgres. | ⏳ Pending – current Next.js app is a landing page without data bindings. |
 
 Progress on these items should be tracked through issues mapped to the roadmap phases in `ROADMAP.md`.
@@ -25,9 +26,9 @@ Progress on these items should be tracked through issues mapped to the roadmap p
 ## Quickstart (Local Development)
 
 ### Prerequisites
-- Docker 20+ (used for one-off containers until Compose manifests land)
-- Python 3.11 with `poetry`
-- Node.js 20 with `pnpm`
+- Docker Engine 20+ with Compose V2
+- Optional: Python 3.11 with `poetry` (running unit tests or scripts outside containers)
+- Optional: Node.js 20 with `pnpm` (frontend lint/unit tests outside containers)
 
 ### 1. Clone the repository
 ```bash
@@ -35,83 +36,55 @@ git clone https://github.com/<org>/medusa.git
 cd medusa
 ```
 
-### 2. Start backing services manually
-Compose files are not yet published. Stand up Postgres and Redis explicitly before booting any services:
-
+### 2. Boot the local stack with Docker Compose
 ```bash
-# Postgres (matches controller defaults)
-docker run --rm -d \
-  --name medusa-postgres \
-  -e POSTGRES_DB=medusa \
-  -e POSTGRES_USER=medusa \
-  -e POSTGRES_PASSWORD=medusa \
-  -p 5432:5432 \
-  postgres:15
+cd infra/docker
+cp .env.example .env  # adjust secrets/ports as needed
 
-# Redis queue broker
-docker run --rm -d \
-  --name medusa-redis \
-  -p 6379:6379 \
-  redis:7
+docker compose up --build -d
+docker compose ps
 ```
 
-Reference the interim service notes in [docs/DOCKER.md](docs/DOCKER.md#manual-service-bring-up) for environment hardening guidance.
+The compose file mounts `controller/`, `workers/web/nuclei/`, and `frontend/` into their respective containers so host edits trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Persistent data lives under `infra/docker/data/`.
 
-### 3. Run the FastAPI controller
+### 3. Run migrations and validate the pipeline
 ```bash
-cd controller
+# Apply Alembic migrations against the Postgres container
+docker compose exec controller poetry run alembic upgrade head
+
+# Optional: exercise the end-to-end nuclei flow
+./infra/docker/smoke-test.sh
+```
+
+The smoke test seeds demo targets, enqueues a nuclei job, and waits for the worker callback. Set `COMPOSE_BIN=podman compose` if you prefer an alternate runtime.
+
+### 4. Develop against the running services
+- Controller API: http://localhost:8000 (OpenAPI at `/docs`)
+- Analyst dashboard: http://localhost:3000 (HTTP basic auth using `analyst` / `analyst` unless you override `DASHBOARD_BASIC_*` in `.env`)
+- MinIO console: http://localhost:9001
+- Qdrant HTTP API: http://localhost:6333
+
+Helpful commands:
+
+```bash
+# Tail controller logs with audit events
+docker compose logs -f controller
+
+# Inspect queued nuclei jobs
+docker compose exec redis redis-cli llen queues:nuclei:jobs
+
+# Tear everything down and wipe volumes
+docker compose down -v
+```
+
+### 5. Run controller tests locally (optional)
+```bash
 poetry install
-
-# Required auth configuration
-export MEDUSA_JWT_SECRET="dev-local-secret"
-export MEDUSA_API_KEYS='["local-dev-key"]'
-
-# Apply database schema (current migration set is still being reconciled with the models)
-poetry run alembic upgrade head
-
-# Launch the API
-poetry run uvicorn main:app --reload --host 0.0.0.0 --port 8000
+PYTHONPATH=. poetry run pytest controller/tests
+PYTHONPATH=. poetry run python controller/scripts/check_migrations.py
 ```
 
-With the API online you can exercise endpoints via the static API key, e.g.:
-
-```bash
-curl -X POST http://localhost:8000/targets \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: local-dev-key" \
-  -d '{
-    "name": "Example", 
-    "url": "https://example.com", 
-    "scope": {"allowed_hosts": ["example.com"]}
-  }'
-```
-
-### 4. Start the nuclei worker (optional skeleton)
-The worker can be exercised locally, but Redis channel names must be aligned manually until shared configuration lands:
-
-```bash
-cd ../workers/web/nuclei
-poetry install
-export REDIS_URL="redis://localhost:6379/0"
-export NUCLEI_QUEUE_KEY="queues:nuclei:jobs"  # matches controller default
-poetry run python worker.py
-```
-
-### 5. Frontend operations console
-The Next.js dashboard now pulls live data from the controller and can orchestrate scoped scans. To run it locally:
-
-```bash
-cd frontend
-pnpm install
-
-# Point the UI at the locally running controller and provide credentials.
-export CONTROLLER_API_BASE_URL="http://127.0.0.1:8000"
-export CONTROLLER_API_KEY="local-dev-key"
-
-pnpm dev
-```
-
-The `/scans` route now exposes a launch form that submits through a server action so controller secrets never reach the browser. Analysts can queue nuclei jobs directly from the console using the documented presets below.
+These commands run entirely on the host using SQLite so you can iterate without touching the Compose stack. The migration check ensures SQLAlchemy models stay aligned with Alembic revisions.
 
 ### Analyst workflow: launching scans from the console
 
@@ -139,7 +112,7 @@ poetry run alembic revision --autogenerate -m "add_new_columns"
 poetry run alembic upgrade head
 
 # verify that the database matches the models (used in CI)
-poetry run python scripts/check_migrations.py
+PYTHONPATH=. poetry run python scripts/check_migrations.py
 ```
 
 ## Project Layout

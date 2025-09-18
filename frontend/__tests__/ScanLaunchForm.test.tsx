@@ -15,8 +15,7 @@ describe('ScanLaunchForm', () => {
     {
       id: '1',
       name: 'App Cluster',
-      url: 'https://app.medusa.local',
-      scope: { allowed_hosts: ['app.medusa.local'] },
+      scope: 'app.medusa.local',
       is_authorized: true,
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z'
@@ -24,8 +23,7 @@ describe('ScanLaunchForm', () => {
     {
       id: '2',
       name: 'Legacy Portal',
-      url: 'https://portal.medusa.local',
-      scope: { allowed_hosts: ['portal.medusa.local'] },
+      scope: 'portal.medusa.local',
       is_authorized: false,
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z'
@@ -52,7 +50,7 @@ describe('ScanLaunchForm', () => {
     const user = userEvent.setup();
     mockedScheduleScanAction.mockResolvedValue({
       ok: true,
-      message: 'Scan queued for https://app.medusa.local'
+      message: 'Scan queued for app.medusa.local'
     });
 
     render(<ScanLaunchForm targets={targets} />);
@@ -67,7 +65,7 @@ describe('ScanLaunchForm', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText(/Scan queued for https:\/\/app.medusa.local/)).toBeVisible();
+      expect(screen.getByText(/Scan queued for app\.medusa\.local/)).toBeVisible();
     });
   });
 

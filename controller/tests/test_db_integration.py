@@ -1,8 +1,10 @@
 """Integration tests exercising ORM behavior using SQLite."""
+
 from __future__ import annotations
 
 import hashlib
 import json
+from typing import Optional
 
 import pytest
 from sqlalchemy import create_engine
@@ -31,8 +33,17 @@ def session() -> Session:
         engine.dispose()
 
 
-def _expected_hash(payload: dict) -> str:
+def _expected_finding_hash(evidence: dict, metadata: Optional[dict] = None) -> str:
+    payload = {
+        "metadata": metadata or {},
+        "evidence": evidence,
+    }
     normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _expected_audit_hash(snapshot: dict) -> str:
+    normalized = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -66,7 +77,7 @@ def test_target_scan_finding_crud(session: Session) -> None:
     assert reloaded_target is not None
     assert reloaded_target.scans[0].id == scan.id
     assert reloaded_target.scans[0].findings[0].id == finding.id
-    assert reloaded_target.scans[0].findings[0].evidence_hash == _expected_hash(
+    assert reloaded_target.scans[0].findings[0].evidence_hash == _expected_finding_hash(
         {"request": "GET /?q=<script>"}
     )
 
@@ -76,7 +87,9 @@ def test_finding_evidence_is_immutable(session: Session) -> None:
     session.add(target)
     session.flush()
 
-    scan = Scan(target_id=target.id, scanner="zap", parameters={}, initiated_by="controller")
+    scan = Scan(
+        target_id=target.id, scanner="zap", parameters={}, initiated_by="controller"
+    )
     session.add(scan)
     session.flush()
 
@@ -93,10 +106,15 @@ def test_finding_evidence_is_immutable(session: Session) -> None:
     session.add(finding)
     session.commit()
 
-    assert finding.evidence_hash == _expected_hash(evidence_payload)
+    assert finding.evidence_hash == _expected_finding_hash(evidence_payload)
 
     with pytest.raises(ValueError):
         finding.evidence = {"response_code": 200}
+        session.flush()
+    session.rollback()
+
+    with pytest.raises(ValueError):
+        finding.metadata_json = {"response_code": 200}
         session.flush()
     session.rollback()
 
@@ -127,7 +145,7 @@ def test_audit_log_evidence_is_immutable(session: Session) -> None:
     session.add(log)
     session.commit()
 
-    assert log.evidence_hash == _expected_hash({"status": "queued"})
+    assert log.evidence_hash == _expected_audit_hash({"status": "queued"})
 
     with pytest.raises(ValueError):
         log.evidence_snapshot = {"status": "updated"}

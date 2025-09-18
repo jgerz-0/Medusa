@@ -1,4 +1,4 @@
-# Docker Setup (Work in Progress)
+# Docker Setup
 
 This guide covers the Phase 1 local Docker Compose environment. It stands up every service referenced in the repository README so engineers can exercise the controller API, persistence tier, and analyst dashboard without hand-configuring dependencies.
 
@@ -56,6 +56,10 @@ The script performs the following actions:
 A successful run prints `Worker callback confirmed` and exits `0`. If the callback fails (for example, the worker cannot reach the controller or the callback token is misconfigured) the script exits non-zero with context so you can inspect `docker compose logs nuclei-worker controller`.
 
 The MinIO console is available at `http://localhost:9001` with credentials from `.env`. Qdrant's HTTP API listens on `http://localhost:6333` for enrichment debugging.
+
+### Dashboard login
+
+When you visit `http://localhost:3000` the browser prompts for HTTP basic authentication. The Compose defaults set `DASHBOARD_BASIC_USER=analyst` and `DASHBOARD_BASIC_PASSWORD=analyst`; update or rotate them in `.env` before exposing the stack anywhere beyond isolated development.
 
 ## Troubleshooting
 - `docker compose logs -f <service>` – inspect runtime logs (controller logs include audit events).
