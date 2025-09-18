@@ -72,7 +72,6 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_TARGETS_WRITE,
 ]
 
-
 class Settings(BaseSettings):
     """Runtime configuration for the controller service."""
 
@@ -154,7 +153,6 @@ class TargetResponse(BaseModel):
 
 class TargetCollectionResponse(BaseModel):
     data: List[TargetResponse]
-
 
 class ScanRequest(BaseModel):
     target_id: str
@@ -680,7 +678,6 @@ def create_target(
 
     return TargetResponse.model_validate(target, from_attributes=True)
 
-
 @app.get("/targets", response_model=TargetCollectionResponse)
 def list_targets(
     principal: Principal = Depends(authenticate),
@@ -757,7 +754,6 @@ def enqueue_scan(
 
     return serialize_scan(scan)
 
-
 app.add_api_route(
     "/scans",
     enqueue_scan,
@@ -765,7 +761,6 @@ app.add_api_route(
     response_model=ScanResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-
 
 @app.get("/scans", response_model=ScanCollectionResponse)
 def list_scans(
