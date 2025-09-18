@@ -3,6 +3,7 @@ from unittest import mock
 
 import pytest
 
+from controller.main import CallbackFinding
 from workers.web.nuclei import worker
 
 
@@ -66,12 +67,46 @@ def test_normalize_findings(sample_job):
     assert findings[0]["severity"] == "high"
     assert findings[0]["description"] == "demo"
     assert findings[0]["evidence"]["matched_at"] == "https://example.com/login"
+    assert set(findings[0].keys()) == {
+        "title",
+        "severity",
+        "description",
+        "cve_id",
+        "metadata",
+        "evidence",
+    }
+
     assert findings[0]["artifacts"] == []
 
     assert findings[1]["title"] == "Misconfig"
     assert findings[1]["severity"] == "medium"
     assert "finding" in findings[1]["description"].lower()
     assert findings[1]["evidence"]["matched_at"] == "https://example.com"
+    assert set(findings[1].keys()) == {
+        "title",
+        "severity",
+        "description",
+        "cve_id",
+        "metadata",
+        "evidence",
+    }
+
+    # Ensure the payload satisfies the controller schema expectations.
+    for finding in findings:
+        CallbackFinding(**finding)
+
+
+def test_normalize_findings_with_unknown_severity(sample_job):
+    raw_records = [
+        {
+            "templateID": "tmpl-1",
+            "info": {"name": "Unknown Severity", "severity": "weird"},
+        }
+    ]
+
+    findings = worker.normalize_findings(raw_records, sample_job)
+    assert findings[0]["severity"] == "info"
+    CallbackFinding(**findings[0])
     assert findings[1]["artifacts"] == []
 
 
