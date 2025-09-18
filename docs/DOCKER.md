@@ -1,51 +1,66 @@
 # Docker Setup (Work in Progress)
 
-Phase 1 does not yet ship Docker Compose manifests. This document captures the interim container commands so engineers can run
-individual services without waiting for the declarative stack.
+This guide covers the Phase 1 local Docker Compose environment. It stands up every service referenced in the repository README so engineers can exercise the controller API, persistence tier, and analyst dashboard without hand-configuring dependencies.
 
 ## Requirements
 - Docker Engine 20+
-- 8 GB RAM available for containers (leave headroom for scanners)
+- Docker Compose V2
+- 8 GB RAM available for containers
+- 20 GB free disk space for container images, Postgres, MinIO, and Qdrant data directories
 
-## Current Service Inventory
-- `postgres`: relational datastore for scans and findings
-- `redis`: job queue broker used by controller/workers
-- Future additions (`minio`, `qdrant`, `frontend`, etc.) will be added alongside Compose assets.
+## Compose Manifests
+- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, and the Next.js frontend.
+- `infra/docker/controller.Dockerfile` – Poetry-based image for the controller with Uvicorn hot reload enabled.
+- `infra/docker/frontend.Dockerfile` – Node 20 + pnpm image for the dashboard.
+- `infra/docker/.env.example` – sane defaults for development credentials and exposed ports.
 
-## Manual Service Bring-up
+All commands below assume you run them from the repository root unless otherwise noted.
 
-### Postgres
+## Bootstrap
 ```bash
-docker run --rm -d \
-  --name medusa-postgres \
-  -e POSTGRES_DB=medusa \
-  -e POSTGRES_USER=medusa \
-  -e POSTGRES_PASSWORD=medusa \
-  -p 5432:5432 \
-  postgres:15
+cd infra/docker
+
+# copy defaults and adjust secrets as needed
+cp .env.example .env
+
+# build all images and start the stack in the background
+docker compose up --build -d
+
+# verify each container reports healthy
+docker compose ps
 ```
 
-- Matches the controller default URL: `postgresql+psycopg2://medusa:medusa@localhost:5432/medusa`.
-- Use `docker logs medusa-postgres` to confirm readiness before running migrations.
+The compose file automatically mounts code from `controller/` and `frontend/` into the containers so edits on the host trigger FastAPI reloads and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts.
 
-### Redis
+## Smoke Test
+Run the following once the services report `healthy`:
+
 ```bash
-docker run --rm -d \
-  --name medusa-redis \
-  -p 6379:6379 \
-  redis:7
+# run database migrations before hitting the API
+docker compose exec controller poetry run alembic upgrade head
+
+# seed sample targets for the dashboard
+docker compose exec controller poetry run python scripts/seed_targets.py
+
+# confirm controller API responds
+curl http://localhost:8000/docs
+
+# confirm the dashboard renders server-side data
+curl -I http://localhost:3000/scans
 ```
 
-- Align worker queue keys with the controller default (`queues:nuclei:jobs`) until centralized config is delivered.
+The MinIO console is available at `http://localhost:9001` with credentials from `.env`. Qdrant's HTTP API listens on `http://localhost:6333` for enrichment debugging.
 
-### Teardown
-```bash
-docker stop medusa-postgres medusa-redis
-```
+## Troubleshooting
+- `docker compose logs -f <service>` – inspect runtime logs (controller logs include audit events).
+- `docker compose exec postgres psql -U $MEDUSA_POSTGRES_USER -d $MEDUSA_POSTGRES_DB -c "\dt"` – verify tables after migrations.
+- `docker compose exec frontend pnpm install` – repopulate `node_modules` if the dashboard fails to start after dependency changes.
+- `docker compose down -v` – tear down the stack and wipe all persistent volumes for a clean slate.
 
-Compose files, `.env` templates, and data volumes under `infra/docker/` remain TODO. Track progress in the Phase 1 issues.
+If Compose exits early, validate the manifest with `docker compose config` and ensure another process is not already binding ports `5432`, `6379`, `9000-9001`, `6333-6334`, `8000`, or `3000`.
 
 ## Security Notes
-- Restrict Docker to a trusted network segment; scanners should only access explicitly authorized targets.
-- Rotate the default database password before exposing any services outside of localhost.
-- Keep Docker Engine patched to the latest stable release prior to running external scans.
+- The compose network is isolated to localhost, but scanners must still respect the authorized scope enforced by the controller.
+- Credentials in `.env` are for local development only; rotate them frequently and use a secrets manager in staging/production.
+- Keep Docker Desktop/Engine patched to the latest stable release before targeting external assets.
+
