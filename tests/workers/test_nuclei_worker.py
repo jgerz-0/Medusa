@@ -17,10 +17,29 @@ def sample_job():
             "templates": ["cves/2023/CVE-2023-9999.yaml"],
             "callback_url": "https://controller.local/callback",
             "tags": ["web"],
-            "metadata": {"scan_id": "scan-777"},
+            "metadata": {"scope": "production"},
         }
     )
     return worker.NucleiJob.from_json(payload)
+
+
+def test_nuclei_job_from_json_normalizes_scan_id(sample_job):
+    assert sample_job.scan_id == "42"
+    assert isinstance(sample_job.scan_id, str)
+
+
+def test_nuclei_job_from_json_supports_metadata_scan_id():
+    payload = json.dumps(
+        {
+            "job_id": "job-456",
+            "target": "https://service.example.com",
+            "templates": ["http/default-logins"],
+            "callback_url": "https://controller.local/callback",
+            "metadata": {"scan_id": "scan-777"},
+        }
+    )
+    job = worker.NucleiJob.from_json(payload)
+    assert job.scan_id == "scan-777"
 
 
 def test_normalize_findings(sample_job):
@@ -57,6 +76,8 @@ def test_normalize_findings(sample_job):
         "evidence",
     }
 
+    assert findings[0]["artifacts"] == []
+
     assert findings[1]["title"] == "Misconfig"
     assert findings[1]["severity"] == "medium"
     assert "finding" in findings[1]["description"].lower()
@@ -86,6 +107,7 @@ def test_normalize_findings_with_unknown_severity(sample_job):
     findings = worker.normalize_findings(raw_records, sample_job)
     assert findings[0]["severity"] == "info"
     CallbackFinding(**findings[0])
+    assert findings[1]["artifacts"] == []
 
 
 def test_process_job_posts_callback(sample_job):
@@ -141,6 +163,32 @@ def test_process_job_posts_callback(sample_job):
 
     # stdout upload attempted because stdout is populated
     mock_s3.put_object.assert_called()
+
+
+def test_post_callback_includes_token(sample_job):
+    config = worker.WorkerConfig()
+    config.callback_token = "shared-secret"
+
+    mock_session = mock.create_autospec(worker.Session, instance=True)
+    mock_response = mock.Mock()
+    mock_response.raise_for_status.return_value = None
+    mock_session.post.return_value = mock_response
+
+    payload = {
+        "scan_id": sample_job.scan_id,
+        "status": "completed",
+        "findings": [],
+        "worker_metadata": {},
+        "error": None,
+        "completed_at": "2023-01-01T00:00:00+00:00",
+    }
+
+    worker.post_callback(sample_job, config, payload, session=mock_session)
+
+    assert mock_session.post.called
+    _, kwargs = mock_session.post.call_args
+    headers = kwargs["headers"]
+    assert headers["X-Callback-Token"] == "shared-secret"
 
 
 def test_notify_failure_emits_error(sample_job):
