@@ -11,28 +11,26 @@ import json
 import logging
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import AnyHttpUrl, BaseModel, BaseSettings, Field, root_validator, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+try:  # pragma: no cover - compatibility shim for environments without pydantic-settings
+    from pydantic_settings import BaseSettings
+except ModuleNotFoundError:  # pragma: no cover
+    class BaseSettings(BaseModel):  # type: ignore[override]
+        """Minimal stand-in used when pydantic-settings is unavailable."""
+
+        class Config:
+            arbitrary_types_allowed = True
 from redis import Redis
-from sqlalchemy import (
-    JSON,
-    Column,
-    DateTime,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    create_engine,
-    event,
-    inspect,
-)
-from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, declarative_base, relationship, selectinload, sessionmaker
+from sqlalchemy.orm import Session, selectinload
+
+from controller.db.models import AuditLog, Finding, Scan, Target
+from controller.db.session import SessionLocal
 
 
 LOGGER = logging.getLogger("medusa.controller")
@@ -68,156 +66,12 @@ def get_settings() -> Settings:
     """Return cached settings instance."""
 
     return Settings()
-
-
-Base = declarative_base()
-
-
-class Target(Base):
-    __tablename__ = "targets"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(255), nullable=False)
-    url = Column(String(1024), nullable=False, unique=True)
-    scope = Column(JSON, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-
-    scans = relationship("Scan", back_populates="target", cascade="all,delete")
-
-
-class Scan(Base):
-    __tablename__ = "scans"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    target_id = Column(Integer, ForeignKey("targets.id", ondelete="CASCADE"), nullable=False)
-    profile = Column(String(128), nullable=False)
-    status = Column(String(32), nullable=False, default="queued")
-    requested_hosts = Column(JSON, nullable=False)
-    initiated_by = Column(String(255), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-    completed_at = Column(DateTime(timezone=True), nullable=True)
-    worker_metadata = Column(JSON, nullable=False, default=dict)
-    worker_error = Column(Text, nullable=True)
-
-    target = relationship("Target", back_populates="scans")
-    findings = relationship("Finding", back_populates="scan", cascade="all,delete")
-
-
-class Finding(Base):
-    __tablename__ = "findings"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    scan_id = Column(Integer, ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
-    severity = Column(String(32), nullable=False)
-    title = Column(String(255), nullable=False)
-    description = Column(Text, nullable=False)
-    cve_id = Column(String(64), nullable=True)
-    metadata_json = Column(JSON, nullable=False, default=dict)
-    evidence = Column(JSON, nullable=False, default=dict)
-    evidence_hash = Column(String(64), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-
-    scan = relationship("Scan", back_populates="findings")
-    artifacts = relationship("FindingArtifact", back_populates="finding", cascade="all,delete")
-
-
-class AuditEvent(Base):
-    __tablename__ = "audit_events"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    actor = Column(String(255), nullable=False)
-    action = Column(String(128), nullable=False)
-    resource_type = Column(String(64), nullable=False)
-    resource_id = Column(String(64), nullable=True)
-    metadata_json = Column(JSON, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-
-
-class FindingArtifact(Base):
-    __tablename__ = "finding_artifacts"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    finding_id = Column(Integer, ForeignKey("findings.id", ondelete="CASCADE"), nullable=False)
-    name = Column(String(255), nullable=False)
-    artifact_type = Column(String(64), nullable=False)
-    content_type = Column(String(255), nullable=True)
-    location = Column(String(1024), nullable=True)
-    data = Column(Text, nullable=False)
-    data_hash = Column(String(64), nullable=False)
-    metadata_json = Column(JSON, nullable=False, default=dict)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-
-    finding = relationship("Finding", back_populates="artifacts")
-
-
 def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Ensure payloads used for hashing are deterministic dictionaries."""
 
     if payload is None:
         return {}
     return payload
-
-
-def _hash_payload(payload: Dict[str, Any]) -> str:
-    """Generate a SHA-256 hash from a JSON-serialised payload."""
-
-    normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-@event.listens_for(Finding, "before_insert", propagate=True)
-def _finding_set_hash(mapper, connection, target: Finding) -> None:  # pragma: no cover - SQLAlchemy hook
-    metadata_payload = _normalize_payload(target.metadata_json)
-    evidence_payload = _normalize_payload(target.evidence)
-    target.metadata_json = metadata_payload
-    target.evidence = evidence_payload
-    target.evidence_hash = _hash_payload({"metadata": metadata_payload, "evidence": evidence_payload})
-
-
-@event.listens_for(Finding, "before_update", propagate=True)
-def _finding_prevent_mutation(mapper, connection, target: Finding) -> None:  # pragma: no cover - SQLAlchemy hook
-    state = inspect(target)
-    if (
-        state.attrs.metadata_json.history.has_changes()
-        or state.attrs.evidence.history.has_changes()
-        or state.attrs.evidence_hash.history.has_changes()
-    ):
-        raise ValueError("Finding evidence payloads are immutable once persisted.")
-
-
-@event.listens_for(FindingArtifact, "before_insert", propagate=True)
-def _artifact_set_hash(mapper, connection, target: FindingArtifact) -> None:  # pragma: no cover - SQLAlchemy hook
-    target.metadata_json = _normalize_payload(target.metadata_json)
-    if not target.data:
-        raise ValueError("Artifact data cannot be empty.")
-    target.data_hash = hashlib.sha256(target.data.encode("utf-8")).hexdigest()
-
-
-@event.listens_for(FindingArtifact, "before_update", propagate=True)
-def _artifact_prevent_mutation(mapper, connection, target: FindingArtifact) -> None:  # pragma: no cover - SQLAlchemy hook
-    state = inspect(target)
-    if (
-        state.attrs.data.history.has_changes()
-        or state.attrs.data_hash.history.has_changes()
-        or state.attrs.metadata_json.history.has_changes()
-    ):
-        raise ValueError("Finding artifacts are immutable once persisted.")
-
-
-class ScopeDefinition(BaseModel):
-    """Approved scope for a target or scan request."""
-
-    allowed_hosts: List[str] = Field(..., description="List of fully qualified hostnames allowed for scanning.")
-
-    @root_validator
-    def validate_hosts(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        hosts = values.get("allowed_hosts", [])
-        if not hosts:
-            raise ValueError("At least one allowed host must be provided.")
-        for host in hosts:
-            if not host or " " in host:
-                raise ValueError("Invalid host entry in allowed_hosts.")
-        return values
 
 
 class TargetCreateRequest(BaseModel):
@@ -265,71 +119,48 @@ class ScanResponse(BaseModel):
 
     id: str
     target_id: str
+    target: str
     scanner: str
     status: str
-    parameters: Dict[str, Any]
     initiated_by: Optional[str]
+    created_at: datetime
+    updated_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
-    created_at: datetime
-    updated_at: datetime
-    target: str
-    profile: str
-    requested_hosts: List[str]
-    created_at: datetime
-    updated_at: datetime
     findings_count: int
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ScanCollectionResponse(BaseModel):
     data: List[ScanResponse]
 
 
-class FindingArtifactResponse(BaseModel):
-    id: int
-    name: str
-    artifact_type: str
-    content_type: Optional[str]
-    location: Optional[str]
-    metadata_json: Dict[str, Any]
-    created_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
 class FindingResponse(BaseModel):
-  
+    """Serialized finding representation returned to clients."""
+
     id: str
     scan_id: str
-    severity: str
     title: str
-    description: str
+    severity: str
     cve_id: Optional[str]
-    model_config = ConfigDict(from_attributes=True)
-    metadata_json: Dict[str, Any]
-    evidence: Dict[str, Any]
-    evidence_hash: str
-    artifacts: List[FindingArtifactResponse] = Field(default_factory=list)
-    created_at: datetime
-    status: str
-    template_id: str
+    description: str
     detected_at: datetime
     updated_at: datetime
-    evidence: Optional[str] = None
-    remediation: Optional[str] = None
+    status: str
+    template_id: str
+    evidence: Optional[str]
+    remediation: Optional[str]
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FindingCollectionResponse(BaseModel):
     data: List[FindingResponse]
 
 
-class CallbackArtifact(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
-    artifact_type: str = Field(..., min_length=1, max_length=64)
-    content_type: Optional[str] = Field(None, max_length=255)
-    location: Optional[str] = Field(None, max_length=1024)
-    data: str = Field(..., min_length=1)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+class FindingItemResponse(BaseModel):
+    data: FindingResponse
 
 
 class CallbackFinding(BaseModel):
@@ -339,9 +170,9 @@ class CallbackFinding(BaseModel):
     cve_id: Optional[str] = Field(None, max_length=64)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     evidence: Dict[str, Any] = Field(default_factory=dict)
-    artifacts: List[CallbackArtifact] = Field(default_factory=list)
 
-    @validator("severity")
+    @field_validator("severity")
+    @classmethod
     def validate_severity(cls, value: str) -> str:
         allowed = {"critical", "high", "medium", "low", "info"}
         lowered = value.lower()
@@ -351,14 +182,15 @@ class CallbackFinding(BaseModel):
 
 
 class NucleiCallbackRequest(BaseModel):
-    scan_id: int
+    scan_id: str
     status: str = Field(..., min_length=1, max_length=32)
     findings: List[CallbackFinding] = Field(default_factory=list)
-    worker_metadata: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = Field(default=None)
+    started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
-    @validator("status")
+    @field_validator("status")
+    @classmethod
     def validate_status(cls, value: str) -> str:
         allowed = {"completed", "failed"}
         lowered = value.lower()
@@ -380,19 +212,6 @@ class Principal(BaseModel):
         return any(role in role_set for role in roles)
 
 
-class PrincipalCredential(Base):
-    __tablename__ = "principal_credentials"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    subject = Column(String(255), nullable=False, unique=True)
-    auth_method = Column(String(32), nullable=False)
-    key_hash = Column(String(128), nullable=True)
-    roles = Column(JSON, nullable=False, default=list)
-    description = Column(String(255), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-    revoked_at = Column(DateTime(timezone=True), nullable=True)
-
-
 def _hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
@@ -405,29 +224,6 @@ def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Insufficient role for this operation",
         )
-
-
-@lru_cache()
-def _engine_from_url(url: str) -> Engine:
-    """Cache database engines per URL."""
-
-    return create_engine(url, future=True, pool_pre_ping=True)
-
-
-@lru_cache()
-def _session_factory_from_url(url: str) -> sessionmaker:
-    """Cache session factories bound to the cached engines."""
-
-    engine = _engine_from_url(url)
-    return sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
-
-
-def get_engine(settings: Settings) -> Engine:
-    return _engine_from_url(settings.database_url)
-
-
-def get_session_factory(settings: Settings) -> sessionmaker:
-    return _session_factory_from_url(settings.database_url)
 
 
 class QueueClient:
@@ -454,19 +250,6 @@ class RedisQueueClient(QueueClient):
         serialized = json.dumps(payload, sort_keys=True)
         # rpush is used to append jobs to the right side of the list, providing FIFO ordering.
         self.client.rpush(channel, serialized)
-
-
-def get_db_session(settings: Settings = Depends(get_settings)):
-    """Yield a SQLAlchemy session bound to the configured engine."""
-
-    session_factory = get_session_factory(settings)
-    session = session_factory()
-    try:
-        yield session
-    finally:
-        session.close()
-
-
 security_scheme = HTTPBearer(auto_error=False)
 
 
@@ -474,36 +257,20 @@ def authenticate(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     settings: Settings = Depends(get_settings),
-    db: Session = Depends(get_db_session),
 ) -> Principal:
     """Authenticate caller via JWT bearer token or API key headers."""
 
-    api_key = request.headers.get("X-API-Key")
-    if api_key:
-        key_hash = _hash_secret(api_key)
-        record = (
-            db.query(PrincipalCredential)
-            .filter(
-                PrincipalCredential.auth_method == "api_key",
-                PrincipalCredential.key_hash == key_hash,
-                PrincipalCredential.revoked_at.is_(None),
-            )
-            .first()
+    api_key_header = request.headers.get("X-API-Key")
+    bearer_token = credentials.credentials if credentials else None
+
+    candidate_api_key = api_key_header or bearer_token
+    if candidate_api_key and candidate_api_key in settings.api_keys:
+        subject_hash = _hash_secret(candidate_api_key)
+        return Principal(
+            subject=f"apikey:{subject_hash}",
+            auth_method="api_key",
+            roles=["admin", "scan:enqueue", "targets:write", "findings:read"],
         )
-        if record:
-            return Principal(
-                subject=record.subject,
-                auth_method="api_key",
-                roles=list(record.roles or []),
-            )
-        if api_key in settings.api_keys:
-            LOGGER.warning("Using legacy static API key configuration", extra={"subject": api_key})
-            return Principal(
-                subject=f"apikey:{api_key}",
-                auth_method="api_key",
-                roles=["legacy"],
-            )
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
@@ -519,17 +286,15 @@ def authenticate(
     if not subject:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
 
-    record = (
-        db.query(PrincipalCredential)
-        .filter(
-            PrincipalCredential.auth_method == "jwt",
-            PrincipalCredential.subject == subject,
-            PrincipalCredential.revoked_at.is_(None),
-        )
-        .first()
-    )
-    if record is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subject not authorized")
+    roles_payload = payload.get("roles", [])
+    if isinstance(roles_payload, str):
+        roles = [roles_payload]
+    elif isinstance(roles_payload, Iterable):
+        roles = [str(role) for role in roles_payload]
+    else:
+        roles = [str(roles_payload)] if roles_payload else []
+
+    return Principal(subject=str(subject), auth_method="jwt", roles=roles)
 
 
 def authenticate_worker(
@@ -545,10 +310,14 @@ def authenticate_worker(
     return Principal(subject="worker:nuclei", auth_method="shared_secret")
 
 
-def get_db_session(settings: Settings = Depends(get_settings)):
+def get_db_session() -> Iterator[Session]:
     """Yield a SQLAlchemy session bound to the configured engine."""
 
-    return Principal(subject=subject, auth_method="jwt", roles=roles)
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 def get_queue_client(settings: Settings = Depends(get_settings)) -> QueueClient:
@@ -566,7 +335,7 @@ def record_audit_event(
     scan_id: Optional[str] = None,
     finding_id: Optional[str] = None,
     message: Optional[str] = None,
-) -> None:
+) -> AuditLog:
     """Persist and emit audit information about sensitive operations."""
 
     snapshot: Dict[str, Any] = {
@@ -586,6 +355,7 @@ def record_audit_event(
     session.add(event)
     try:
         session.commit()
+        session.refresh(event)
     except SQLAlchemyError:
         session.rollback()
         LOGGER.exception("Failed to persist audit event", extra={"action": action})
@@ -602,6 +372,8 @@ def record_audit_event(
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
         },
     )
+
+    return event
 
 
 app = FastAPI(title="Medusa Controller", version="0.1.0")
@@ -650,7 +422,7 @@ def enqueue_scan(
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
     enforce_roles(principal, ["scan:enqueue"])
-    target = db.query(Target).get(request.target_id)
+    target = db.get(Target, request.target_id)
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
 
@@ -695,25 +467,33 @@ def enqueue_scan(
 
 @app.get("/scans", response_model=ScanCollectionResponse)
 def list_scans(
-    target_id: Optional[int] = None,
+    target_id: Optional[str] = None,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> ScanCollectionResponse:
+    """Return the most recent scans for the authenticated principal."""
+
     query = db.query(Scan).options(selectinload(Scan.target), selectinload(Scan.findings))
     if target_id is not None:
         query = query.filter(Scan.target_id == target_id)
 
     scans = query.order_by(Scan.created_at.desc()).all()
+    return ScanCollectionResponse(data=[serialize_scan(scan) for scan in scans])
 
-@app.post("/internal/nuclei/callback", status_code=status.HTTP_204_NO_CONTENT)
+
+@app.post(
+    "/internal/nuclei/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
 def nuclei_callback(
     payload: NucleiCallbackRequest,
     principal: Principal = Depends(authenticate_worker),
     db: Session = Depends(get_db_session),
-) -> None:
+) -> Response:
     """Persist nuclei worker results while enforcing evidence immutability."""
 
-    scan = db.query(Scan).get(payload.scan_id)
+    scan = db.get(Scan, payload.scan_id)
     if scan is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found")
 
@@ -723,9 +503,12 @@ def nuclei_callback(
     if scan.findings:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Scan findings already recorded")
 
+    if payload.started_at and scan.started_at is None:
+        scan.started_at = payload.started_at
+    elif scan.started_at is None:
+        scan.started_at = datetime.now(tz=timezone.utc)
+
     scan.status = payload.status
-    scan.worker_metadata = _normalize_payload(payload.worker_metadata)
-    scan.worker_error = payload.error
     if payload.status in {"completed", "failed"}:
         scan.completed_at = payload.completed_at or datetime.now(tz=timezone.utc)
 
@@ -733,36 +516,27 @@ def nuclei_callback(
     for finding_payload in payload.findings:
         finding = Finding(
             scan_id=scan.id,
-            severity=finding_payload.severity,
             title=finding_payload.title,
-            description=finding_payload.description,
+            severity=finding_payload.severity,
             cve_id=finding_payload.cve_id,
-            metadata_json=_normalize_payload(finding_payload.metadata),
+            description=finding_payload.description,
             evidence=_normalize_payload(finding_payload.evidence),
+            evidence_hash="",
         )
         db.add(finding)
-        db.flush()  # ensure primary key is available for artifacts
-
-        for artifact_payload in finding_payload.artifacts:
-            artifact = FindingArtifact(
-                finding_id=finding.id,
-                name=artifact_payload.name,
-                artifact_type=artifact_payload.artifact_type,
-                content_type=artifact_payload.content_type,
-                location=artifact_payload.location,
-                data=artifact_payload.data,
-                metadata_json=_normalize_payload(artifact_payload.metadata),
-            )
-            db.add(artifact)
-
         findings_persisted += 1
 
     try:
         db.commit()
     except SQLAlchemyError as exc:  # pragma: no cover - exercised in error handling tests
         db.rollback()
-        LOGGER.exception("Failed to persist nuclei callback payload", extra={"scan_id": payload.scan_id})
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to persist callback") from exc
+        LOGGER.exception(
+            "Failed to persist nuclei callback payload", extra={"scan_id": payload.scan_id}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist callback",
+        ) from exc
 
     record_audit_event(
         db,
@@ -777,15 +551,18 @@ def nuclei_callback(
         },
     )
 
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-@app.get("/findings", response_model=List[FindingResponse])
 
+@app.get("/findings", response_model=FindingCollectionResponse)
 def list_findings(
     target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> FindingCollectionResponse:
+    """Return the latest findings for the requested scope."""
+
     query = db.query(Finding)
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
@@ -807,24 +584,48 @@ def list_findings(
     return FindingCollectionResponse(data=[serialize_finding(finding) for finding in findings])
 
 
+@app.get("/findings/{finding_id}", response_model=FindingItemResponse)
+def get_finding(
+    finding_id: str,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingItemResponse:
+    """Fetch a single finding for detailed analysis views."""
+
+    finding = db.get(Finding, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found")
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="get_finding",
+        resource_type="finding",
+        resource_id=finding_id,
+        finding_id=finding_id,
+        metadata={"scan_id": finding.scan_id},
+    )
+
+    return FindingItemResponse(data=serialize_finding(finding))
+
+
 def serialize_scan(scan: Scan) -> ScanResponse:
     """Project a Scan ORM object into the API contract expected by the UI."""
 
-    target_url = scan.target.url if scan.target else ""
+    target_scope = scan.target.scope if scan.target else ""
     findings_count = len(scan.findings)
 
-    # Until we track updates server-side we surface created_at as updated_at to keep
-    # the UI stable and transparent about our current capabilities.
     return ScanResponse(
-        id=scan.id,
-        target_id=scan.target_id,
-        target=target_url,
-        profile=scan.profile,
+        id=str(scan.id),
+        target_id=str(scan.target_id),
+        target=target_scope,
+        scanner=scan.scanner,
         status=scan.status,
-        requested_hosts=scan.requested_hosts,
         initiated_by=scan.initiated_by,
         created_at=scan.created_at,
-        updated_at=scan.created_at,
+        updated_at=scan.updated_at or scan.created_at,
+        started_at=scan.started_at,
+        completed_at=scan.completed_at,
         findings_count=findings_count,
     )
 
@@ -833,20 +634,21 @@ def serialize_finding(finding: Finding) -> FindingResponse:
     """Project a Finding ORM object into the deterministic UI schema."""
 
     detected_at = finding.created_at
+    evidence_payload = _normalize_payload(finding.evidence)
+    evidence_text = json.dumps(evidence_payload, sort_keys=True) if evidence_payload else None
 
-    # The legacy table lacks workflow state, so we default to "open" and expose the
-    # stored description as evidence to maintain analyst context.
     return FindingResponse(
-        id=finding.id,
-        scan_id=finding.scan_id,
-        severity=finding.severity,
+        id=str(finding.id),
+        scan_id=str(finding.scan_id),
         title=finding.title,
+        severity=finding.severity,
+        cve_id=finding.cve_id,
         description=finding.description,
-        status="open",
-        template_id="nuclei:unspecified",
         detected_at=detected_at,
-        updated_at=detected_at,
-        evidence=finding.description,
+        updated_at=finding.updated_at or detected_at,
+        status="open",
+        template_id=finding.cve_id or "nuclei:unspecified",
+        evidence=evidence_text,
         remediation=None,
     )
 
@@ -855,18 +657,15 @@ __all__ = [
     "app",
     "get_settings",
     "Settings",
-    "Base",
     "Target",
     "Scan",
     "Finding",
     "AuditLog",
-    "FindingArtifact",
-    "AuditEvent",
-    "PrincipalCredential",
     "ScanResponse",
     "ScanCollectionResponse",
     "FindingResponse",
     "FindingCollectionResponse",
+    "FindingItemResponse",
     "get_db_session",
     "get_queue_client",
     "RedisQueueClient",
@@ -874,4 +673,6 @@ __all__ = [
     "_hash_secret",
     "serialize_scan",
     "serialize_finding",
+    "record_audit_event",
+    "authenticate",
 ]
