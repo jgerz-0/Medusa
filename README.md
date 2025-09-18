@@ -12,60 +12,93 @@ Medusa is an **agentic AI-driven Cyber Reasoning System** that orchestrates reco
 ## Phase 1 Focus (Foundations)
 Phase 1 establishes the local development baseline that every later milestone builds upon.
 
-| Deliverable | Description |
-| --- | --- |
-| Repository skeleton | Controller, worker, docs, and infrastructure directories with lint/test scaffolding. |
-| FastAPI controller | `/scan` endpoint validating scope and enqueueing jobs. |
-| Redis + nuclei worker | Local Docker Compose wiring to execute proof-of-concept web scans. |
-| Postgres schema | Minimum tables for scans, targets, findings, and audit log. |
-| Minimal Next.js UI | Read-only list of scans and findings surfaced from Postgres. |
+| Deliverable | Description | Status |
+| --- | --- | --- |
+| Repository skeleton | Controller, worker, docs, and infrastructure directories with lint/test scaffolding. | ✅ Complete – directories and tooling land in `controller/`, `workers/`, `frontend/`, and `infra/`. |
+| FastAPI controller | `/scan` endpoint validating scope and enqueueing jobs. | ✅ Complete – `controller/main.py` exposes authenticated CRUD + queue integration. |
+| Redis + nuclei worker | Local Docker Compose wiring to execute proof-of-concept web scans. | ⚠️ In progress – worker logic exists in `workers/web/nuclei/`, but Compose wiring and consistent queue/channel defaults remain TODO. |
+| Postgres schema | Minimum tables for scans, targets, findings, and audit log. | ⚠️ In progress – Alembic migrations exist, yet models and migrations diverge and need reconciliation before end-to-end runs. |
+| Minimal Next.js UI | Read-only list of scans and findings surfaced from Postgres. | ⏳ Pending – current Next.js app is a landing page without data bindings. |
 
 Progress on these items should be tracked through issues mapped to the roadmap phases in `ROADMAP.md`.
 
 ## Quickstart (Local Development)
 
 ### Prerequisites
-- Docker 20+ and Docker Compose
+- Docker 20+ (used for one-off containers until Compose manifests land)
 - Python 3.11 with `poetry`
 - Node.js 20 with `pnpm`
 
-### Bootstrap the stack
+### 1. Clone the repository
 ```bash
-# clone and enter the repository
 git clone https://github.com/<org>/medusa.git
 cd medusa
+```
 
-# launch shared services (Postgres, Redis, MinIO, Qdrant)
-docker compose up -d
+### 2. Start backing services manually
+Compose files are not yet published. Stand up Postgres and Redis explicitly before booting any services:
 
-# install controller dependencies and run API (FastAPI + uvicorn)
+```bash
+# Postgres (matches controller defaults)
+docker run --rm -d \
+  --name medusa-postgres \
+  -e POSTGRES_DB=medusa \
+  -e POSTGRES_USER=medusa \
+  -e POSTGRES_PASSWORD=medusa \
+  -p 5432:5432 \
+  postgres:15
+
+# Redis queue broker
+docker run --rm -d \
+  --name medusa-redis \
+  -p 6379:6379 \
+  redis:7
+```
+
+Reference the interim service notes in [docs/DOCKER.md](docs/DOCKER.md#manual-service-bring-up) for environment hardening guidance.
+
+### 3. Run the FastAPI controller
+```bash
 cd controller
 poetry install
+
+# Required auth configuration
+export MEDUSA_JWT_SECRET="dev-local-secret"
+export MEDUSA_API_KEYS='["local-dev-key"]'
+
+# Apply database schema (current migration set is still being reconciled with the models)
+poetry run alembic upgrade head
+
+# Launch the API
 poetry run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Start the nuclei worker
-In a separate shell:
+With the API online you can exercise endpoints via the static API key, e.g.:
+
 ```bash
-cd workers/web/nuclei
+curl -X POST http://localhost:8000/targets \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: local-dev-key" \
+  -d '{
+    "name": "Example", 
+    "url": "https://example.com", 
+    "scope": {"allowed_hosts": ["example.com"]}
+  }'
+```
+
+### 4. Start the nuclei worker (optional skeleton)
+The worker can be exercised locally, but Redis channel names must be aligned manually until shared configuration lands:
+
+```bash
+cd ../workers/web/nuclei
 poetry install
+export REDIS_URL="redis://localhost:6379/0"
+export NUCLEI_QUEUE_KEY="queues:nuclei:jobs"  # matches controller default
 poetry run python worker.py
 ```
 
-### Seed sample data & launch UI
-```bash
-# apply migrations and seed example scope data
-cd controller
-poetry run alembic upgrade head
-poetry run python scripts/seed_targets.py
-
-# start the Next.js dashboard
-cd ../frontend
-pnpm install
-pnpm dev --host
-```
-
-Once the UI is running, navigate to `http://localhost:3000` to queue scans and inspect findings.
+### 5. Frontend status
+The Next.js dashboard is still a static landing page; no API wiring exists yet. `pnpm dev` will launch the stub UI when you are iterating on layout work.
 
 ### Manage database migrations
 

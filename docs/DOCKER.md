@@ -1,4 +1,4 @@
-# Docker Setup
+# Docker Setup (Work in Progress)
 
 This guide covers the Phase 1 local Docker Compose environment. It stands up every service referenced in the repository README so engineers can exercise the controller API, persistence tier, and analyst dashboard without hand-configuring dependencies.
 
@@ -63,3 +63,4 @@ If Compose exits early, validate the manifest with `docker compose config` and e
 - The compose network is isolated to localhost, but scanners must still respect the authorized scope enforced by the controller.
 - Credentials in `.env` are for local development only; rotate them frequently and use a secrets manager in staging/production.
 - Keep Docker Desktop/Engine patched to the latest stable release before targeting external assets.
+
