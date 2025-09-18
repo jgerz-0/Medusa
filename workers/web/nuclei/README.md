@@ -1,5 +1,5 @@
-# Nuclei Web Worker
+# Medusa Nuclei Worker
 
-This worker encapsulates the Nuclei scanner with hardened configuration for Medusa deployments.
-It will receive scoped JSON jobs from the controller, execute deterministic scans, and enrich
-results with CVE metadata before publishing back to the message bus.
+This worker executes [ProjectDiscovery nuclei](https://github.com/projectdiscovery/nuclei)
+scans inside an isolated container. Jobs are received from Redis, normalized, and
+reported back to the controller. See `worker.py` for details.
