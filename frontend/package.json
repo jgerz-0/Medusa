@@ -7,13 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "jest"
+    "test": "jest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "date-fns": "3.6.0",
     "clsx": "2.1.0",
     "next": "14.2.3",
-    "typecheck": "tsc --noEmit"
     "react": "18.2.0",
     "react-dom": "18.2.0"
   },

@@ -1,4 +1,5 @@
 """Database session utilities for the controller service."""
+
 from __future__ import annotations
 
 import os

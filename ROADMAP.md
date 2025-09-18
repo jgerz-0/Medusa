@@ -6,8 +6,8 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 **Objective:** Ship the baseline local experience that exercises the end-to-end Recon → Scan → Report loop with nuclei.
 
 - ✅ Repository skeleton with controller, workers, frontend, docs, and infra directories.
-- ☐ Developer environment using Docker Compose (Postgres, Redis, MinIO, Qdrant).
-  - _Follow-up:_ Compose manifests still need to be authored under `infra/docker/`; align with the expectations captured in `docs/DOCKER.md`.
+- ✅ Developer environment using Docker Compose (Postgres, Redis, MinIO, Qdrant).
+  - _Note:_ Keep `docs/DOCKER.md` in sync as additional services (e.g., enrichment workers) join the stack.
 - ✅ FastAPI controller exposing `/scan`, `/targets`, `/findings` endpoints with scope validation.
 - ✅ Redis-backed nuclei worker returning normalized JSON findings.
 - ✅ Postgres schema (targets, scans, findings, audit_log) and Alembic migrations.
