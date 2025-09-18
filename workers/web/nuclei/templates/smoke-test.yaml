@@ -1,0 +1,19 @@
+id: medusa-smoke-test
+info:
+  name: Medusa Controller Smoke Test
+  author: medusa-security
+  severity: info
+  description: >-
+    Validates that the controller docs endpoint responds so the worker can
+    exercise the callback pipeline.
+  tags:
+    - smoke
+    - medusa
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}/docs"
+    matchers:
+      - type: word
+        words:
+          - "Swagger UI"

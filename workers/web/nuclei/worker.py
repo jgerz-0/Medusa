@@ -33,6 +33,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from io import StringIO
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -92,6 +93,10 @@ class WorkerConfig:
     s3_endpoint_url: Optional[str] = field(default_factory=lambda: os.getenv("S3_ENDPOINT_URL"))
     callback_timeout: int = field(default_factory=lambda: int(os.getenv("NUCLEI_CALLBACK_TIMEOUT", "30")))
     verify_tls: bool = field(default_factory=lambda: os.getenv("NUCLEI_CALLBACK_VERIFY_TLS", "true").lower() != "false")
+    callback_token: str = field(
+        default_factory=lambda: os.getenv("NUCLEI_CALLBACK_TOKEN")
+        or os.getenv("MEDUSA_NUCLEI_CALLBACK_TOKEN", "")
+    )
 
     @classmethod
     def load(cls) -> "WorkerConfig":
@@ -111,6 +116,7 @@ class NucleiJob:
     attempts: int = 0
     tags: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    scan_id: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -137,7 +143,10 @@ class NucleiJob:
 
         attempts = int(data.get("attempts", 0))
         tags = data.get("tags") or []
-        metadata = data.get("metadata") or {}
+        metadata_payload = data.get("metadata") or {}
+        if not isinstance(metadata_payload, dict):
+            raise FatalJobError("Job metadata must be a JSON object")
+        scan_id = data.get("scan_id") or metadata_payload.get("scan_id")
         return cls(
             job_id=job_id,
             target=target,
@@ -145,7 +154,8 @@ class NucleiJob:
             callback_url=callback_url,
             attempts=attempts,
             tags=[str(tag) for tag in tags],
-            metadata=metadata,
+            metadata=metadata_payload,
+            scan_id=str(scan_id) if scan_id else None,
             raw=data,
         )
 
@@ -302,14 +312,40 @@ def run_nuclei_scan(job: NucleiJob, config: WorkerConfig) -> ScanResult:
     )
 
 
+def _coerce_tags(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    if isinstance(value, str):
+        return [value]
+    return []
+
+
+def _coerce_cve(info: Dict[str, Any]) -> Optional[str]:
+    candidates: List[str] = []
+    for key in ("cve", "cveID", "cveId"):
+        value = info.get(key)
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            candidates.extend(str(item) for item in value if item)
+    list_value = info.get("cveIds")
+    if isinstance(list_value, list):
+        candidates.extend(str(item) for item in list_value if item)
+    return candidates[0] if candidates else None
+
+
 def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> List[Dict[str, Any]]:
-    """Convert nuclei JSON records into the Medusa finding schema."""
+    """Convert nuclei JSON records into the controller callback schema."""
 
     findings: List[Dict[str, Any]] = []
     for record in records:
-        template_id = record.get("templateID") or record.get("template-id")
         info = record.get("info") or {}
-        severity = (info.get("severity") or "info").upper()
+        template_id = record.get("templateID") or record.get("template-id")
+        severity = str(info.get("severity") or "info").lower()
+        title = info.get("name") or template_id or f"nuclei finding for {job.target}"
+        description = info.get("description") or f"Template {template_id or title} matched {job.target}."
+        info_tags = _coerce_tags(info.get("tags"))
+        combined_tags = sorted({*job.tags, *info_tags})
         evidence = {
             "matched_at": record.get("matched-at") or record.get("matchedAt"),
             "extracted_results": record.get("extracted-results") or record.get("extractedResults") or [],
@@ -319,17 +355,26 @@ def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> Lis
             "ip": record.get("ip"),
             "port": record.get("port"),
         }
-        finding = {
+        metadata = {
             "job_id": job.job_id,
-            "target": job.target,
             "template_id": template_id,
-            "name": info.get("name"),
-            "description": info.get("description"),
-            "severity": severity,
-            "tags": job.tags,
-            "evidence": {k: v for k, v in evidence.items() if v},
+            "tags": combined_tags,
+            "template_path": record.get("template-path") or record.get("templatePath"),
+            "matcher_name": record.get("matcher-name") or record.get("matcherName"),
+            "matched_at": evidence["matched_at"],
+            "host": record.get("host"),
         }
-        findings.append(finding)
+        findings.append(
+            {
+                "title": str(title),
+                "severity": severity,
+                "description": str(description),
+                "cve_id": _coerce_cve(info),
+                "metadata": {k: v for k, v in metadata.items() if v},
+                "evidence": {k: v for k, v in evidence.items() if v},
+                "artifacts": [],
+            }
+        )
     return findings
 
 
@@ -368,11 +413,15 @@ def post_callback(job: NucleiJob, config: WorkerConfig, payload: Dict[str, Any],
             raise RetryableJobError("requests library unavailable for callback delivery")
         session = requests.Session()
     try:
+        headers = {}
+        if config.callback_token:
+            headers["X-Callback-Token"] = config.callback_token
         response = session.post(
             job.callback_url,
             json=payload,
             timeout=config.callback_timeout,
             verify=config.verify_tls,
+            headers=headers,
         )
         response.raise_for_status()
     except RequestException as exc:
@@ -384,32 +433,64 @@ def process_job(job: NucleiJob, config: WorkerConfig, queue: RedisQueue, *,
                 run_scan=run_nuclei_scan, session: Optional[Session] = None, s3_client=None) -> None:
     """Execute a single job lifecycle."""
 
+    scan_id = job.scan_id or job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    if not scan_id:
+        raise FatalJobError("Job payload missing 'scan_id' required for callback")
+
     scan = run_scan(job, config)
     if scan.exit_code != 0:
         raise RetryableJobError(f"nuclei exited with code {scan.exit_code}")
 
     findings = normalize_findings(scan.records, job)
     artifacts = upload_artifacts(scan, job, config, s3_client)
-    payload = {
+    worker_metadata: Dict[str, Any] = {
         "job_id": job.job_id,
-        "status": "succeeded",
         "target": job.target,
+        "templates": job.templates,
+        "tags": job.tags,
         "duration_seconds": scan.duration_seconds,
+    }
+    extra_metadata = {k: v for k, v in job.metadata.items() if k != "scan_id"} if job.metadata else {}
+    if extra_metadata:
+        worker_metadata["job_metadata"] = extra_metadata
+    if artifacts:
+        worker_metadata["artifacts"] = artifacts
+
+    payload = {
+        "scan_id": scan_id,
+        "status": "completed",
         "findings": findings,
-        "artifacts": artifacts,
-        "metadata": job.metadata,
+        "worker_metadata": worker_metadata,
+        "error": None,
+        "completed_at": datetime.now(tz=timezone.utc).isoformat(),
     }
     post_callback(job, config, payload, session=session)
     LOG.info("Job %s completed successfully", job.job_id)
 
 
 def notify_failure(job: NucleiJob, config: WorkerConfig, reason: str, session: Optional[Session] = None) -> None:
-    payload = {
+    scan_id = job.scan_id or job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    if not scan_id:
+        LOG.error("Cannot notify controller for job %s without scan_id", job.job_id)
+        return
+
+    worker_metadata: Dict[str, Any] = {
         "job_id": job.job_id,
-        "status": "failed",
         "target": job.target,
-        "reason": reason,
-        "metadata": job.metadata,
+        "templates": job.templates,
+        "tags": job.tags,
+    }
+    extra_metadata = {k: v for k, v in job.metadata.items() if k != "scan_id"} if job.metadata else {}
+    if extra_metadata:
+        worker_metadata["job_metadata"] = extra_metadata
+
+    payload = {
+        "scan_id": scan_id,
+        "status": "failed",
+        "findings": [],
+        "worker_metadata": worker_metadata,
+        "error": reason,
+        "completed_at": datetime.now(tz=timezone.utc).isoformat(),
     }
     try:
         post_callback(job, config, payload, session=session)
@@ -427,6 +508,8 @@ def worker_loop() -> None:
     )
 
     config = WorkerConfig.load()
+    if not config.callback_token:
+        LOG.warning("NUCLEI_CALLBACK_TOKEN is not configured; callbacks may be rejected")
     queue = RedisQueue(config)
     s3_client = build_s3_client(config)
     session = requests.Session() if requests else Session()

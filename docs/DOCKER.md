@@ -9,7 +9,7 @@ This guide covers the Phase 1 local Docker Compose environment. It stands up eve
 - 20 GB free disk space for container images, Postgres, MinIO, and Qdrant data directories
 
 ## Compose Manifests
-- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, and the Next.js frontend.
+- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei worker, and the Next.js frontend.
 - `infra/docker/controller.Dockerfile` – Poetry-based image for the controller with Uvicorn hot reload enabled.
 - `infra/docker/frontend.Dockerfile` – Node 20 + pnpm image for the dashboard.
 - `infra/docker/.env.example` – sane defaults for development credentials and exposed ports.
@@ -30,24 +30,24 @@ docker compose up --build -d
 docker compose ps
 ```
 
-The compose file automatically mounts code from `controller/` and `frontend/` into the containers so edits on the host trigger FastAPI reloads and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts.
+The compose file automatically mounts code from `controller/`, `workers/web/nuclei/`, and `frontend/` into the containers so edits on the host trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts.
 
 ## Smoke Test
-Run the following once the services report `healthy`:
+Run the end-to-end smoke test once the services report `healthy`:
 
 ```bash
-# run database migrations before hitting the API
-docker compose exec controller poetry run alembic upgrade head
-
-# seed sample targets for the dashboard
-docker compose exec controller poetry run python scripts/seed_targets.py
-
-# confirm controller API responds
-curl http://localhost:8000/docs
-
-# confirm the dashboard renders server-side data
-curl -I http://localhost:3000/scans
+./infra/docker/smoke-test.sh
 ```
+
+The script performs the following actions:
+
+- runs Alembic migrations to the latest revision,
+- seeds demo targets if they are missing,
+- creates a nuclei scan linked to the local smoke-test template,
+- enqueues a job on Redis, and
+- waits for the `nuclei-worker` container to call the controller callback using the shared secret from `.env`.
+
+A successful run prints `Worker callback confirmed` and exits `0`. If the callback fails (for example, the worker cannot reach the controller or the callback token is misconfigured) the script exits non-zero with context so you can inspect `docker compose logs nuclei-worker controller`.
 
 The MinIO console is available at `http://localhost:9001` with credentials from `.env`. Qdrant's HTTP API listens on `http://localhost:6333` for enrichment debugging.
 

@@ -81,8 +81,9 @@ services:
       MEDUSA_DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
       MEDUSA_REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
       MEDUSA_NUCLEI_QUEUE_CHANNEL: ${MEDUSA_NUCLEI_QUEUE_CHANNEL:-queues:nuclei:jobs}
+      MEDUSA_NUCLEI_CALLBACK_TOKEN: ${MEDUSA_NUCLEI_CALLBACK_TOKEN:-local-dev-nuclei-callback}
       MEDUSA_JWT_SECRET: ${MEDUSA_JWT_SECRET:-change-this-in-production}
-      MEDUSA_API_KEYS: ${MEDUSA_API_KEYS:-frontend-dev-key}
+      MEDUSA_API_KEYS: ${MEDUSA_API_KEYS:-frontend-dev-key,nuclei-smoke-key}
     depends_on:
       postgres:
         condition: service_healthy
@@ -133,6 +134,35 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
+
+  nuclei-worker:
+    build:
+      context: ../..
+      dockerfile: workers/web/nuclei/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_nuclei_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      NUCLEI_QUEUE_KEY: ${NUCLEI_QUEUE_KEY:-queues:nuclei:jobs}
+      NUCLEI_DEAD_LETTER_KEY: ${NUCLEI_DEAD_LETTER_KEY:-queues:nuclei:dead}
+      NUCLEI_CALLBACK_TOKEN: ${NUCLEI_CALLBACK_TOKEN:-local-dev-nuclei-callback}
+      NUCLEI_CALLBACK_VERIFY_TLS: ${NUCLEI_CALLBACK_VERIFY_TLS:-false}
+      NUCLEI_CALLBACK_TIMEOUT: ${NUCLEI_CALLBACK_TIMEOUT:-30}
+      NUCLEI_POLL_TIMEOUT: ${NUCLEI_POLL_TIMEOUT:-2}
+      NUCLEI_MAX_RETRIES: ${NUCLEI_MAX_RETRIES:-3}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-medusaadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-medusaadmin123}
+      NUCLEI_ARTIFACT_BUCKET: ${NUCLEI_ARTIFACT_BUCKET:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/web/nuclei:/app:delegated
 
 volumes:
   frontend_node_modules:
