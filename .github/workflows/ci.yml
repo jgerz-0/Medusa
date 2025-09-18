@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  controller:
+    name: Controller tests and migrations
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: controller
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v2
+        with:
+          poetry-version: "2.1.4"
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Run database migration drift check
+        run: poetry run python scripts/check_migrations.py
+
+      - name: Run integration tests
+        run: poetry run pytest -m "not slow"

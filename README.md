@@ -54,11 +54,9 @@ poetry run python worker.py
 
 ### Seed sample data & launch UI
 ```bash
-# apply migrations
+# apply migrations and seed example scope data
 cd controller
 poetry run alembic upgrade head
-
-# seed initial targets
 poetry run python scripts/seed_targets.py
 
 # start the Next.js dashboard
@@ -68,6 +66,21 @@ pnpm dev --host
 ```
 
 Once the UI is running, navigate to `http://localhost:3000` to queue scans and inspect findings.
+
+### Manage database migrations
+
+The controller uses Alembic for deterministic schema changes. Common commands:
+
+```bash
+# generate a new migration after editing SQLAlchemy models
+poetry run alembic revision --autogenerate -m "add_new_columns"
+
+# apply the latest schema changes
+poetry run alembic upgrade head
+
+# verify that the database matches the models (used in CI)
+poetry run python scripts/check_migrations.py
+```
 
 ## Project Layout
 ```

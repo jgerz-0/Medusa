@@ -6,7 +6,13 @@ Thank you for investing in Medusa. We focus on security-first automation, determ
 1. Fork the repository and create a feature branch.
 2. Install dependencies using the instructions in [README.md](../README.md).
 3. Copy `.env.example` files to `.env` per service and populate local-only secrets.
-4. Run the full lint/test suite before opening a pull request.
+4. Apply database migrations and seed local scope data:
+   ```bash
+   cd controller
+   poetry run alembic upgrade head
+   poetry run python scripts/seed_targets.py
+   ```
+5. Run the full lint/test suite before opening a pull request.
 
 ## Development Standards
 - **Python**
@@ -27,6 +33,11 @@ Thank you for investing in Medusa. We focus on security-first automation, determ
 4. Update Docker Compose or Helm manifests if the scanner requires additional services.
 5. Document operational notes in `docs/SCANNERS.md` and link from the README.
 6. Add unit/integration tests plus fixtures demonstrating deterministic findings.
+
+## Database migrations
+- Generate schema changes with `poetry run alembic revision --autogenerate -m "describe_change"`.
+- Validate that models and migrations are in sync before pushing: `poetry run python scripts/check_migrations.py`.
+- Ensure seed data stays within authorized test scope; update `scripts/seed_targets.py` for new demo assets.
 
 ## Pull Request Checklist
 - Tests and linters pass locally and in CI.
