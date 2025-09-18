@@ -3,15 +3,13 @@ from typing import Generator, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from controller.db.models import AuditLog, Base, Scan, Target
 from controller.main import (
-    AuditEvent,
-    Base,
     QueueClient,
     Settings,
-    Target,
     _engine_from_url,
     _session_factory_from_url,
     app,
@@ -78,15 +76,15 @@ def auth_headers() -> dict[str, str]:
     return {"X-API-Key": "test-key"}
 
 
-def test_target_scope_validation_rejects_out_of_scope(client):
+def test_target_creation_rejects_blank_scope(client):
     test_client, _, _ = client
 
     response = test_client.post(
         "/targets",
         json={
             "name": "prod-web",
-            "url": "https://prod.internal.example.com",
-            "scope": {"allowed_hosts": ["staging.internal.example.com"]},
+            "scope": "",
+            "is_authorized": True,
         },
         headers=auth_headers(),
     )
@@ -101,8 +99,7 @@ def test_scan_enqueue_pushes_job(client):
         "/targets",
         json={
             "name": "prod-web",
-            "url": "https://prod.internal.example.com",
-            "scope": {"allowed_hosts": ["prod.internal.example.com"]},
+            "scope": "prod.internal.example.com",
         },
         headers=auth_headers(),
     )
@@ -113,8 +110,8 @@ def test_scan_enqueue_pushes_job(client):
         "/scan",
         json={
             "target_id": target_id,
-            "profile": "full",
-            "requested_hosts": ["prod.internal.example.com"],
+            "scanner": "nuclei",
+            "parameters": {"profile": "full"},
         },
         headers=auth_headers(),
     )
@@ -124,12 +121,47 @@ def test_scan_enqueue_pushes_job(client):
     channel, payload = queue.calls[-1]
     assert channel == "test-nuclei"
     assert payload["target_id"] == target_id
-    assert payload["profile"] == "full"
+    assert payload["scanner"] == "nuclei"
+    assert payload["parameters"] == {"profile": "full"}
+    assert payload["initiated_by"].startswith("apikey:")
 
     with session_factory() as session:
-        db_target = session.query(Target).get(target_id)
+        db_target = session.get(Target, target_id)
         assert db_target is not None
-        assert db_target.scope["allowed_hosts"] == ["prod.internal.example.com"]
+        assert db_target.scope == "prod.internal.example.com"
+
+        db_scan = session.execute(
+            select(Scan).where(Scan.target_id == target_id)
+        ).scalar_one()
+        assert db_scan.initiated_by is not None
+        assert db_scan.initiated_by.startswith("apikey:")
+
+
+def test_scan_rejects_unauthorized_target(client):
+    test_client, queue, session_factory = client
+
+    with session_factory() as session:
+        target = Target(
+            name="prod-web",
+            scope="prod.internal.example.com",
+            is_authorized=False,
+        )
+        session.add(target)
+        session.commit()
+        target_id = target.id
+
+    scan_resp = test_client.post(
+        "/scan",
+        json={
+            "target_id": target_id,
+            "scanner": "nuclei",
+            "parameters": {},
+        },
+        headers=auth_headers(),
+    )
+
+    assert scan_resp.status_code == 403
+    assert not queue.calls
 
 
 def test_audit_logging_records_events(client, caplog):
@@ -138,7 +170,11 @@ def test_audit_logging_records_events(client, caplog):
 
     # seed target directly in DB for the read-only route
     with session_factory() as session:
-        target = Target(name="prod-web", url="https://prod.internal.example.com", scope={"allowed_hosts": ["prod.internal.example.com"]})
+        target = Target(
+            name="prod-web",
+            scope="prod.internal.example.com",
+            is_authorized=True,
+        )
         session.add(target)
         session.commit()
 
@@ -146,8 +182,20 @@ def test_audit_logging_records_events(client, caplog):
     assert response.status_code == 200
 
     with session_factory() as session:
-        events = session.query(AuditEvent).filter(AuditEvent.action == "list_findings").all()
+        events = (
+            session.execute(
+                select(AuditLog).where(AuditLog.action == "list_findings")
+            )
+            .scalars()
+            .all()
+        )
         assert len(events) == 1
         assert events[0].actor.startswith("apikey:")
+        assert events[0].evidence_snapshot["metadata"] == {
+            "target_id": None,
+            "scan_id": None,
+        }
+        assert events[0].evidence_snapshot["resource_type"] == "finding"
+        assert events[0].evidence_snapshot["resource_id"] is None
 
     assert any(record.action == "list_findings" for record in caplog.records)

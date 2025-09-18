@@ -82,6 +82,7 @@ class Scan(TimestampMixin, Base):
         String(36), ForeignKey("targets.id", ondelete="CASCADE"), nullable=False
     )
     scanner: Mapped[str] = mapped_column(String(64), nullable=False)
+    initiated_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     parameters: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     started_at: Mapped[Optional[datetime.datetime]] = mapped_column(

@@ -11,17 +11,19 @@ import json
 import logging
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import AnyHttpUrl, BaseModel, BaseSettings, Field, root_validator
+from pydantic import BaseModel, BaseSettings, ConfigDict, Field
 from redis import Redis
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
+
+from controller.db.models import AuditLog, Base, Finding, Scan, Target
 
 
 LOGGER = logging.getLogger("medusa.controller")
@@ -56,140 +58,78 @@ def get_settings() -> Settings:
     return Settings()
 
 
-Base = declarative_base()
-
-
-class Target(Base):
-    __tablename__ = "targets"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(255), nullable=False)
-    url = Column(String(1024), nullable=False, unique=True)
-    scope = Column(JSON, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-
-    scans = relationship("Scan", back_populates="target", cascade="all,delete")
-
-
-class Scan(Base):
-    __tablename__ = "scans"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    target_id = Column(Integer, ForeignKey("targets.id", ondelete="CASCADE"), nullable=False)
-    profile = Column(String(128), nullable=False)
-    status = Column(String(32), nullable=False, default="queued")
-    requested_hosts = Column(JSON, nullable=False)
-    initiated_by = Column(String(255), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-
-    target = relationship("Target", back_populates="scans")
-    findings = relationship("Finding", back_populates="scan", cascade="all,delete")
-
-
-class Finding(Base):
-    __tablename__ = "findings"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    scan_id = Column(Integer, ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
-    severity = Column(String(32), nullable=False)
-    title = Column(String(255), nullable=False)
-    description = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-
-    scan = relationship("Scan", back_populates="findings")
-
-
-class AuditEvent(Base):
-    __tablename__ = "audit_events"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    actor = Column(String(255), nullable=False)
-    action = Column(String(128), nullable=False)
-    resource_type = Column(String(64), nullable=False)
-    resource_id = Column(String(64), nullable=True)
-    metadata_json = Column(JSON, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc))
-
-
-class ScopeDefinition(BaseModel):
-    """Approved scope for a target or scan request."""
-
-    allowed_hosts: List[str] = Field(..., description="List of fully qualified hostnames allowed for scanning.")
-
-    @root_validator
-    def validate_hosts(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        hosts = values.get("allowed_hosts", [])
-        if not hosts:
-            raise ValueError("At least one allowed host must be provided.")
-        for host in hosts:
-            if not host or " " in host:
-                raise ValueError("Invalid host entry in allowed_hosts.")
-        return values
-
-
 class TargetCreateRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
-    url: AnyHttpUrl
-    scope: ScopeDefinition
+    """Request body for registering a new authorized target."""
 
-    @root_validator
-    def ensure_url_in_scope(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        url = values.get("url")
-        scope = values.get("scope")
-        if url and scope:
-            hostname = url.host
-            if hostname not in scope.allowed_hosts:
-                raise ValueError("Target URL hostname is not in the approved scope.")
-        return values
+    name: str = Field(..., min_length=1, max_length=255, description="Friendly target name")
+    scope: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Scoped asset identifier (FQDN, CIDR, or service descriptor)",
+    )
+    is_authorized: bool = Field(
+        default=True,
+        description="Whether the asset remains within the approved engagement scope",
+    )
 
 
 class TargetResponse(BaseModel):
-    id: int
-    name: str
-    url: AnyHttpUrl
-    scope: ScopeDefinition
+    """Serialized target representation."""
 
-    class Config:
-        orm_mode = True
+    id: str
+    name: str
+    scope: str
+    is_authorized: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ScanRequest(BaseModel):
-    target_id: int
-    profile: str = Field(..., min_length=1, max_length=128)
-    requested_hosts: List[str] = Field(..., description="Hosts that should be scanned for this run.")
+    """Request body for scheduling a scan job."""
 
-    @root_validator
-    def ensure_requested_hosts(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        hosts = values.get("requested_hosts", [])
-        if not hosts:
-            raise ValueError("At least one host must be requested for scanning.")
-        for host in hosts:
-            if not host or " " in host:
-                raise ValueError("Invalid host entry in requested_hosts.")
-        return values
+    target_id: str
+    scanner: str = Field(..., min_length=1, max_length=64, description="Scanner identifier")
+    parameters: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Scanner-specific configuration payload",
+    )
 
 
 class ScanResponse(BaseModel):
-    id: int
-    target_id: int
-    profile: str
-    status: str
-    requested_hosts: List[str]
+    """Serialized scan representation returned to clients."""
 
-    class Config:
-        orm_mode = True
+    id: str
+    target_id: str
+    scanner: str
+    status: str
+    parameters: Dict[str, Any]
+    initiated_by: Optional[str]
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FindingResponse(BaseModel):
-    id: int
-    scan_id: int
+    """Serialized finding representation."""
+
+    id: str
+    scan_id: str
     severity: str
     title: str
     description: str
+    cve_id: Optional[str]
+    evidence: Dict[str, Any]
+    evidence_hash: str
     created_at: datetime
+    updated_at: datetime
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class Principal(BaseModel):
@@ -300,15 +240,25 @@ def record_audit_event(
     resource_type: str,
     resource_id: Optional[str],
     metadata: Optional[Dict[str, Any]] = None,
+    scan_id: Optional[str] = None,
+    finding_id: Optional[str] = None,
+    message: Optional[str] = None,
 ) -> None:
     """Persist and emit audit information about sensitive operations."""
 
-    event = AuditEvent(
+    snapshot: Dict[str, Any] = {
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "metadata": metadata or {},
+    }
+
+    event = AuditLog(
+        scan_id=scan_id,
+        finding_id=finding_id,
         actor=actor.subject,
         action=action,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        metadata_json=metadata or {},
+        message=message or f"{resource_type}.{action}",
+        evidence_snapshot=snapshot,
     )
     session.add(event)
     try:
@@ -340,11 +290,18 @@ def create_target(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetResponse:
-    existing = db.query(Target).filter(Target.url == str(request.url)).first()
+    existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Target already exists")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Target scope already registered",
+        )
 
-    target = Target(name=request.name, url=str(request.url), scope=request.scope.dict())
+    target = Target(
+        name=request.name,
+        scope=request.scope,
+        is_authorized=request.is_authorized,
+    )
     db.add(target)
     db.commit()
     db.refresh(target)
@@ -354,11 +311,11 @@ def create_target(
         actor=principal,
         action="create_target",
         resource_type="target",
-        resource_id=str(target.id),
-        metadata={"url": target.url},
+        resource_id=target.id,
+        metadata={"scope": target.scope, "is_authorized": target.is_authorized},
     )
 
-    return TargetResponse.from_orm(target)
+    return TargetResponse.model_validate(target)
 
 
 @app.post("/scan", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -369,18 +326,20 @@ def enqueue_scan(
     queue: QueueClient = Depends(get_queue_client),
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
-    target = db.query(Target).get(request.target_id)
+    target = db.get(Target, request.target_id)
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
 
-    allowed_hosts: Iterable[str] = target.scope.get("allowed_hosts", [])
-    if not set(request.requested_hosts).issubset(set(allowed_hosts)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Requested hosts outside scope")
+    if not target.is_authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Target is currently outside the authorized scope",
+        )
 
     scan = Scan(
         target_id=target.id,
-        profile=request.profile,
-        requested_hosts=request.requested_hosts,
+        scanner=request.scanner,
+        parameters=request.parameters,
         initiated_by=principal.subject,
     )
     db.add(scan)
@@ -390,8 +349,8 @@ def enqueue_scan(
     job_payload = {
         "scan_id": scan.id,
         "target_id": target.id,
-        "profile": scan.profile,
-        "requested_hosts": scan.requested_hosts,
+        "scanner": scan.scanner,
+        "parameters": scan.parameters,
         "initiated_by": principal.subject,
         "submitted_at": datetime.now(tz=timezone.utc).isoformat(),
     }
@@ -402,17 +361,18 @@ def enqueue_scan(
         actor=principal,
         action="enqueue_scan",
         resource_type="scan",
-        resource_id=str(scan.id),
-        metadata={"target_id": target.id, "profile": scan.profile},
+        resource_id=scan.id,
+        scan_id=scan.id,
+        metadata={"target_id": target.id, "scanner": scan.scanner},
     )
 
-    return ScanResponse.from_orm(scan)
+    return ScanResponse.model_validate(scan)
 
 
 @app.get("/findings", response_model=List[FindingResponse])
 def list_findings(
-    target_id: Optional[int] = None,
-    scan_id: Optional[int] = None,
+    target_id: Optional[str] = None,
+    scan_id: Optional[str] = None,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> List[FindingResponse]:
@@ -430,20 +390,22 @@ def list_findings(
         action="list_findings",
         resource_type="finding",
         resource_id=None,
+        scan_id=scan_id,
         metadata={"target_id": target_id, "scan_id": scan_id},
     )
 
-    return [FindingResponse.from_orm(finding) for finding in findings]
+    return [FindingResponse.model_validate(finding) for finding in findings]
 
 
 __all__ = [
     "app",
     "get_settings",
     "Settings",
+    "Base",
     "Target",
     "Scan",
     "Finding",
-    "AuditEvent",
+    "AuditLog",
     "get_db_session",
     "get_queue_client",
     "RedisQueueClient",
