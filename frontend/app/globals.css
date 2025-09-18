@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-surface-subtle text-gray-100 font-sans;
+}
+
+a {
+  @apply text-sky-300 hover:text-sky-200 transition-colors;
+}
+
+.table-grid {
+  @apply min-w-full divide-y divide-surface-muted/60;
+}
+
+.card {
+  @apply rounded-xl border border-surface-muted/60 bg-surface-default/60 backdrop-blur shadow-card;
+}
