@@ -5,9 +5,8 @@ from typing import Dict
 
 import pytest
 
-from controller.main import AuditEvent, Finding, FindingArtifact, Scan
-
-from .test_main import auth_headers
+from controller.main import AuditEvent, Finding, FindingArtifact, Scan, Target
+from tests.controller.test_main import auth_headers
 
 
 @pytest.fixture()
@@ -20,34 +19,29 @@ def _hash_payload(payload: Dict) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _enqueue_scan(test_client, target_payload):
-    target_resp = test_client.post("/targets", json=target_payload, headers=auth_headers())
-    assert target_resp.status_code == 201, target_resp.text
-    target_id = target_resp.json()["id"]
+def _bootstrap_scan(session_factory, *, scope: str) -> str:
+    with session_factory() as session:
+        target = Target(name="api", url=f"https://{scope}", scope={"allowed_hosts": [scope]})
+        session.add(target)
+        session.commit()
+        session.refresh(target)
 
-    scan_resp = test_client.post(
-        "/scan",
-        json={
-            "target_id": target_id,
-            "profile": "full",
-            "requested_hosts": target_payload["scope"]["allowed_hosts"],
-        },
-        headers=auth_headers(),
-    )
-    assert scan_resp.status_code == 202, scan_resp.text
-    return scan_resp.json()["id"], target_id
+        scan = Scan(
+            target_id=target.id,
+            profile="full",
+            status="queued",
+            requested_hosts=[scope],
+            initiated_by="system",
+        )
+        session.add(scan)
+        session.commit()
+        session.refresh(scan)
+        return scan.id
 
 
 def test_nuclei_callback_persists_findings_and_artifacts(client, callback_headers):
     test_client, _, session_factory = client
-    scan_id, _ = _enqueue_scan(
-        test_client,
-        {
-            "name": "api",
-            "url": "https://api.internal.example.com",
-            "scope": {"allowed_hosts": ["api.internal.example.com"]},
-        },
-    )
+    scan_id = _bootstrap_scan(session_factory, scope="api.internal.example.com")
 
     completed_at = datetime.now(tz=timezone.utc).isoformat()
     payload = {
@@ -77,10 +71,10 @@ def test_nuclei_callback_persists_findings_and_artifacts(client, callback_header
     }
 
     response = test_client.post("/internal/nuclei/callback", json=payload, headers=callback_headers)
-    assert response.status_code == 204, response.text
+    assert response.status_code == 200, response.text
 
     with session_factory() as session:
-        scan = session.query(Scan).get(scan_id)
+        scan = session.get(Scan, scan_id)
         assert scan is not None
         assert scan.status == "completed"
         assert scan.worker_metadata == {"templates": 5, "duration_seconds": 2.5}
@@ -115,7 +109,7 @@ def test_nuclei_callback_requires_token(client):
     test_client, _, _ = client
     response = test_client.post(
         "/internal/nuclei/callback",
-        json={"scan_id": 1, "status": "completed", "findings": []},
+        json={"scan_id": "missing", "status": "completed", "findings": []},
     )
     assert response.status_code == 401
 
@@ -124,22 +118,15 @@ def test_nuclei_callback_handles_missing_scan(client, callback_headers):
     test_client, _, _ = client
     response = test_client.post(
         "/internal/nuclei/callback",
-        json={"scan_id": 999, "status": "completed", "findings": []},
+        json={"scan_id": "does-not-exist", "status": "completed", "findings": []},
         headers=callback_headers,
     )
     assert response.status_code == 404
 
 
 def test_nuclei_callback_is_idempotent_per_scan(client, callback_headers):
-    test_client, _, _ = client
-    scan_id, _ = _enqueue_scan(
-        test_client,
-        {
-            "name": "blog",
-            "url": "https://blog.internal.example.com",
-            "scope": {"allowed_hosts": ["blog.internal.example.com"]},
-        },
-    )
+    test_client, _, session_factory = client
+    scan_id = _bootstrap_scan(session_factory, scope="blog.internal.example.com")
 
     payload = {
         "scan_id": scan_id,
@@ -148,7 +135,7 @@ def test_nuclei_callback_is_idempotent_per_scan(client, callback_headers):
     }
 
     first = test_client.post("/internal/nuclei/callback", json=payload, headers=callback_headers)
-    assert first.status_code == 204, first.text
+    assert first.status_code == 200, first.text
 
     second = test_client.post("/internal/nuclei/callback", json=payload, headers=callback_headers)
     assert second.status_code == 409

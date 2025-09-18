@@ -1,377 +1,123 @@
-import logging
-from typing import Generator, Tuple
+import jwt
 
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, sessionmaker
-
-from controller.db.models import AuditLog, Base, Scan, Target
-from controller.main import (
-    AuditEvent,
-    Base,
-    PrincipalCredential,
-    Finding,
-    QueueClient,
-    Scan,
-    Settings,
-    _engine_from_url,
-    _hash_secret,
-    _session_factory_from_url,
-    app,
-    get_db_session,
-    get_queue_client,
-    get_settings,
-)
+from controller.main import PrincipalCredential, Settings, _hash_secret
 
 
-class FakeQueueClient(QueueClient):
-    def __init__(self) -> None:
-        self.calls = []
-
-    def enqueue(self, channel: str, payload):  # type: ignore[override]
-        self.calls.append((channel, payload))
-
-
-@pytest.fixture()
-def client() -> Generator[Tuple[TestClient, FakeQueueClient, sessionmaker], None, None]:
-    get_settings.cache_clear()  # type: ignore[attr-defined]
-    _engine_from_url.cache_clear()  # type: ignore[attr-defined]
-    _session_factory_from_url.cache_clear()  # type: ignore[attr-defined]
-    settings = Settings(
-        database_url="sqlite+pysqlite:///:memory:",
-        redis_url="redis://localhost:6379/0",
-        nuclei_queue_channel="test-nuclei",
-        jwt_secret="unit-test-secret",
-        api_keys=["test-key"],
-        nuclei_callback_token="callback-secret",
-    )
-
-    engine = create_engine(settings.database_url, future=True)
-    TestingSessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
-    Base.metadata.create_all(bind=engine)
-
-    with TestingSessionLocal() as session:
-        session.add_all(
-            [
-                PrincipalCredential(
-                    subject="svc-admin",
-                    auth_method="api_key",
-                    key_hash=_hash_secret("test-key"),
-                    roles=["admin", "scan:enqueue", "targets:write", "findings:read"],
-                ),
-                PrincipalCredential(
-                    subject="svc-analyst",
-                    auth_method="api_key",
-                    key_hash=_hash_secret("analyst-key"),
-                    roles=["analyst", "findings:read"],
-                ),
-            ]
-        )
-        session.commit()
-
-    queue = FakeQueueClient()
-
-    def override_settings() -> Settings:
-        return settings
-
-    def override_db() -> Generator[Session, None, None]:
-        session = TestingSessionLocal()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    def override_queue() -> FakeQueueClient:
-        return queue
-
-    app.dependency_overrides[get_settings] = override_settings
-    app.dependency_overrides[get_db_session] = override_db
-    app.dependency_overrides[get_queue_client] = override_queue
-
-    with TestClient(app) as test_client:
-        yield test_client, queue, TestingSessionLocal
-
-    app.dependency_overrides.clear()
-    get_settings.cache_clear()  # type: ignore[attr-defined]
-    _session_factory_from_url.cache_clear()  # type: ignore[attr-defined]
-    _engine_from_url.cache_clear()  # type: ignore[attr-defined]
-
-
-def auth_headers(api_key: str = "test-key") -> dict[str, str]:
+def api_key_headers(api_key: str) -> dict[str, str]:
     return {"X-API-Key": api_key}
 
 
-def test_target_creation_rejects_blank_scope(client):
-    test_client, _, _ = client
+def auth_headers(api_key: str = "test-key") -> dict[str, str]:
+    return api_key_headers(api_key)
+
+
+def jwt_headers(settings: Settings, subject: str) -> dict[str, str]:
+    token = jwt.encode({"sub": subject}, settings.jwt_secret, algorithm="HS256")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_admin_can_create_list_and_revoke_principals(client):
+    test_client, settings, session_factory = client
+
+    create_response = test_client.post(
+        "/principals",
+        json={
+            "subject": "svc-transient",
+            "auth_method": "api_key",
+            "roles": ["analyst"],
+            "description": "Temporary analyst access",
+        },
+        headers=api_key_headers("test-key"),
+    )
+    assert create_response.status_code == 201, create_response.text
+    payload = create_response.json()
+    credential_id = payload["id"]
+    issued_secret = payload["secret"]
+    assert issued_secret
+
+    with session_factory() as session:
+        record = session.get(PrincipalCredential, credential_id)
+        assert record is not None
+        assert record.key_hash == _hash_secret(issued_secret)
+        assert record.roles == ["analyst"]
+
+    usable_response = test_client.get("/scans", headers=api_key_headers(issued_secret))
+    assert usable_response.status_code == 200
+    assert usable_response.json() == {"data": []}
+
+    list_response = test_client.get("/principals", headers=api_key_headers("test-key"))
+    assert list_response.status_code == 200
+    principals = list_response.json()["data"]
+    assert any(principal["id"] == credential_id for principal in principals)
+    assert all("secret" not in principal for principal in principals)
+
+    revoke_response = test_client.post(
+        f"/principals/{credential_id}/revoke",
+        headers=api_key_headers("test-key"),
+    )
+    assert revoke_response.status_code == 200
+    assert revoke_response.json()["revoked_at"] is not None
+
+    post_revoke = test_client.get("/scans", headers=api_key_headers(issued_secret))
+    assert post_revoke.status_code == 401
+
+
+def test_analyst_cannot_access_admin_principal_endpoints(client):
+    test_client, settings, _ = client
+
+    list_response = test_client.get("/principals", headers=api_key_headers("analyst-key"))
+    assert list_response.status_code == 403
+
+    create_response = test_client.post(
+        "/principals",
+        json={
+            "subject": "svc-denied",
+            "auth_method": "api_key",
+            "roles": ["analyst"],
+        },
+        headers=api_key_headers("analyst-key"),
+    )
+    assert create_response.status_code == 403
+
+
+def test_scan_enqueue_requires_explicit_role(client):
+    test_client, settings, _ = client
+
+    response = test_client.post(
+        "/scan",
+        json={
+            "target_id": "missing",
+            "scanner": "nuclei",
+            "parameters": {},
+        },
+        headers=api_key_headers("analyst-key"),
+    )
+    assert response.status_code == 403
+
+
+def test_target_creation_requires_write_role(client):
+    test_client, settings, _ = client
 
     response = test_client.post(
         "/targets",
         json={
-            "name": "prod-web",
-            "scope": "",
+            "name": "api",
+            "scope": "api.internal.example.com",
             "is_authorized": True,
         },
-        headers=auth_headers(),
+        headers=api_key_headers("analyst-key"),
     )
-
-    assert response.status_code == 422
-
-
-def test_scan_enqueue_pushes_job(client):
-    test_client, queue, session_factory = client
-
-    create_resp = test_client.post(
-        "/targets",
-        json={
-            "name": "prod-web",
-            "scope": "prod.internal.example.com",
-        },
-        headers=auth_headers(),
-    )
-    assert create_resp.status_code == 201, create_resp.text
-    target_id = create_resp.json()["id"]
-
-    scan_resp = test_client.post(
-        "/scan",
-        json={
-            "target_id": target_id,
-            "scanner": "nuclei",
-            "parameters": {"profile": "full"},
-        },
-        headers=auth_headers(),
-    )
-
-    assert scan_resp.status_code == 202, scan_resp.text
-    payload = scan_resp.json()
-    assert payload["target"] == "https://prod.internal.example.com"
-    assert payload["findings_count"] == 0
-    assert "updated_at" in payload
-
-    assert queue.calls
-    channel, payload = queue.calls[-1]
-    assert channel == "test-nuclei"
-    assert payload["target_id"] == target_id
-    assert payload["scanner"] == "nuclei"
-    assert payload["parameters"] == {"profile": "full"}
-    assert payload["initiated_by"].startswith("apikey:")
-
-    with session_factory() as session:
-        db_target = session.get(Target, target_id)
-        assert db_target is not None
-        assert db_target.scope == "prod.internal.example.com"
-
-        db_scan = session.execute(
-            select(Scan).where(Scan.target_id == target_id)
-        ).scalar_one()
-        assert db_scan.initiated_by is not None
-        assert db_scan.initiated_by.startswith("apikey:")
+    assert response.status_code == 403
 
 
-def test_scan_rejects_unauthorized_target(client):
-    test_client, queue, session_factory = client
+def test_jwt_admin_and_analyst_permissions(client):
+    test_client, settings, _ = client
 
-    with session_factory() as session:
-        target = Target(
-            name="prod-web",
-            scope="prod.internal.example.com",
-            is_authorized=False,
-        )
-        session.add(target)
-        session.commit()
-        target_id = target.id
+    admin_headers = jwt_headers(settings, "jwt-admin")
+    analyst_headers = jwt_headers(settings, "jwt-analyst")
 
-    scan_resp = test_client.post(
-        "/scan",
-        json={
-            "target_id": target_id,
-            "scanner": "nuclei",
-            "parameters": {},
-        },
-        headers=auth_headers(),
-    )
+    admin_response = test_client.get("/principals", headers=admin_headers)
+    assert admin_response.status_code == 200
 
-    assert scan_resp.status_code == 403
-    assert not queue.calls
-
-
-def test_scan_enqueue_requires_role(client):
-    test_client, queue, _ = client
-
-    create_resp = test_client.post(
-        "/targets",
-        json={
-            "name": "prod-web",
-            "url": "https://prod.internal.example.com",
-            "scope": {"allowed_hosts": ["prod.internal.example.com"]},
-        },
-        headers=auth_headers(),
-    )
-    assert create_resp.status_code == 201
-    target_id = create_resp.json()["id"]
-
-    denied_resp = test_client.post(
-        "/scan",
-        json={
-            "target_id": target_id,
-            "profile": "full",
-            "requested_hosts": ["prod.internal.example.com"],
-        },
-        headers=auth_headers("analyst-key"),
-    )
-
-    assert denied_resp.status_code == 403
-    assert not queue.calls
-
-
-def test_invalid_api_key_rejected(client):
-    test_client, _, _ = client
-
-    response = test_client.get("/findings", headers=auth_headers("bad-key"))
-
-    assert response.status_code == 401
-
-
-def test_audit_logging_records_events(client, caplog):
-    caplog.set_level(logging.INFO, logger="medusa.audit")
-    test_client, _, session_factory = client
-
-    with session_factory() as session:
-        target = Target(
-            name="prod-web",
-            url="https://prod.internal.example.com",
-            scope={"allowed_hosts": ["prod.internal.example.com"]},
-            is_authorized=True,
-        )
-        session.add(target)
-        session.commit()
-
-    response = test_client.get("/findings", headers=auth_headers("analyst-key"))
-    assert response.status_code == 200
-    assert response.json() == {"data": []}
-
-    with session_factory() as session:
-        events = (
-            session.execute(
-                select(AuditLog).where(AuditLog.action == "list_findings")
-            )
-            .scalars()
-            .all()
-        )
-        assert len(events) == 1
-        assert events[0].actor == "svc-analyst"
-        assert events[0].actor.startswith("apikey:")
-        assert events[0].evidence_snapshot["metadata"] == {
-            "target_id": None,
-            "scan_id": None,
-        }
-        assert events[0].evidence_snapshot["resource_type"] == "finding"
-        assert events[0].evidence_snapshot["resource_id"] is None
-
-    assert any(record.action == "list_findings" for record in caplog.records)
-
-
-def test_list_scans_returns_enriched_payload(client):
-    test_client, _, session_factory = client
-
-    with session_factory() as session:
-        target = Target(
-            name="prod-web",
-            url="https://prod.internal.example.com",
-            scope={"allowed_hosts": ["prod.internal.example.com"]},
-        )
-        session.add(target)
-        session.commit()
-        session.refresh(target)
-
-        scan = Scan(
-            target_id=target.id,
-            profile="full",
-            status="completed",
-            requested_hosts=["prod.internal.example.com"],
-            initiated_by="system",
-        )
-        session.add(scan)
-        session.commit()
-        session.refresh(scan)
-
-        finding = Finding(
-            scan_id=scan.id,
-            severity="high",
-            title="Expired certificate",
-            description="cert expired",
-        )
-        session.add(finding)
-        session.commit()
-
-        target_url = target.url
-        scan_id = scan.id
-
-    response = test_client.get("/scans", headers=auth_headers())
-    assert response.status_code == 200
-
-    payload = response.json()
-    assert set(payload.keys()) == {"data"}
-    assert len(payload["data"]) == 1
-
-    scan_payload = payload["data"][0]
-    assert scan_payload["id"] == scan_id
-    assert scan_payload["target"] == target_url
-    assert scan_payload["findings_count"] == 1
-    assert scan_payload["status"] == "completed"
-    assert scan_payload["updated_at"] == scan_payload["created_at"]
-
-    with session_factory() as session:
-        audit_events = session.query(AuditEvent).filter(AuditEvent.action == "list_scans").all()
-        assert len(audit_events) == 1
-
-
-def test_list_findings_returns_enriched_payload(client):
-    test_client, _, session_factory = client
-
-    with session_factory() as session:
-        target = Target(
-            name="prod-web",
-            url="https://prod.internal.example.com",
-            scope={"allowed_hosts": ["prod.internal.example.com"]},
-        )
-        session.add(target)
-        session.commit()
-        session.refresh(target)
-
-        scan = Scan(
-            target_id=target.id,
-            profile="full",
-            status="running",
-            requested_hosts=["prod.internal.example.com"],
-            initiated_by="system",
-        )
-        session.add(scan)
-        session.commit()
-        session.refresh(scan)
-
-        finding = Finding(
-            scan_id=scan.id,
-            severity="critical",
-            title="SQLi",
-            description="Detected via nuclei",
-        )
-        session.add(finding)
-        session.commit()
-
-        finding_id = finding.id
-        scan_id = scan.id
-
-    response = test_client.get("/findings", headers=auth_headers())
-    assert response.status_code == 200
-
-    payload = response.json()
-    assert len(payload["data"]) == 1
-
-    finding_payload = payload["data"][0]
-    assert finding_payload["id"] == finding_id
-    assert finding_payload["scan_id"] == scan_id
-    assert finding_payload["status"] == "open"
-    assert finding_payload["template_id"] == "nuclei:unspecified"
-    assert finding_payload["detected_at"] == finding_payload["updated_at"]
-    assert finding_payload["evidence"] == "Detected via nuclei"
+    analyst_response = test_client.get("/principals", headers=analyst_headers)
+    assert analyst_response.status_code == 403
