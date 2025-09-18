@@ -57,6 +57,10 @@ A successful run prints `Worker callback confirmed` and exits `0`. If the callba
 
 The MinIO console is available at `http://localhost:9001` with credentials from `.env`. Qdrant's HTTP API listens on `http://localhost:6333` for enrichment debugging.
 
+### Dashboard login
+
+When you visit `http://localhost:3000` the browser prompts for HTTP basic authentication. The Compose defaults set `DASHBOARD_BASIC_USER=analyst` and `DASHBOARD_BASIC_PASSWORD=analyst`; update or rotate them in `.env` before exposing the stack anywhere beyond isolated development.
+
 ## Troubleshooting
 - `docker compose logs -f <service>` – inspect runtime logs (controller logs include audit events).
 - `docker compose exec postgres psql -U $MEDUSA_POSTGRES_USER -d $MEDUSA_POSTGRES_DB -c "\dt"` – verify tables after migrations.

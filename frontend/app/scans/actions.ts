@@ -62,15 +62,19 @@ export async function scheduleScanAction(
     };
   }
 
-  const payload: CreateScanPayload = {
-    target_id: input.targetId,
+  const hosts = normalizeHosts(input.requestedHosts);
+  const parameters: Record<string, unknown> = {
     profile: input.profile
   };
-
-  const hosts = normalizeHosts(input.requestedHosts);
   if (hosts.length > 0) {
-    payload.requested_hosts = hosts;
+    parameters.requested_hosts = hosts;
   }
+
+  const payload: CreateScanPayload = {
+    target_id: input.targetId,
+    scanner: 'nuclei',
+    parameters
+  };
 
   try {
     const scan = await createScan(payload);

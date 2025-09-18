@@ -37,6 +37,40 @@ from controller.db.session import SessionLocal
 LOGGER = logging.getLogger("medusa.controller")
 AUDIT_LOGGER = logging.getLogger("medusa.audit")
 
+ROLE_ADMIN = "admin"
+ROLE_ANALYST = "analyst"
+ROLE_FINDINGS_READ = "findings:read"
+ROLE_SCANS_READ = "scans:read"
+ROLE_SCAN_ENQUEUE = "scan:enqueue"
+ROLE_TARGETS_READ = "targets:read"
+ROLE_TARGETS_WRITE = "targets:write"
+
+ALLOWED_ROLES = {
+    ROLE_ADMIN,
+    ROLE_ANALYST,
+    ROLE_FINDINGS_READ,
+    ROLE_SCANS_READ,
+    ROLE_SCAN_ENQUEUE,
+    ROLE_TARGETS_READ,
+    ROLE_TARGETS_WRITE,
+}
+
+DEFAULT_ANALYST_ROLES = [
+    ROLE_ANALYST,
+    ROLE_FINDINGS_READ,
+    ROLE_SCANS_READ,
+    ROLE_SCAN_ENQUEUE,
+    ROLE_TARGETS_READ,
+]
+
+DEFAULT_ADMIN_ROLES = [
+    ROLE_ADMIN,
+    ROLE_FINDINGS_READ,
+    ROLE_SCANS_READ,
+    ROLE_SCAN_ENQUEUE,
+    ROLE_TARGETS_READ,
+    ROLE_TARGETS_WRITE,
+]
 
 class Settings(BaseSettings):
     """Runtime configuration for the controller service."""
@@ -57,7 +91,7 @@ class Settings(BaseSettings):
     )
     api_keys: List[str] = Field(
         default_factory=list,
-        description="Static API keys for service accounts (temporary until RBAC lands).",
+        description="Static API keys for service accounts granted admin roles by default.",
     )
     nuclei_callback_token: str = Field(
         ..., description="Shared secret token required for nuclei worker callbacks."
@@ -116,6 +150,9 @@ class TargetResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+class TargetCollectionResponse(BaseModel):
+    data: List[TargetResponse]
 
 class ScanRequest(BaseModel):
     target_id: str
@@ -240,6 +277,14 @@ class PrincipalCredentialCreateRequest(BaseModel):
                 normalized.append(role)
         return normalized
 
+    @field_validator("roles")
+    @classmethod
+    def _validate_roles(cls, value: List[str]) -> List[str]:
+        invalid = [role for role in value if role not in ALLOWED_ROLES]
+        if invalid:
+            raise ValueError(f"Unsupported roles requested: {', '.join(sorted(invalid))}")
+        return value
+
 
 class PrincipalCredentialResponse(BaseModel):
     id: int
@@ -327,7 +372,7 @@ def authenticate(
         return Principal(
             subject=f"apikey:{subject_hash}",
             auth_method="api_key",
-            roles=["admin", "scan:enqueue", "targets:write", "findings:read"],
+            roles=list(DEFAULT_ADMIN_ROLES),
         )
 
     if credentials is None or credentials.scheme.lower() != "bearer":
@@ -384,7 +429,7 @@ def authenticate_worker(
 
 
 def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
-    if principal.has_role("admin"):
+    if principal.has_role(ROLE_ADMIN):
         return
     if not principal.has_any_role(required_roles):
         raise HTTPException(
@@ -518,11 +563,19 @@ def create_principal_credential(
                 detail="JWT principals do not accept shared secrets",
             )
 
+    requested_roles = request.roles
+    if ROLE_ADMIN in requested_roles:
+        assigned_roles = list(dict.fromkeys(DEFAULT_ADMIN_ROLES))
+    elif ROLE_ANALYST in requested_roles or not requested_roles:
+        assigned_roles = list(dict.fromkeys(DEFAULT_ANALYST_ROLES))
+    else:
+        assigned_roles = requested_roles
+
     credential = PrincipalCredential(
         subject=request.subject,
         auth_method=request.auth_method,
         key_hash=key_hash,
-        roles=request.roles,
+        roles=assigned_roles,
         description=request.description,
     )
     db.add(credential)
@@ -597,7 +650,7 @@ def create_target(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetResponse:
-    enforce_roles(principal, ["targets:write"])
+    enforce_roles(principal, [ROLE_TARGETS_WRITE])
     existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
         raise HTTPException(
@@ -625,6 +678,27 @@ def create_target(
 
     return TargetResponse.model_validate(target, from_attributes=True)
 
+@app.get("/targets", response_model=TargetCollectionResponse)
+def list_targets(
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> TargetCollectionResponse:
+    enforce_roles(principal, [ROLE_TARGETS_READ])
+    targets = db.query(Target).order_by(Target.created_at.desc()).all()
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="list_targets",
+        resource_type="target",
+        resource_id=None,
+        metadata={"count": len(targets)},
+    )
+
+    return TargetCollectionResponse(
+        data=[TargetResponse.model_validate(target, from_attributes=True) for target in targets]
+    )
+
 
 @app.post("/scan", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED)
 def enqueue_scan(
@@ -634,7 +708,7 @@ def enqueue_scan(
     queue: QueueClient = Depends(get_queue_client),
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
-    enforce_roles(principal, ["scan:enqueue"])
+    enforce_roles(principal, [ROLE_SCAN_ENQUEUE])
 
     target = db.get(Target, request.target_id)
     if target is None:
@@ -680,6 +754,13 @@ def enqueue_scan(
 
     return serialize_scan(scan)
 
+app.add_api_route(
+    "/scans",
+    enqueue_scan,
+    methods=["POST"],
+    response_model=ScanResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 
 @app.get("/scans", response_model=ScanCollectionResponse)
 def list_scans(
@@ -689,6 +770,7 @@ def list_scans(
 ) -> ScanCollectionResponse:
     """Return the most recent scans for the authenticated principal."""
 
+    enforce_roles(principal, [ROLE_SCANS_READ])
     query = db.query(Scan).options(
         selectinload(Scan.target), selectinload(Scan.findings)
     )
@@ -798,6 +880,7 @@ def list_findings(
 ) -> FindingCollectionResponse:
     """Return the latest findings for the requested scope."""
 
+    enforce_roles(principal, [ROLE_FINDINGS_READ])
     query = db.query(Finding)
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
@@ -829,6 +912,7 @@ def get_finding(
 ) -> FindingItemResponse:
     """Fetch a single finding for detailed analysis views."""
 
+    enforce_roles(principal, [ROLE_FINDINGS_READ])
     finding = db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(
@@ -906,6 +990,7 @@ __all__ = [
     "AuditLog",
     "ScanResponse",
     "ScanCollectionResponse",
+    "TargetCollectionResponse",
     "FindingResponse",
     "FindingCollectionResponse",
     "FindingItemResponse",

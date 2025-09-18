@@ -60,7 +60,7 @@ The smoke test seeds demo targets, enqueues a nuclei job, and waits for the work
 
 ### 4. Develop against the running services
 - Controller API: http://localhost:8000 (OpenAPI at `/docs`)
-- Analyst dashboard: http://localhost:3000 (basic auth + API key from `.env`)
+- Analyst dashboard: http://localhost:3000 (HTTP basic auth using `analyst` / `analyst` unless you override `DASHBOARD_BASIC_*` in `.env`)
 - MinIO console: http://localhost:9001
 - Qdrant HTTP API: http://localhost:6333
 
