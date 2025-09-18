@@ -1,0 +1,139 @@
+name: ${COMPOSE_PROJECT_NAME:-medusa}
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${MEDUSA_POSTGRES_USER:-medusa}
+      POSTGRES_PASSWORD: ${MEDUSA_POSTGRES_PASSWORD:-medusa}
+      POSTGRES_DB: ${MEDUSA_POSTGRES_DB:-medusa}
+    ports:
+      - "${MEDUSA_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MEDUSA_POSTGRES_USER:-medusa}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${MEDUSA_REDIS_PORT:-6379}:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-05-27T16-10-24Z
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-medusaadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-medusaadmin123}
+      MINIO_SITE_REGION: ${MINIO_SITE_REGION:-us-east-1}
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - ./data/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.7.3
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:6333/readyz || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  controller:
+    build:
+      context: ../..
+      dockerfile: infra/docker/controller.Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_controller
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MEDUSA_DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
+      MEDUSA_REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      MEDUSA_NUCLEI_QUEUE_CHANNEL: ${MEDUSA_NUCLEI_QUEUE_CHANNEL:-queues:nuclei:jobs}
+      MEDUSA_JWT_SECRET: ${MEDUSA_JWT_SECRET:-change-this-in-production}
+      MEDUSA_API_KEYS: ${MEDUSA_API_KEYS:-frontend-dev-key}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    ports:
+      - "${MEDUSA_CONTROLLER_PORT:-8000}:8000"
+    volumes:
+      - ../../controller:/app/controller:delegated
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: infra/docker/frontend.Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_frontend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      CONTROLLER_API_BASE_URL: ${CONTROLLER_API_BASE_URL:-http://controller:8000}
+      CONTROLLER_API_KEY: ${CONTROLLER_API_KEY:-frontend-dev-key}
+      CONTROLLER_JWT: ${CONTROLLER_JWT:-}
+      DASHBOARD_BASIC_USER: ${DASHBOARD_BASIC_USER:-analyst}
+      DASHBOARD_BASIC_PASSWORD: ${DASHBOARD_BASIC_PASSWORD:-analyst}
+      CHOKIDAR_USEPOLLING: ${CHOKIDAR_USEPOLLING:-true}
+      WATCHPACK_POLLING: ${WATCHPACK_POLLING:-true}
+    depends_on:
+      controller:
+        condition: service_healthy
+    ports:
+      - "${MEDUSA_FRONTEND_PORT:-3000}:3000"
+    volumes:
+      - ../../frontend:/app/frontend:delegated
+      - frontend_node_modules:/app/frontend/node_modules
+      - frontend_next_cache:/app/frontend/.next
+    command: ["/bin/sh", "-c", "pnpm install --prefer-offline --ignore-scripts && pnpm dev --hostname 0.0.0.0 --port 3000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  frontend_node_modules:
+  frontend_next_cache:

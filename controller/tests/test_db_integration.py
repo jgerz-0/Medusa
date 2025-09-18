@@ -45,6 +45,7 @@ def test_target_scan_finding_crud(session: Session) -> None:
         target_id=target.id,
         scanner="nuclei",
         parameters={"template": "example"},
+        initiated_by="controller",
     )
     session.add(scan)
     session.flush()
@@ -75,7 +76,7 @@ def test_finding_evidence_is_immutable(session: Session) -> None:
     session.add(target)
     session.flush()
 
-    scan = Scan(target_id=target.id, scanner="zap", parameters={})
+    scan = Scan(target_id=target.id, scanner="zap", parameters={}, initiated_by="controller")
     session.add(scan)
     session.flush()
 
@@ -105,7 +106,12 @@ def test_audit_log_evidence_is_immutable(session: Session) -> None:
     session.add(target)
     session.flush()
 
-    scan = Scan(target_id=target.id, scanner="custom", parameters={})
+    scan = Scan(
+        target_id=target.id,
+        scanner="custom",
+        parameters={},
+        initiated_by="controller",
+    )
     session.add(scan)
     session.flush()
 
