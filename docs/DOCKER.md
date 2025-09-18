@@ -30,6 +30,10 @@ docker compose up --build -d
 docker compose ps
 ```
 
+Set the optional `COMPOSE_BIN` environment variable if you prefer an alternate
+Compose implementation (for example `podman compose`). The smoke test script
+uses the same variable to avoid hard-coding the binary path.
+
 The compose file automatically mounts code from `controller/`, `workers/web/nuclei/`, and `frontend/` into the containers so edits on the host trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts.
 
 ## Smoke Test
@@ -38,6 +42,8 @@ Run the end-to-end smoke test once the services report `healthy`:
 ```bash
 ./infra/docker/smoke-test.sh
 ```
+
+The script requires a `.env` file in `infra/docker/` (copy `.env.example` before running) so that controller, worker, and smoke test credentials stay in sync. MinIO artifact uploads are disabled by default; set `NUCLEI_ARTIFACT_BUCKET` if you need to exercise S3 persistence locally.
 
 The script performs the following actions:
 
