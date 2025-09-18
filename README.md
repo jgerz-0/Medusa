@@ -97,8 +97,35 @@ export NUCLEI_QUEUE_KEY="queues:nuclei:jobs"  # matches controller default
 poetry run python worker.py
 ```
 
-### 5. Frontend status
-The Next.js dashboard is still a static landing page; no API wiring exists yet. `pnpm dev` will launch the stub UI when you are iterating on layout work.
+### 5. Frontend operations console
+The Next.js dashboard now pulls live data from the controller and can orchestrate scoped scans. To run it locally:
+
+```bash
+cd frontend
+pnpm install
+
+# Point the UI at the locally running controller and provide credentials.
+export CONTROLLER_API_BASE_URL="http://127.0.0.1:8000"
+export CONTROLLER_API_KEY="local-dev-key"
+
+pnpm dev
+```
+
+The `/scans` route now exposes a launch form that submits through a server action so controller secrets never reach the browser. Analysts can queue nuclei jobs directly from the console using the documented presets below.
+
+### Analyst workflow: launching scans from the console
+
+1. Register the asset under **Targets** in the controller and confirm its `is_authorized` flag is `true`.
+2. Navigate to `http://localhost:3000/scans`, select the authorized target, and choose a scan profile preset.
+3. Submit the form. The UI performs an optimistic update while the controller validates scope and enqueues the nuclei job. Any validation issues returned by the API are rendered inline for rapid remediation.
+
+| Preset | Controller profile | Requested hosts | Primary use case |
+| --- | --- | --- | --- |
+| Baseline Web Recon | `web-baseline` | Derived from the selected target | Daily surface validation against hardened nuclei defaults. |
+| API Deep Dive | `api-deep-dive` | `api.medusa.local` | Authenticated API sweeps with throttled rates. |
+| External Attack Surface | `external-attack-surface` | `www.medusa.local`, `portal.medusa.local` | Weekly external perimeter checks targeting high-signal templates. |
+
+Status banners track optimistic queueing (`Queueing…`), success acknowledgements, and controller validation failures so analysts can move quickly without sacrificing auditability.
 
 ### Manage database migrations
 
