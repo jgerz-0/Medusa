@@ -1,22 +1,63 @@
-# Architecture
+# Architecture Overview
+
+Medusa embraces agentic modularity. Each service is responsible for a bounded function, communicates over deterministic JSON interfaces, and operates under least privilege.
+
+## High-Level Diagram
+```
+┌──────────┐      ┌────────┐      ┌───────────┐      ┌────────────┐
+│  Client  │ ---> │Controller│ --> │ Work Queue│ --> │ Scanner Jobs│
+└──────────┘      └────────┘      └───────────┘      └─────┬──────┘
+                                                             │
+                                              ┌──────────────┴──────────────┐
+                                              │            Agents           │
+                                              │ Recon · Enrich · Validate   │
+                                              └──────────────┬──────────────┘
+                                                             │
+                                       ┌──────────────┐   ┌─────────────┐
+                                       │   Postgres   │   │   MinIO     │
+                                       │ (Findings)   │   │ (Artifacts) │
+                                       └──────────────┘   └─────────────┘
+```
 
 ## Components
-- **Controller**: FastAPI REST service, schedules jobs, stores results
-- **Queue**: Redis / RabbitMQ for job dispatch
-- **Workers**:
-  - Web scanners (nuclei, zap, sqlmap)
-  - Binary scanners (afl, angr, checksec)
-- **Agents**:
-  - Recon, Preprocess, Validator, Enrichment, Reporter
-- **Storage**:
-  - Postgres (structured results)
-  - MinIO/S3 (artifacts)
-- **Frontend**: Next.js dashboard, PDF exports
-- **Vector Store**: Qdrant/Weaviate for CVE/advisory recall
+- **Controller (FastAPI)**
+  - Validates incoming scan requests and target scope.
+  - Persists scan definitions and issues JWT-scoped job tokens.
+  - Emits audit events for every state transition.
+- **Queue (Redis / RabbitMQ)**
+  - Stores pending jobs keyed by agent type.
+  - Ensures idempotent delivery with per-job retry policy.
+- **Workers**
+  - Containerized wrappers around scanners (nuclei, ZAP, SQLMap, AFL, angr).
+  - Normalize output into the shared JSON Finding schema.
+  - Upload heavy artifacts (pcaps, binaries, logs) to MinIO.
+- **Agents**
+  - **Recon Agent** – Discovers assets from authorized inventory feeds.
+  - **Preprocess Agent** – Classifies binaries, extracts metadata, enforces triage rules.
+  - **Enrichment Agent** – Calls NVD/CIRCL, consults Qdrant for semantic matches, annotates findings without mutating raw evidence.
+  - **Validator Agent** – Executes targeted retests before critical findings are published.
+  - **Reporter Agent** – Consolidates output, publishes to Postgres, triggers notifications.
+- **Storage**
+  - **Postgres** – Canonical store for scans, targets, findings, audit logs, API keys.
+  - **MinIO/S3** – Evidence blobs, fuzzing crashes, reports.
+  - **Qdrant** – Vector embeddings for advisories and scanner fingerprints.
+- **Frontend (Next.js)**
+  - Analyst dashboard for scan orchestration, findings triage, and audit review.
 
-## Dataflow
-1. API `/scan` → validate → push job to queue
-2. K8s Job → run scanner worker → save results to MinIO
-3. Enrichment Agent → fetch NVD/CIRCL + vector store → add metadata
-4. Validator Agent → optional targeted probes
-5. Reporter Agent → save final record to DB → trigger UI/ticket
+## Data Flow (Phase 1 Baseline)
+1. Analyst requests a scan via UI/CLI.
+2. Controller authenticates the user, validates scope, and enqueues a nuclei job.
+3. Worker pulls the job, executes the scanner within an ephemeral container, and posts results back through the controller callback API.
+4. Findings persist to Postgres; artifacts (scan logs, templates) land in MinIO.
+5. UI polls `/scans` and `/findings` to display state transitions.
+
+## Security Controls
+- All inter-service communication authenticated with mTLS (planned) or signed JWTs (Phase 1).
+- Network policies restrict scanner pods to egress only to approved target CIDRs.
+- Secrets sourced from Vault/External Secrets in Kubernetes; `.env.example` governs local development.
+- Audit log appended on every scan lifecycle event (created, queued, running, completed, rejected).
+
+## Extensibility Principles
+- New agents register their JSON schema in `docs/interfaces/` and implement handshake contracts with the controller.
+- Infrastructure definitions (Docker, Helm, Terraform) remain declarative and version controlled.
+- LLM usage limited to summarization/enrichment; deterministic scanner evidence cannot be overridden or deleted.
