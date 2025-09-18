@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medusa-controller"
+version = "0.1.0"
+description = "Controller service for orchestrating automated penetration tests."
+authors = [
+  {name = "Medusa Security Engineering"}
+]
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.103.0,<1.0",
+  "uvicorn[standard]>=0.23.0,<0.28",
+  "pydantic>=1.10.7,<2.0",
+  "sqlalchemy>=1.4.46,<2.0",
+  "redis>=4.5.0,<5.0",
+  "psycopg2-binary>=2.9.6,<2.10",
+  "PyJWT>=2.6.0,<3.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.3.0",
+  "pytest-cov>=4.1.0"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-ra"
+
