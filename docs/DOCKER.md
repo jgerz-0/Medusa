@@ -1,38 +1,51 @@
-# Docker Setup
+# Docker Setup (Work in Progress)
 
-This guide covers the local Docker Compose environment used during Phase 1 foundations.
+Phase 1 does not yet ship Docker Compose manifests. This document captures the interim container commands so engineers can run
+individual services without waiting for the declarative stack.
 
 ## Requirements
 - Docker Engine 20+
-- Docker Compose V2
-- 8 GB RAM available for containers
+- 8 GB RAM available for containers (leave headroom for scanners)
 
-## Services
-- `controller`: FastAPI API server
-- `redis`: job queue broker
+## Current Service Inventory
 - `postgres`: relational datastore for scans and findings
-- `minio`: artifact object storage
-- `qdrant`: vector store for enrichment metadata
-- `frontend`: Next.js analyst dashboard
+- `redis`: job queue broker used by controller/workers
+- Future additions (`minio`, `qdrant`, `frontend`, etc.) will be added alongside Compose assets.
 
-## Usage
+## Manual Service Bring-up
+
+### Postgres
 ```bash
-# start the environment
-docker compose up -d
-
-# view container status
-docker compose ps
-
-# tail controller logs
-docker compose logs -f controller
+docker run --rm -d \
+  --name medusa-postgres \
+  -e POSTGRES_DB=medusa \
+  -e POSTGRES_USER=medusa \
+  -e POSTGRES_PASSWORD=medusa \
+  -p 5432:5432 \
+  postgres:15
 ```
 
-## Configuration
-- Copy `infra/docker/.env.example` to `infra/docker/.env` and review credentials.
-- Postgres data persists under `infra/docker/data/postgres`. Delete intentionally if you need a clean slate.
-- MinIO exposes the console on `http://localhost:9001`; generate access keys scoped to local testing.
+- Matches the controller default URL: `postgresql+psycopg2://medusa:medusa@localhost:5432/medusa`.
+- Use `docker logs medusa-postgres` to confirm readiness before running migrations.
+
+### Redis
+```bash
+docker run --rm -d \
+  --name medusa-redis \
+  -p 6379:6379 \
+  redis:7
+```
+
+- Align worker queue keys with the controller default (`queues:nuclei:jobs`) until centralized config is delivered.
+
+### Teardown
+```bash
+docker stop medusa-postgres medusa-redis
+```
+
+Compose files, `.env` templates, and data volumes under `infra/docker/` remain TODO. Track progress in the Phase 1 issues.
 
 ## Security Notes
-- Compose files default to bridge networking; scanners should only reach approved targets defined in `.env` scope lists.
-- Secrets in `.env` are for local development only. Production credentials must come from a secrets manager.
-- Ensure Docker Desktop or Engine is patched to the latest stable release before running external scans.
+- Restrict Docker to a trusted network segment; scanners should only access explicitly authorized targets.
+- Rotate the default database password before exposing any services outside of localhost.
+- Keep Docker Engine patched to the latest stable release prior to running external scans.

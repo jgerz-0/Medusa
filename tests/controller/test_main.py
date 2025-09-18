@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from controller.main import (
     AuditEvent,
     Base,
+    Finding,
     QueueClient,
+    Scan,
     Settings,
     Target,
     _engine_from_url,
@@ -121,6 +123,11 @@ def test_scan_enqueue_pushes_job(client):
     )
 
     assert scan_resp.status_code == 202, scan_resp.text
+    payload = scan_resp.json()
+    assert payload["target"] == "https://prod.internal.example.com"
+    assert payload["findings_count"] == 0
+    assert "updated_at" in payload
+
     assert queue.calls
     channel, payload = queue.calls[-1]
     assert channel == "test-nuclei"
@@ -145,6 +152,7 @@ def test_audit_logging_records_events(client, caplog):
 
     response = test_client.get("/findings", headers=auth_headers())
     assert response.status_code == 200
+    assert response.json() == {"data": []}
 
     with session_factory() as session:
         events = session.query(AuditEvent).filter(AuditEvent.action == "list_findings").all()
@@ -152,3 +160,109 @@ def test_audit_logging_records_events(client, caplog):
         assert events[0].actor.startswith("apikey:")
 
     assert any(record.action == "list_findings" for record in caplog.records)
+
+
+def test_list_scans_returns_enriched_payload(client):
+    test_client, _, session_factory = client
+
+    with session_factory() as session:
+        target = Target(
+            name="prod-web",
+            url="https://prod.internal.example.com",
+            scope={"allowed_hosts": ["prod.internal.example.com"]},
+        )
+        session.add(target)
+        session.commit()
+        session.refresh(target)
+
+        scan = Scan(
+            target_id=target.id,
+            profile="full",
+            status="completed",
+            requested_hosts=["prod.internal.example.com"],
+            initiated_by="system",
+        )
+        session.add(scan)
+        session.commit()
+        session.refresh(scan)
+
+        finding = Finding(
+            scan_id=scan.id,
+            severity="high",
+            title="Expired certificate",
+            description="cert expired",
+        )
+        session.add(finding)
+        session.commit()
+
+        target_url = target.url
+        scan_id = scan.id
+
+    response = test_client.get("/scans", headers=auth_headers())
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert set(payload.keys()) == {"data"}
+    assert len(payload["data"]) == 1
+
+    scan_payload = payload["data"][0]
+    assert scan_payload["id"] == scan_id
+    assert scan_payload["target"] == target_url
+    assert scan_payload["findings_count"] == 1
+    assert scan_payload["status"] == "completed"
+    assert scan_payload["updated_at"] == scan_payload["created_at"]
+
+    with session_factory() as session:
+        audit_events = session.query(AuditEvent).filter(AuditEvent.action == "list_scans").all()
+        assert len(audit_events) == 1
+
+
+def test_list_findings_returns_enriched_payload(client):
+    test_client, _, session_factory = client
+
+    with session_factory() as session:
+        target = Target(
+            name="prod-web",
+            url="https://prod.internal.example.com",
+            scope={"allowed_hosts": ["prod.internal.example.com"]},
+        )
+        session.add(target)
+        session.commit()
+        session.refresh(target)
+
+        scan = Scan(
+            target_id=target.id,
+            profile="full",
+            status="running",
+            requested_hosts=["prod.internal.example.com"],
+            initiated_by="system",
+        )
+        session.add(scan)
+        session.commit()
+        session.refresh(scan)
+
+        finding = Finding(
+            scan_id=scan.id,
+            severity="critical",
+            title="SQLi",
+            description="Detected via nuclei",
+        )
+        session.add(finding)
+        session.commit()
+
+        finding_id = finding.id
+        scan_id = scan.id
+
+    response = test_client.get("/findings", headers=auth_headers())
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert len(payload["data"]) == 1
+
+    finding_payload = payload["data"][0]
+    assert finding_payload["id"] == finding_id
+    assert finding_payload["scan_id"] == scan_id
+    assert finding_payload["status"] == "open"
+    assert finding_payload["template_id"] == "nuclei:unspecified"
+    assert finding_payload["detected_at"] == finding_payload["updated_at"]
+    assert finding_payload["evidence"] == "Detected via nuclei"

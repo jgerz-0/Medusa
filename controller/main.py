@@ -33,7 +33,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import Session, declarative_base, relationship, selectinload, sessionmaker
 
 
 LOGGER = logging.getLogger("medusa.controller")
@@ -266,12 +266,18 @@ class ScanRequest(BaseModel):
 class ScanResponse(BaseModel):
     id: int
     target_id: int
+    target: str
     profile: str
     status: str
     requested_hosts: List[str]
+    initiated_by: str
+    created_at: datetime
+    updated_at: datetime
+    findings_count: int
 
-    class Config:
-        orm_mode = True
+
+class ScanCollectionResponse(BaseModel):
+    data: List[ScanResponse]
 
 
 class FindingArtifactResponse(BaseModel):
@@ -299,9 +305,16 @@ class FindingResponse(BaseModel):
     evidence_hash: str
     artifacts: List[FindingArtifactResponse] = Field(default_factory=list)
     created_at: datetime
+    status: str
+    template_id: str
+    detected_at: datetime
+    updated_at: datetime
+    evidence: Optional[str] = None
+    remediation: Optional[str] = None
 
-    class Config:
-        orm_mode = True
+
+class FindingCollectionResponse(BaseModel):
+    data: List[FindingResponse]
 
 
 class CallbackArtifact(BaseModel):
@@ -575,8 +588,20 @@ def enqueue_scan(
         metadata={"target_id": target.id, "profile": scan.profile},
     )
 
-    return ScanResponse.from_orm(scan)
+    return serialize_scan(scan)
 
+
+@app.get("/scans", response_model=ScanCollectionResponse)
+def list_scans(
+    target_id: Optional[int] = None,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> ScanCollectionResponse:
+    query = db.query(Scan).options(selectinload(Scan.target), selectinload(Scan.findings))
+    if target_id is not None:
+        query = query.filter(Scan.target_id == target_id)
+
+    scans = query.order_by(Scan.created_at.desc()).all()
 
 @app.post("/internal/nuclei/callback", status_code=status.HTTP_204_NO_CONTENT)
 def nuclei_callback(
@@ -652,12 +677,13 @@ def nuclei_callback(
 
 
 @app.get("/findings", response_model=List[FindingResponse])
+
 def list_findings(
     target_id: Optional[int] = None,
     scan_id: Optional[int] = None,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
-) -> List[FindingResponse]:
+) -> FindingCollectionResponse:
     query = db.query(Finding)
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
@@ -675,7 +701,51 @@ def list_findings(
         metadata={"target_id": target_id, "scan_id": scan_id},
     )
 
-    return [FindingResponse.from_orm(finding) for finding in findings]
+    return FindingCollectionResponse(data=[serialize_finding(finding) for finding in findings])
+
+
+def serialize_scan(scan: Scan) -> ScanResponse:
+    """Project a Scan ORM object into the API contract expected by the UI."""
+
+    target_url = scan.target.url if scan.target else ""
+    findings_count = len(scan.findings)
+
+    # Until we track updates server-side we surface created_at as updated_at to keep
+    # the UI stable and transparent about our current capabilities.
+    return ScanResponse(
+        id=scan.id,
+        target_id=scan.target_id,
+        target=target_url,
+        profile=scan.profile,
+        status=scan.status,
+        requested_hosts=scan.requested_hosts,
+        initiated_by=scan.initiated_by,
+        created_at=scan.created_at,
+        updated_at=scan.created_at,
+        findings_count=findings_count,
+    )
+
+
+def serialize_finding(finding: Finding) -> FindingResponse:
+    """Project a Finding ORM object into the deterministic UI schema."""
+
+    detected_at = finding.created_at
+
+    # The legacy table lacks workflow state, so we default to "open" and expose the
+    # stored description as evidence to maintain analyst context.
+    return FindingResponse(
+        id=finding.id,
+        scan_id=finding.scan_id,
+        severity=finding.severity,
+        title=finding.title,
+        description=finding.description,
+        status="open",
+        template_id="nuclei:unspecified",
+        detected_at=detected_at,
+        updated_at=detected_at,
+        evidence=finding.description,
+        remediation=None,
+    )
 
 
 __all__ = [
@@ -687,8 +757,14 @@ __all__ = [
     "Finding",
     "FindingArtifact",
     "AuditEvent",
+    "ScanResponse",
+    "ScanCollectionResponse",
+    "FindingResponse",
+    "FindingCollectionResponse",
     "get_db_session",
     "get_queue_client",
     "RedisQueueClient",
     "QueueClient",
+    "serialize_scan",
+    "serialize_finding",
 ]
