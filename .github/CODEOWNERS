@@ -1,0 +1,14 @@
+# Global ownership for security platform codebase
+* @medusa-security/platform-core
+
+# Enforce review from infra maintainers for IaC changes
+infra/ @medusa-security/infra
+
+# Require UI guild review for frontend updates
+frontend/ @medusa-security/ui
+
+# Controller orchestration review
+controller/ @medusa-security/controllers
+
+# Scanner workers
+workers/ @medusa-security/workers
