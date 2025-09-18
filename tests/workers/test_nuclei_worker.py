@@ -11,6 +11,7 @@ def sample_job():
     payload = json.dumps(
         {
             "job_id": "job-123",
+            "scan_id": 42,
             "target": "https://example.com",
             "templates": ["cves/2023/CVE-2023-9999.yaml"],
             "callback_url": "https://controller.local/callback",
@@ -25,7 +26,11 @@ def test_normalize_findings(sample_job):
     raw_records = [
         {
             "templateID": "CVE-2023-9999",
-            "info": {"name": "Example Finding", "severity": "high", "description": "demo"},
+            "info": {
+                "name": "Example Finding",
+                "severity": "high",
+                "description": "demo",
+            },
             "matched-at": "https://example.com/login",
             "extracted-results": ["username"],
             "curl-command": "curl https://example.com",
@@ -38,39 +43,23 @@ def test_normalize_findings(sample_job):
     ]
 
     findings = worker.normalize_findings(raw_records, sample_job)
-    assert findings == [
-        {
-            "job_id": "job-123",
-            "target": "https://example.com",
-            "template_id": "CVE-2023-9999",
-            "name": "Example Finding",
-            "description": "demo",
-            "severity": "HIGH",
-            "tags": ["web"],
-            "evidence": {
-                "matched_at": "https://example.com/login",
-                "extracted_results": ["username"],
-                "curl_command": "curl https://example.com",
-            },
-        },
-        {
-            "job_id": "job-123",
-            "target": "https://example.com",
-            "template_id": "generic-misconfig",
-            "name": "Misconfig",
-            "description": None,
-            "severity": "MEDIUM",
-            "tags": ["web"],
-            "evidence": {
-                "matched_at": "https://example.com",
-            },
-        },
-    ]
+    assert findings[0]["title"] == "Example Finding"
+    assert findings[0]["severity"] == "high"
+    assert findings[0]["description"] == "demo"
+    assert findings[0]["evidence"]["matched_at"] == "https://example.com/login"
+    assert findings[0]["artifacts"][0]["artifact_type"] == "nuclei-json"
+
+    assert findings[1]["title"] == "Misconfig"
+    assert findings[1]["severity"] == "medium"
+    assert "finding" in findings[1]["description"].lower()
+    assert findings[1]["evidence"]["matched_at"] == "https://example.com"
+    assert findings[1]["artifacts"][0]["name"].startswith("nuclei-record-")
 
 
 def test_process_job_posts_callback(sample_job):
     config = worker.WorkerConfig()
     config.artifact_bucket = "medusa-artifacts"
+    config.callback_token = "shared-secret"
     queue = mock.create_autospec(worker.RedisQueue, instance=True)
 
     scan_result = worker.ScanResult(
@@ -107,10 +96,126 @@ def test_process_job_posts_callback(sample_job):
     args, kwargs = mock_session.post.call_args
     assert args[0] == sample_job.callback_url
     payload = kwargs["json"]
-    assert payload["status"] == "succeeded"
-    assert payload["job_id"] == sample_job.job_id
-    assert payload["findings"][0]["severity"] == "HIGH"
-    assert "stdout" in payload["artifacts"]
+    assert payload["status"] == "completed"
+    assert payload["scan_id"] == sample_job.scan_id
+    assert payload["findings"][0]["severity"] == "high"
+    assert payload["error"] is None
+    metadata = payload["worker_metadata"]
+    assert metadata["artifact_locations"]["stdout"].endswith("stdout.log")
+    assert metadata["job_id"] == sample_job.job_id
+
+    headers = kwargs["headers"]
+    assert headers["X-Callback-Token"] == "shared-secret"
 
     # stdout upload attempted because stdout is populated
     mock_s3.put_object.assert_called()
+
+
+def test_notify_failure_emits_error(sample_job):
+    config = worker.WorkerConfig()
+    config.callback_token = "shared-secret"
+    mock_session = mock.create_autospec(worker.Session, instance=True)
+    mock_response = mock.Mock()
+    mock_response.raise_for_status.return_value = None
+    mock_session.post.return_value = mock_response
+
+    worker.notify_failure(
+        sample_job, config, "controller unavailable", session=mock_session
+    )
+
+    args, kwargs = mock_session.post.call_args
+    payload = kwargs["json"]
+    assert payload["status"] == "failed"
+    assert payload["error"] == "controller unavailable"
+    assert payload["scan_id"] == sample_job.scan_id
+
+
+def test_worker_loop_retries_on_callback_failure(monkeypatch, sample_job):
+    config = worker.WorkerConfig()
+    config.max_retries = 2
+    config.callback_token = "shared-secret"
+
+    mock_queue = mock.create_autospec(worker.RedisQueue, instance=True)
+    mock_queue.fetch.side_effect = [sample_job, KeyboardInterrupt()]
+
+    monkeypatch.setattr(
+        worker, "WorkerConfig", mock.Mock(load=mock.Mock(return_value=config))
+    )
+    monkeypatch.setattr(worker, "RedisQueue", mock.Mock(return_value=mock_queue))
+    monkeypatch.setattr(worker, "build_s3_client", mock.Mock(return_value=None))
+
+    mock_session = mock.create_autospec(worker.Session, instance=True)
+    mock_session.post.side_effect = worker.RequestException("boom")
+    monkeypatch.setattr(
+        worker, "requests", mock.Mock(Session=mock.Mock(return_value=mock_session))
+    )
+
+    scan_result = worker.ScanResult(
+        records=[], stdout="", stderr="", exit_code=0, duration_seconds=0.5
+    )
+    original_process_job = worker.process_job
+
+    def wrapped_process_job(job, cfg, queue_obj, *, session=None, s3_client=None):
+        return original_process_job(
+            job,
+            cfg,
+            queue_obj,
+            run_scan=mock.Mock(return_value=scan_result),
+            session=session,
+            s3_client=s3_client,
+        )
+
+    monkeypatch.setattr(worker, "process_job", wrapped_process_job)
+
+    worker.worker_loop()
+
+    mock_queue.retry.assert_called()
+    mock_queue.dead_letter.assert_not_called()
+
+
+def test_worker_loop_dead_letters_after_max_retries(monkeypatch, sample_job):
+    config = worker.WorkerConfig()
+    config.max_retries = 1
+    config.callback_token = "shared-secret"
+
+    job_with_attempt = sample_job.with_attempt(config.max_retries)
+
+    mock_queue = mock.create_autospec(worker.RedisQueue, instance=True)
+    mock_queue.fetch.side_effect = [job_with_attempt, KeyboardInterrupt()]
+
+    monkeypatch.setattr(
+        worker, "WorkerConfig", mock.Mock(load=mock.Mock(return_value=config))
+    )
+    monkeypatch.setattr(worker, "RedisQueue", mock.Mock(return_value=mock_queue))
+    monkeypatch.setattr(worker, "build_s3_client", mock.Mock(return_value=None))
+
+    mock_session = mock.create_autospec(worker.Session, instance=True)
+    mock_session.post.side_effect = worker.RequestException("boom")
+    monkeypatch.setattr(
+        worker, "requests", mock.Mock(Session=mock.Mock(return_value=mock_session))
+    )
+
+    scan_result = worker.ScanResult(
+        records=[], stdout="", stderr="", exit_code=0, duration_seconds=0.5
+    )
+    original_process_job = worker.process_job
+
+    def wrapped_process_job(job, cfg, queue_obj, *, session=None, s3_client=None):
+        return original_process_job(
+            job,
+            cfg,
+            queue_obj,
+            run_scan=mock.Mock(return_value=scan_result),
+            session=session,
+            s3_client=s3_client,
+        )
+
+    monkeypatch.setattr(worker, "process_job", wrapped_process_job)
+
+    notify_failure_mock = mock.Mock()
+    monkeypatch.setattr(worker, "notify_failure", notify_failure_mock)
+
+    worker.worker_loop()
+
+    mock_queue.dead_letter.assert_called()
+    notify_failure_mock.assert_called()
