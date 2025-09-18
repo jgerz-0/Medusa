@@ -6,14 +6,17 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 **Objective:** Ship the baseline local experience that exercises the end-to-end Recon → Scan → Report loop with nuclei.
 
 - ✅ Repository skeleton with controller, workers, frontend, docs, and infra directories.
-- ✅ Developer environment using Docker Compose (Postgres, Redis, MinIO, Qdrant).
+- ☐ Developer environment using Docker Compose (Postgres, Redis, MinIO, Qdrant).
+  - _Follow-up:_ Compose manifests still need to be authored under `infra/docker/`; align with the expectations captured in `docs/DOCKER.md`.
 - ✅ FastAPI controller exposing `/scan`, `/targets`, `/findings` endpoints with scope validation.
 - ✅ Redis-backed nuclei worker returning normalized JSON findings.
 - ✅ Postgres schema (targets, scans, findings, audit_log) and Alembic migrations.
-- ✅ Minimal Next.js dashboard listing scans, drill-down for findings, manual scan trigger.
-- 🔒 Baseline RBAC model (admin vs. analyst), API key issuance, and audit logging.
+- ☐ Minimal Next.js dashboard listing scans, drill-down for findings, manual scan trigger.
+  - _Follow-up:_ Build authenticated `/scans` and `/findings` pages that call the controller APIs and wire up a manual scan action from the UI (coordinate with `frontend/README.md`).
+- ☐ Baseline RBAC model (admin vs. analyst), API key issuance, and audit logging.
+  - _Follow-up:_ Extend the controller's auth layer with role checks and API key lifecycle management, then document rotation procedures in `docs/CONTRIBUTING.md`.
 
-> Exit Criteria: Triggering a scan from the UI produces a stored finding with deterministic metadata and enrichment stubbed for later phases.
+> Exit Criteria: The Docker Compose stack reliably stands up controller, worker, Postgres, Redis, MinIO, and Qdrant; analysts trigger nuclei scans from the UI and observe stored findings; baseline RBAC (admin vs. analyst) with audit logging is enforced across the controller APIs.
 
 ## Phase 2 – Enrichment (Weeks 3–4)
 - NVD + CIRCL CVE lookups with deterministic confidence scoring.
