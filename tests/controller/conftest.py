@@ -1,0 +1,112 @@
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from controller.main import (
+    Base,
+    PrincipalCredential,
+    QueueClient,
+    Settings,
+    _engine_from_url,
+    _hash_secret,
+    _session_factory_from_url,
+    app,
+    get_db_session,
+    get_queue_client,
+    get_settings,
+)
+
+
+class FakeQueueClient(QueueClient):
+    def __init__(self) -> None:
+        self.calls = []
+
+    def enqueue(self, channel: str, payload):  # type: ignore[override]
+        self.calls.append((channel, payload))
+
+
+@pytest.fixture()
+def client():
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    _engine_from_url.cache_clear()  # type: ignore[attr-defined]
+    _session_factory_from_url.cache_clear()  # type: ignore[attr-defined]
+
+    settings = Settings(
+        database_url="sqlite+pysqlite:///:memory:",
+        redis_url="redis://localhost:6379/0",
+        nuclei_queue_channel="test-nuclei",
+        jwt_secret="unit-test-secret",
+        api_keys=["legacy-key"],
+        nuclei_callback_token="callback-secret",
+    )
+
+    engine = create_engine(
+        settings.database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
+    Base.metadata.create_all(bind=engine)
+
+    with TestingSessionLocal() as session:
+        session.add_all(
+            [
+                PrincipalCredential(
+                    subject="svc-admin",
+                    auth_method="api_key",
+                    key_hash=_hash_secret("test-key"),
+                    roles=["admin", "scan:enqueue", "targets:write"],
+                    description="Controller admin",
+                ),
+                PrincipalCredential(
+                    subject="svc-analyst",
+                    auth_method="api_key",
+                    key_hash=_hash_secret("analyst-key"),
+                    roles=["analyst", "findings:read"],
+                    description="Read-only analyst",
+                ),
+                PrincipalCredential(
+                    subject="jwt-admin",
+                    auth_method="jwt",
+                    roles=["admin"],
+                    description="JWT admin",
+                ),
+                PrincipalCredential(
+                    subject="jwt-analyst",
+                    auth_method="jwt",
+                    roles=["analyst"],
+                    description="JWT analyst",
+                ),
+            ]
+        )
+        session.commit()
+
+    queue = FakeQueueClient()
+
+    def override_settings() -> Settings:
+        return settings
+
+    def override_db():
+        session = TestingSessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def override_queue() -> FakeQueueClient:
+        return queue
+
+    app.dependency_overrides[get_settings] = override_settings
+    app.dependency_overrides[get_db_session] = override_db
+    app.dependency_overrides[get_queue_client] = override_queue
+
+    with TestClient(app) as test_client:
+        yield test_client, settings, TestingSessionLocal
+
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    _session_factory_from_url.cache_clear()  # type: ignore[attr-defined]
+    _engine_from_url.cache_clear()  # type: ignore[attr-defined]

@@ -116,4 +116,45 @@ pnpm run typecheck
 - Deterministic scanner results remain the source of truth; AI enrichment is additive only.
 - Follow least privilege when modifying Kubernetes manifests or Terraform modules.
 
+## Credential rotation procedures
+
+Controller credentials are short-lived secrets; rotate them whenever an operator leaves the
+engagement, a secret is exposed, or during scheduled quarterly maintenance.
+
+### API keys
+
+1. Authenticate with an administrator credential (`admin` role) and list existing principals:
+   ```bash
+   curl -H "X-API-Key: <admin-key>" https://controller.internal/principals
+   ```
+2. Issue a replacement API key with the same roles using the admin-only creation endpoint. The
+   controller will return the clear-text secret once; store it in the team password vault:
+   ```bash
+   curl -X POST -H "X-API-Key: <admin-key>" \
+        -H "Content-Type: application/json" \
+        -d '{"subject": "svc-recon-v2", "auth_method": "api_key", "roles": ["scan:enqueue"]}' \
+        https://controller.internal/principals
+   ```
+3. Update every service that used the old key to the new secret and validate access. For automation,
+   re-run CI jobs that enqueue scans to ensure the queue accepts the new credential.
+4. Revoke the superseded key:
+   ```bash
+   curl -X POST -H "X-API-Key: <admin-key>" \
+        https://controller.internal/principals/<credential-id>/revoke
+   ```
+5. Verify the old key is rejected (`401 Unauthorized`) and capture the audit trail entry in
+   `audit_events`.
+
+### JWT subjects
+
+1. Confirm the subject exists in `/principals` with the expected role set.
+2. Update the identity provider or signing automation to stop issuing tokens for the subject you plan
+   to revoke, or generate a new subject for replacement tokens.
+3. If replacing the subject entirely, create a new JWT principal via `/principals` with the
+   appropriate roles and propagate the new subject claim to dependent services.
+4. Revoke the legacy subject with `/principals/<credential-id>/revoke` and confirm existing tokens now
+   fail with `403`.
+5. Document the rotation in the operations log, including the new subject identifier and affected
+   services.
+
 Thank you for helping to evolve Medusa's automated security testing platform.

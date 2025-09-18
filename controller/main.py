@@ -9,12 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import secrets
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterable, Iterator, List, Literal, Optional, Union
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 try:  # pragma: no cover - compatibility shim for environments without pydantic-settings
@@ -29,7 +30,9 @@ from redis import Redis
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
-from controller.db.models import AuditLog, Finding, Scan, Target
+from controller.db.models import AuditLog, Finding, Scan, Target, event, inspect
+# Import PrincipalCredential from this file
+from __main__ import PrincipalCredential
 from controller.db.session import SessionLocal
 
 
@@ -37,7 +40,7 @@ LOGGER = logging.getLogger("medusa.controller")
 AUDIT_LOGGER = logging.getLogger("medusa.audit")
 
 
-class Settings(BaseSettings):
+class Settings(BaseModel):
     """Runtime configuration for the controller service."""
 
     database_url: str = Field(
@@ -56,9 +59,7 @@ class Settings(BaseSettings):
         ..., description="Shared secret token required for nuclei worker callbacks."
     )
 
-    class Config:
-        env_prefix = "MEDUSA_"
-        case_sensitive = False
+    model_config = ConfigDict(env_prefix="MEDUSA_", case_sensitive=False)
 
 
 @lru_cache()
@@ -72,6 +73,54 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if payload is None:
         return {}
     return payload
+
+
+def _hash_payload(payload: Dict[str, Any]) -> str:
+    """Generate a SHA-256 hash from a JSON-serialised payload."""
+
+    normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+@event.listens_for(Finding, "before_insert", propagate=True)
+def _finding_set_hash(mapper, connection, target: Finding) -> None:  # pragma: no cover - SQLAlchemy hook
+    metadata_payload = _normalize_payload(getattr(target, 'metadata_json', {}))
+    evidence_payload = _normalize_payload(getattr(target, 'evidence', {}))
+    target.metadata_json = metadata_payload
+    target.evidence = evidence_payload
+    target.evidence_hash = _hash_payload({"metadata": metadata_payload, "evidence": evidence_payload})
+
+
+@event.listens_for(Finding, "before_update", propagate=True)
+def _finding_prevent_mutation(mapper, connection, target: Finding) -> None:  # pragma: no cover - SQLAlchemy hook
+    state = inspect(target)
+    if (
+        state.attrs.metadata_json.history.has_changes()
+        or state.attrs.evidence.history.has_changes()
+        or state.attrs.evidence_hash.history.has_changes()
+    ):
+        raise ValueError("Finding evidence payloads are immutable once persisted.")
+
+# FindingArtifact hooks removed (not defined in models)
+
+
+class ScopeDefinition(BaseModel):
+    """Approved scope for a target or scan request."""
+
+    allowed_hosts: List[str] = Field(
+        ...,
+        description="List of fully qualified hostnames allowed for scanning.",
+    )
+
+    # model_validator removed, use __post_init__ or pydantic root_validator if needed
+    def validate_hosts(self) -> "ScopeDefinition":
+        hosts = list(self.allowed_hosts or [])
+        if not hosts:
+            raise ValueError("At least one allowed host must be provided.")
+        for host in hosts:
+            if not host or " " in host:
+                raise ValueError("Invalid host entry in allowed_hosts.")
+        return self
 
 
 class TargetCreateRequest(BaseModel):
@@ -123,10 +172,10 @@ class ScanResponse(BaseModel):
     scanner: str
     status: str
     initiated_by: Optional[str]
-    created_at: datetime
-    updated_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
     findings_count: int
 
     model_config = ConfigDict(from_attributes=True)
@@ -141,8 +190,9 @@ class FindingResponse(BaseModel):
 
     id: str
     scan_id: str
-    title: str
     severity: str
+    title: str
+    description: str
     cve_id: Optional[str]
     description: str
     detected_at: datetime
@@ -151,6 +201,8 @@ class FindingResponse(BaseModel):
     template_id: str
     evidence: Optional[str]
     remediation: Optional[str]
+
+    model_config = ConfigDict(from_attributes=True)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -182,7 +234,7 @@ class CallbackFinding(BaseModel):
 
 
 class NucleiCallbackRequest(BaseModel):
-    scan_id: str
+    scan_id: int
     status: str = Field(..., min_length=1, max_length=32)
     findings: List[CallbackFinding] = Field(default_factory=list)
     error: Optional[str] = Field(default=None)
@@ -214,6 +266,51 @@ class Principal(BaseModel):
 
 def _hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+class PrincipalCredentialCreateRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=255)
+    auth_method: Literal["api_key", "jwt"]
+    roles: List[str] = Field(default_factory=list)
+    description: Optional[str] = Field(default=None, max_length=255)
+    secret: Optional[str] = Field(default=None, min_length=8, max_length=255)
+
+    @field_validator("roles", mode="before")
+    @classmethod
+    def _normalize_roles(cls, value: Optional[List[str]]) -> List[str]:
+        roles: List[str] = list(value or [])
+        seen: set[str] = set()
+        normalized: List[str] = []
+        for role in roles:
+            if role and role not in seen:
+                seen.add(role)
+                normalized.append(role)
+        return normalized
+
+
+class PrincipalCredentialResponse(BaseModel):
+    id: int
+    subject: str
+    auth_method: str
+    roles: List[str] = Field(default_factory=list)
+    description: Optional[str]
+    created_at: datetime
+    revoked_at: Optional[datetime]
+
+    @field_validator("roles", mode="before")
+    @classmethod
+    def _ensure_roles(cls, value: Optional[List[str]]) -> List[str]:
+        return list(value or [])
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PrincipalCredentialCollectionResponse(BaseModel):
+    data: List[PrincipalCredentialResponse]
+
+
+class PrincipalCredentialCreatedResponse(PrincipalCredentialResponse):
+    secret: Optional[str] = None
 
 
 def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
@@ -286,15 +383,20 @@ def authenticate(
     if not subject:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
 
-    roles_payload = payload.get("roles", [])
-    if isinstance(roles_payload, str):
-        roles = [roles_payload]
-    elif isinstance(roles_payload, Iterable):
-        roles = [str(role) for role in roles_payload]
-    else:
-        roles = [str(roles_payload)] if roles_payload else []
+    record = (
+        db.query(PrincipalCredential)
+        .filter(
+            PrincipalCredential.auth_method == "jwt",
+            PrincipalCredential.subject == subject,
+            PrincipalCredential.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subject not authorized")
 
-    return Principal(subject=str(subject), auth_method="jwt", roles=roles)
+    roles = list(record.roles or [])
+    return Principal(subject=record.subject, auth_method="jwt", roles=roles)
 
 
 def authenticate_worker(
@@ -338,19 +440,20 @@ def record_audit_event(
 ) -> AuditLog:
     """Persist and emit audit information about sensitive operations."""
 
-    snapshot: Dict[str, Any] = {
-        "resource_type": resource_type,
-        "resource_id": resource_id,
-        "metadata": metadata or {},
-    }
+    event_metadata: Dict[str, Any] = metadata.copy() if metadata else {}
+    if scan_id is not None:
+        event_metadata.setdefault("scan_id", scan_id)
+    if finding_id is not None:
+        event_metadata.setdefault("finding_id", finding_id)
+    if message:
+        event_metadata.setdefault("message", message)
 
-    event = AuditLog(
-        scan_id=scan_id,
-        finding_id=finding_id,
+    event = AuditEvent(
         actor=actor.subject,
         action=action,
-        message=message or f"{resource_type}.{action}",
-        evidence_snapshot=snapshot,
+        resource_type=resource_type,
+        resource_id=str(resource_id) if resource_id is not None else None,
+        metadata_json=event_metadata,
     )
     session.add(event)
     try:
@@ -368,7 +471,7 @@ def record_audit_event(
             "action": action,
             "resource_type": resource_type,
             "resource_id": resource_id,
-            "metadata": metadata or {},
+            "metadata": event_metadata,
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
         },
     )
@@ -379,12 +482,146 @@ def record_audit_event(
 app = FastAPI(title="Medusa Controller", version="0.1.0")
 
 
+@app.get("/principals", response_model=PrincipalCredentialCollectionResponse)
+def list_principals(
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> PrincipalCredentialCollectionResponse:
+    enforce_roles(principal, ["admin"])
+    records = (
+        db.query(PrincipalCredential)
+        .order_by(PrincipalCredential.created_at.desc())
+        .all()
+    )
+    response_items = [
+        PrincipalCredentialResponse.model_validate(record, from_attributes=True)
+        for record in records
+    ]
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="list_principals",
+        resource_type="principal",
+        resource_id=None,
+        metadata={"count": len(response_items)},
+    )
+
+    return PrincipalCredentialCollectionResponse(data=response_items)
+
+
+@app.post(
+    "/principals",
+    response_model=PrincipalCredentialCreatedResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_principal_credential(
+    request: PrincipalCredentialCreateRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> PrincipalCredentialCreatedResponse:
+    enforce_roles(principal, ["admin"])
+
+    existing = (
+        db.query(PrincipalCredential)
+        .filter(PrincipalCredential.subject == request.subject)
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Principal subject already exists",
+        )
+
+    secret = request.secret
+    key_hash: Optional[str] = None
+    if request.auth_method == "api_key":
+        if not secret:
+            secret = secrets.token_urlsafe(32)
+        key_hash = _hash_secret(secret)
+    else:
+        if secret:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="JWT principals do not accept shared secrets",
+            )
+
+    credential = PrincipalCredential(
+        subject=request.subject,
+        auth_method=request.auth_method,
+        key_hash=key_hash,
+        roles=request.roles,
+        description=request.description,
+    )
+    db.add(credential)
+    db.commit()
+    db.refresh(credential)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="create_principal",
+        resource_type="principal",
+        resource_id=str(credential.id),
+        metadata={
+            "subject": credential.subject,
+            "auth_method": credential.auth_method,
+            "roles": credential.roles,
+        },
+    )
+
+    response_payload = PrincipalCredentialCreatedResponse.model_validate(
+        credential, from_attributes=True
+    )
+    return response_payload.model_copy(update={"secret": secret})
+
+
+@app.post(
+    "/principals/{credential_id}/revoke",
+    response_model=PrincipalCredentialResponse,
+)
+def revoke_principal_credential(
+    credential_id: int,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> PrincipalCredentialResponse:
+    enforce_roles(principal, ["admin"])
+
+    credential = db.get(PrincipalCredential, credential_id)
+    if credential is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Principal not found")
+
+    if credential.revoked_at is None:
+        credential.revoked_at = datetime.now(tz=timezone.utc)
+        db.add(credential)
+        db.commit()
+        db.refresh(credential)
+    else:
+        db.refresh(credential)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="revoke_principal",
+        resource_type="principal",
+        resource_id=str(credential.id),
+        metadata={
+            "subject": credential.subject,
+            "auth_method": credential.auth_method,
+            "roles": credential.roles,
+        },
+    )
+
+    return PrincipalCredentialResponse.model_validate(credential, from_attributes=True)
+
+
 @app.post("/targets", response_model=TargetResponse, status_code=status.HTTP_201_CREATED)
 def create_target(
     request: TargetCreateRequest,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetResponse:
+    enforce_roles(principal, ["targets:write"])
     existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
         raise HTTPException(
@@ -422,7 +659,12 @@ def enqueue_scan(
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
     enforce_roles(principal, ["scan:enqueue"])
-    target = db.get(Target, request.target_id)
+    try:
+        target_pk = int(request.target_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+
+    target = db.get(Target, target_pk)
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
 
@@ -466,24 +708,32 @@ def enqueue_scan(
 
 
 @app.get("/scans", response_model=ScanCollectionResponse)
+
+@app.get("/scans", response_model=ScanCollectionResponse)
 def list_scans(
     target_id: Optional[str] = None,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> ScanCollectionResponse:
     """Return the most recent scans for the authenticated principal."""
-
     query = db.query(Scan).options(selectinload(Scan.target), selectinload(Scan.findings))
     if target_id is not None:
         query = query.filter(Scan.target_id == target_id)
-
     scans = query.order_by(Scan.created_at.desc()).all()
+    record_audit_event(
+        db,
+        actor=principal,
+        action="list_scans",
+        resource_type="scan",
+        resource_id=None,
+        metadata={"target_id": target_id},
+    )
     return ScanCollectionResponse(data=[serialize_scan(scan) for scan in scans])
 
 
 @app.post(
     "/internal/nuclei/callback",
-    status_code=status.HTTP_204_NO_CONTENT,
+    status_code=status.HTTP_200_OK,
     response_class=Response,
 )
 def nuclei_callback(
@@ -492,52 +742,49 @@ def nuclei_callback(
     db: Session = Depends(get_db_session),
 ) -> Response:
     """Persist nuclei worker results while enforcing evidence immutability."""
-
-    scan = db.get(Scan, payload.scan_id)
+    try:
+        scan_pk = int(payload.scan_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found")
+    scan = db.get(Scan, scan_pk)
     if scan is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found")
-
     if scan.status in {"completed", "failed"}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Scan already finalized")
-
     if scan.findings:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Scan findings already recorded")
-
     if payload.started_at and scan.started_at is None:
         scan.started_at = payload.started_at
     elif scan.started_at is None:
         scan.started_at = datetime.now(tz=timezone.utc)
-
     scan.status = payload.status
     if payload.status in {"completed", "failed"}:
         scan.completed_at = payload.completed_at or datetime.now(tz=timezone.utc)
-
     findings_persisted = 0
     for finding_payload in payload.findings:
         finding = Finding(
             scan_id=scan.id,
-            title=finding_payload.title,
             severity=finding_payload.severity,
-            cve_id=finding_payload.cve_id,
+            title=finding_payload.title,
             description=finding_payload.description,
+            cve_id=finding_payload.cve_id,
+            metadata_json=_normalize_payload(finding_payload.metadata),
             evidence=_normalize_payload(finding_payload.evidence),
             evidence_hash="",
         )
         db.add(finding)
         findings_persisted += 1
-
     try:
         db.commit()
     except SQLAlchemyError as exc:  # pragma: no cover - exercised in error handling tests
         db.rollback()
         LOGGER.exception(
-            "Failed to persist nuclei callback payload", extra={"scan_id": payload.scan_id}
+            "Failed to persist nuclei callback payload", extra={"scan_id": scan_pk}
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to persist callback",
         ) from exc
-
     record_audit_event(
         db,
         actor=principal,
@@ -550,7 +797,6 @@ def nuclei_callback(
             "error": payload.error,
         },
     )
-
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
