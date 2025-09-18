@@ -113,12 +113,11 @@ class NucleiJob:
     job_id: str
     target: str
     templates: List[str]
-    scan_id: int
+    scan_id: str
     callback_url: str
     attempts: int = 0
     tags: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    scan_id: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -128,12 +127,14 @@ class NucleiJob:
         except json.JSONDecodeError as exc:  # pragma: no cover - defensive.
             raise FatalJobError(f"Invalid job payload: {exc}") from exc
 
+        if not isinstance(data, dict):
+            raise FatalJobError("Job payload must be a JSON object")
+
         job_id = data.get("job_id")
         target = data.get("target")
         callback_url = data.get("callback_url")
         templates = data.get("templates")
-        metadata = data.get("metadata") or {}
-        scan_id_raw = data.get("scan_id", metadata.get("scan_id"))
+        metadata_payload = data.get("metadata") or {}
         if not job_id or not isinstance(job_id, str):
             raise FatalJobError("Job payload missing 'job_id'")
         if not target or not isinstance(target, str):
@@ -144,31 +145,48 @@ class NucleiJob:
             templates = [templates]
         if not templates or not isinstance(templates, list):
             raise FatalJobError("Job payload missing nuclei templates")
-        if scan_id_raw is None:
-            raise FatalJobError("Job payload missing 'scan_id'")
-        try:
-            scan_id = int(scan_id_raw)
-        except (TypeError, ValueError) as exc:
-            raise FatalJobError("Job payload contains invalid 'scan_id'") from exc
-
-        attempts = int(data.get("attempts", 0))
-        tags = data.get("tags") or []
-        metadata_payload = data.get("metadata") or {}
+        normalized_templates = [str(t) for t in templates]
         if not isinstance(metadata_payload, dict):
             raise FatalJobError("Job metadata must be a JSON object")
-        scan_id = data.get("scan_id") or metadata_payload.get("scan_id")
+        scan_id_value = data.get("scan_id")
+        if scan_id_value is None:
+            scan_id_value = metadata_payload.get("scan_id")
+        if scan_id_value is None:
+            raise FatalJobError("Job payload missing 'scan_id'")
+        if isinstance(scan_id_value, (dict, list)):
+            raise FatalJobError("Job payload contains invalid 'scan_id'")
+        scan_id = str(scan_id_value).strip()
+        if not scan_id:
+            raise FatalJobError("Job payload contains invalid 'scan_id'")
+
+        try:
+            attempts = int(data.get("attempts", 0))
+        except (TypeError, ValueError) as exc:
+            raise FatalJobError("Job payload contains invalid 'attempts'") from exc
+        tags_raw = data.get("tags") or []
+        if isinstance(tags_raw, str):
+            tags = [str(tags_raw)]
+        elif isinstance(tags_raw, list):
+            tags = [str(tag) for tag in tags_raw]
+        else:
+            tags = []
 
         return cls(
             job_id=job_id,
             target=target,
-            templates=[str(t) for t in templates],
+            templates=normalized_templates,
             scan_id=scan_id,
             callback_url=callback_url,
             attempts=attempts,
-            tags=[str(tag) for tag in tags],
+            tags=tags,
             metadata=metadata_payload,
-            scan_id=str(scan_id) if scan_id else None,
-            raw=data,
+            raw={
+                **data,
+                "scan_id": scan_id,
+                "attempts": attempts,
+                "tags": tags,
+                "templates": normalized_templates,
+            },
         )
 
     def with_attempt(self, attempts: int) -> "NucleiJob":
@@ -365,7 +383,7 @@ def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> Lis
 
     severity_map = {"critical", "high", "medium", "low", "info"}
     findings: List[Dict[str, Any]] = []
-    for record in records:
+    for index, record in enumerate(records):
         info = record.get("info") or {}
         template_id = record.get("templateID") or record.get("template-id")
         severity = str(info.get("severity") or "info").lower()
@@ -408,7 +426,7 @@ def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> Lis
             "matcher_name": record.get("matcher-name") or record.get("matcherName"),
             "matched_at": evidence["matched_at"],
             "host": record.get("host"),
-            "tags": info.get("tags") or job.tags,
+            "tags": combined_tags,
         }
 
         artifact_payload = {
@@ -524,7 +542,7 @@ def process_job(
 ) -> None:
     """Execute a single job lifecycle."""
 
-    scan_id = job.scan_id or job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    scan_id = job.scan_id
     if not scan_id:
         raise FatalJobError("Job payload missing 'scan_id' required for callback")
 
@@ -545,15 +563,10 @@ def process_job(
     if extra_metadata:
         worker_metadata["job_metadata"] = extra_metadata
     if artifacts:
-        worker_metadata["artifacts"] = artifacts
+        worker_metadata["artifact_locations"] = artifacts
 
     payload = {
         "scan_id": scan_id,
-        "artifact_locations": artifact_locations,
-    }
-    worker_metadata.update(job.metadata)
-    payload = {
-        "scan_id": job.scan_id,
         "status": "completed",
         "findings": findings,
         "worker_metadata": worker_metadata,
@@ -565,7 +578,7 @@ def process_job(
 
 
 def notify_failure(job: NucleiJob, config: WorkerConfig, reason: str, session: Optional[Session] = None) -> None:
-    scan_id = job.scan_id or job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    scan_id = job.scan_id
     if not scan_id:
         LOG.error("Cannot notify controller for job %s without scan_id", job.job_id)
         return
