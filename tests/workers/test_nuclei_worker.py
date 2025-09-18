@@ -130,6 +130,32 @@ def test_process_job_posts_callback(sample_job):
     mock_s3.put_object.assert_called()
 
 
+def test_post_callback_includes_token(sample_job):
+    config = worker.WorkerConfig()
+    config.callback_token = "shared-secret"
+
+    mock_session = mock.create_autospec(worker.Session, instance=True)
+    mock_response = mock.Mock()
+    mock_response.raise_for_status.return_value = None
+    mock_session.post.return_value = mock_response
+
+    payload = {
+        "scan_id": sample_job.scan_id,
+        "status": "completed",
+        "findings": [],
+        "worker_metadata": {},
+        "error": None,
+        "completed_at": "2023-01-01T00:00:00+00:00",
+    }
+
+    worker.post_callback(sample_job, config, payload, session=mock_session)
+
+    assert mock_session.post.called
+    _, kwargs = mock_session.post.call_args
+    headers = kwargs["headers"]
+    assert headers["X-Callback-Token"] == "shared-secret"
+
+
 def test_notify_failure_emits_error(sample_job):
     config = worker.WorkerConfig()
     config.callback_token = "shared-secret"
