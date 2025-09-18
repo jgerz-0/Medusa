@@ -113,7 +113,6 @@ class NucleiJob:
     job_id: str
     target: str
     templates: List[str]
-    scan_id: int
     callback_url: str
     attempts: int = 0
     tags: List[str] = field(default_factory=list)
@@ -147,27 +146,29 @@ class NucleiJob:
         if scan_id_raw is None:
             raise FatalJobError("Job payload missing 'scan_id'")
         try:
-            scan_id = int(scan_id_raw)
-        except (TypeError, ValueError) as exc:
-            raise FatalJobError("Job payload contains invalid 'scan_id'") from exc
+            int(scan_id_raw)
+        except (TypeError, ValueError):
+            # `scan_id` may be a UUID string when provided through metadata.
+            if not isinstance(scan_id_raw, str) or not scan_id_raw.strip():
+                raise FatalJobError("Job payload contains invalid 'scan_id'")
 
         attempts = int(data.get("attempts", 0))
         tags = data.get("tags") or []
         metadata_payload = data.get("metadata") or {}
         if not isinstance(metadata_payload, dict):
             raise FatalJobError("Job metadata must be a JSON object")
-        scan_id = data.get("scan_id") or metadata_payload.get("scan_id")
+        scan_id_value = data.get("scan_id") or metadata_payload.get("scan_id")
+        scan_id_str = str(scan_id_value) if scan_id_value is not None else None
 
         return cls(
             job_id=job_id,
             target=target,
             templates=[str(t) for t in templates],
-            scan_id=scan_id,
+            scan_id=scan_id_str,
             callback_url=callback_url,
             attempts=attempts,
             tags=[str(tag) for tag in tags],
             metadata=metadata_payload,
-            scan_id=str(scan_id) if scan_id else None,
             raw=data,
         )
 
@@ -365,7 +366,7 @@ def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> Lis
 
     severity_map = {"critical", "high", "medium", "low", "info"}
     findings: List[Dict[str, Any]] = []
-    for record in records:
+    for index, record in enumerate(records):
         info = record.get("info") or {}
         template_id = record.get("templateID") or record.get("template-id")
         severity = str(info.get("severity") or "info").lower()
@@ -419,15 +420,6 @@ def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> Lis
             "metadata": {"template_id": template_id},
         }
 
-        finding = {
-            "title": title,
-            "severity": severity,
-            "description": description,
-            "cve_id": cve_id,
-            "metadata": metadata,
-            "evidence": {k: v for k, v in evidence.items() if v},
-            "artifacts": [artifact_payload],
-        }
         findings.append(
             {
                 "title": str(title),
@@ -436,7 +428,7 @@ def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> Lis
                 "cve_id": _coerce_cve(info),
                 "metadata": {k: v for k, v in metadata.items() if v},
                 "evidence": {k: v for k, v in evidence.items() if v},
-                "artifacts": [],
+                "artifacts": [artifact_payload],
             }
         )
     return findings
@@ -524,9 +516,12 @@ def process_job(
 ) -> None:
     """Execute a single job lifecycle."""
 
-    scan_id = job.scan_id or job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    scan_id = job.scan_id or (
+        job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    )
     if not scan_id:
         raise FatalJobError("Job payload missing 'scan_id' required for callback")
+    normalized_scan_id = str(scan_id)
 
     scan = run_scan(job, config)
     if scan.exit_code != 0:
@@ -547,18 +542,14 @@ def process_job(
     if artifacts:
         worker_metadata["artifacts"] = artifacts
 
-    payload = {
-        "scan_id": scan_id,
-        "artifact_locations": artifact_locations,
-    }
     worker_metadata.update(job.metadata)
     payload = {
-        "scan_id": job.scan_id,
+        "scan_id": normalized_scan_id,
         "status": "completed",
         "findings": findings,
         "worker_metadata": worker_metadata,
         "error": None,
-        "completed_at": datetime.now(tz=timezone.utc).isoformat(),
+        "completed_at": datetime.now(tz=timezone.utc),
     }
     post_callback(job, config, payload, session=session)
     LOG.info("Job %s completed successfully", job.job_id)
