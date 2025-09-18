@@ -16,10 +16,29 @@ def sample_job():
             "templates": ["cves/2023/CVE-2023-9999.yaml"],
             "callback_url": "https://controller.local/callback",
             "tags": ["web"],
-            "metadata": {"scan_id": "scan-777"},
+            "metadata": {"scope": "production"},
         }
     )
     return worker.NucleiJob.from_json(payload)
+
+
+def test_nuclei_job_from_json_normalizes_scan_id(sample_job):
+    assert sample_job.scan_id == "42"
+    assert isinstance(sample_job.scan_id, str)
+
+
+def test_nuclei_job_from_json_supports_metadata_scan_id():
+    payload = json.dumps(
+        {
+            "job_id": "job-456",
+            "target": "https://service.example.com",
+            "templates": ["http/default-logins"],
+            "callback_url": "https://controller.local/callback",
+            "metadata": {"scan_id": "scan-777"},
+        }
+    )
+    job = worker.NucleiJob.from_json(payload)
+    assert job.scan_id == "scan-777"
 
 
 def test_normalize_findings(sample_job):
@@ -47,13 +66,13 @@ def test_normalize_findings(sample_job):
     assert findings[0]["severity"] == "high"
     assert findings[0]["description"] == "demo"
     assert findings[0]["evidence"]["matched_at"] == "https://example.com/login"
-    assert findings[0]["artifacts"][0]["artifact_type"] == "nuclei-json"
+    assert findings[0]["artifacts"] == []
 
     assert findings[1]["title"] == "Misconfig"
     assert findings[1]["severity"] == "medium"
     assert "finding" in findings[1]["description"].lower()
     assert findings[1]["evidence"]["matched_at"] == "https://example.com"
-    assert findings[1]["artifacts"][0]["name"].startswith("nuclei-record-")
+    assert findings[1]["artifacts"] == []
 
 
 def test_process_job_posts_callback(sample_job):
