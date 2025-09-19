@@ -5,6 +5,7 @@ from unittest import mock
 import pytest
 from controller.main import NucleiCallbackRequest
 from controller.main import CallbackFinding
+from controller.main import Settings
 from workers.web.nuclei import worker
 
 
@@ -22,6 +23,23 @@ def sample_job():
         }
     )
     return worker.NucleiJob.from_json(payload)
+
+
+def test_worker_config_defaults_align_with_controller(monkeypatch):
+    """Ensure worker defaults stay in sync with controller queue configuration."""
+
+    for env_var in ("NUCLEI_QUEUE_KEY", "NUCLEI_DEAD_LETTER_KEY", "MEDUSA_NUCLEI_QUEUE_CHANNEL"):
+        monkeypatch.delenv(env_var, raising=False)
+
+    config = worker.WorkerConfig.load()
+    settings = Settings(
+        jwt_secret="test-jwt",
+        nuclei_callback_token="nuclei-secret",
+        enrichment_callback_token="enrichment-secret",
+    )
+
+    assert config.queue_key == settings.nuclei_queue_channel
+    assert config.dead_letter_key == "queues:nuclei:dead"
 
 
 def test_nuclei_job_from_json_normalizes_scan_id(sample_job):
