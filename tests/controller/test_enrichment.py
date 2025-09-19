@@ -40,7 +40,7 @@ def test_enqueue_enrichment_job(client):
     response = test_client.post(
         "/enrich",
         json={"finding_id": finding.id, "sources": ["nvd", "circl"]},
-        headers={"X-API-Key": "legacy-key"},
+        headers={"X-API-Key": "test-key"},
     )
     assert response.status_code == 202
     payload = response.json()
@@ -64,7 +64,7 @@ def test_enqueue_enrichment_missing_finding(client):
     response = test_client.post(
         "/enrich",
         json={"finding_id": "missing"},
-        headers={"X-API-Key": "legacy-key"},
+        headers={"X-API-Key": "test-key"},
     )
     assert response.status_code == 404
     assert not queue.calls
@@ -77,7 +77,7 @@ def test_enqueue_enrichment_rejects_unknown_source(client):
     response = test_client.post(
         "/enrich",
         json={"finding_id": "anything", "sources": ["unknown"]},
-        headers={"X-API-Key": "legacy-key"},
+        headers={"X-API-Key": "test-key"},
     )
     assert response.status_code == 422
     assert not queue.calls
