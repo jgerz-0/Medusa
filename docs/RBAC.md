@@ -20,6 +20,25 @@ API keys are compared using the stored hash; JWT subjects must also be present
 in this table to be accepted. The controller rejects any credential that is not
 registered or that lacks roles.
 
+## Authentication Flow
+
+The controller authenticates requests using the following precedence rules:
+
+1. If an `X-API-Key` (or bare bearer token) header is present, the value is
+   hashed with SHA-256 and compared against active `principal_credentials`
+   records where `auth_method = 'api_key'` and `revoked_at IS NULL`. The
+   principal inherits the stored role set.
+2. If the hash only matches revoked credentials, the controller immediately
+   returns `403 Forbidden`. Revoked keys never fall back to other mechanisms.
+3. If no database record matches, the controller checks any statically
+   configured bootstrap keys in `Settings.api_keys`.
+4. Finally, bearer tokens are validated as JWTs and mapped to `jwt`
+   credentials stored in the same table.
+
+This lookup order ensures that operators can revoke keys without redeploying
+the controller while still supporting static bootstrap credentials for
+disaster recovery scenarios.
+
 ## Roles
 
 The following baseline roles are supported:
