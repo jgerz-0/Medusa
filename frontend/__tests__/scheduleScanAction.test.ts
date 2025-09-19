@@ -56,6 +56,24 @@ describe('scheduleScanAction', () => {
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
+  it('maps controller target validation to the target selector field', async () => {
+    const validationError = new ControllerValidationError('Invalid payload', 422, [
+      { field: 'target_id', message: 'Select an authorized target' }
+    ]);
+    (createScan as jest.Mock).mockRejectedValue(validationError);
+
+    const result = await scheduleScanAction({
+      targetId: 'invalid-target',
+      profile: 'web-baseline',
+      requestedHosts: []
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: 'targetId' })])
+    );
+  });
+
   it('queues the scan and revalidates the listing on success', async () => {
     const now = new Date().toISOString();
     (createScan as jest.Mock).mockResolvedValue({
