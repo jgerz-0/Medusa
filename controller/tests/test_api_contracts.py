@@ -164,6 +164,8 @@ def _provision_principal(
     assert response.status_code == 201, response.text
     payload = response.json()
     secret = payload["secret"]
+    fingerprint = payload["key_fingerprint"]
+    assert isinstance(fingerprint, str) and fingerprint
     return secret, {"X-API-Key": secret}
 
 
@@ -345,6 +347,8 @@ def test_principal_rotation_flow(
     assert isinstance(first_secret, str) and first_secret
     first_id = first_payload["id"]
     assert first_payload["revoked_at"] is None
+    first_fingerprint = first_payload["key_fingerprint"]
+    assert first_fingerprint == _hash_secret(first_secret)[:12]
 
     revoke_response = client.post(
         f"/principals/{first_id}/revoke", headers=auth_headers()
@@ -352,6 +356,7 @@ def test_principal_rotation_flow(
     assert revoke_response.status_code == 200, revoke_response.text
     revoked_payload = revoke_response.json()
     assert revoked_payload["revoked_at"] is not None
+    assert revoked_payload["key_fingerprint"] == first_fingerprint
 
     rotate_response = client.post(
         "/principals",
@@ -370,6 +375,8 @@ def test_principal_rotation_flow(
     assert second_secret != first_secret
     assert second_payload["id"] != first_id
     assert second_payload["revoked_at"] is None
+    second_fingerprint = second_payload["key_fingerprint"]
+    assert second_fingerprint == _hash_secret(second_secret)[:12]
 
     with session_factory() as session:
         records = (
@@ -387,7 +394,145 @@ def test_principal_rotation_flow(
         assert active[0].key_hash == _hash_secret(second_secret)
         assert revoked[0].key_hash == _hash_secret(first_secret)
 
+        create_events = (
+            session.query(AuditLog)
+            .filter(AuditLog.action == "create_principal")
+            .all()
+        )
+        fingerprints = {
+            event.evidence_snapshot.get("rotation", {}).get("key_fingerprint")
+            for event in create_events
+        }
+        assert first_fingerprint in fingerprints
+        assert second_fingerprint in fingerprints
 
+        revoke_event = (
+            session.query(AuditLog)
+            .filter(AuditLog.action == "revoke_principal")
+            .one()
+        )
+        rotation_meta = revoke_event.evidence_snapshot.get("rotation", {})
+        assert rotation_meta.get("key_fingerprint") == first_fingerprint
+        assert first_secret not in str(revoke_event.evidence_snapshot)
+        assert second_secret not in str(revoke_event.evidence_snapshot)
+
+
+def test_principal_management_requires_admin(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    _secret, analyst_headers = _provision_principal(
+        client, subject="analyst-rbac", roles=["analyst"]
+    )
+
+    list_response = client.get("/principals", headers=analyst_headers)
+    assert list_response.status_code == 403
+
+    create_attempt = client.post(
+        "/principals",
+        json={
+            "subject": "unauthorized-issue",
+            "auth_method": "api_key",
+            "roles": ["analyst"],
+        },
+        headers=analyst_headers,
+    )
+    assert create_attempt.status_code == 403
+
+    with session_factory() as session:
+        analyst_record = (
+            session.query(PrincipalCredential)
+            .filter(PrincipalCredential.subject == "analyst-rbac")
+            .one()
+        )
+        analyst_id = analyst_record.id
+
+    revoke_attempt = client.post(
+        f"/principals/{analyst_id}/revoke", headers=analyst_headers
+    )
+    assert revoke_attempt.status_code == 403
+
+    with session_factory() as session:
+        access_denied_entries = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.actor == "analyst-rbac",
+                AuditLog.action == "access_denied",
+            )
+            .order_by(AuditLog.created_at.asc())
+            .all()
+        )
+
+        assert len(access_denied_entries) == 3
+        resources = [
+            entry.evidence_snapshot.get("resource_id") for entry in access_denied_entries
+        ]
+        assert resources.count("/principals") == 2
+        assert f"/principals/{analyst_id}/revoke" in resources
+        reasons = {
+            entry.evidence_snapshot.get("reason") for entry in access_denied_entries
+        }
+        assert reasons == {"missing_required_roles"}
+
+
+def test_revoked_api_key_denied_with_audit_trail(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    subject = "revoked-svc"
+
+    create_response = client.post(
+        "/principals",
+        json={
+            "subject": subject,
+            "auth_method": "api_key",
+            "roles": ["analyst"],
+        },
+        headers=auth_headers(),
+    )
+    assert create_response.status_code == 201, create_response.text
+    payload = create_response.json()
+    secret = payload["secret"]
+    fingerprint = payload["key_fingerprint"]
+    revoked_headers = {"X-API-Key": secret}
+
+    baseline = client.get("/targets", headers=revoked_headers)
+    assert baseline.status_code == 200, baseline.text
+
+    with session_factory() as session:
+        record = (
+            session.query(PrincipalCredential)
+            .filter(PrincipalCredential.subject == subject)
+            .one()
+        )
+        credential_id = record.id
+
+    revoke_response = client.post(
+        f"/principals/{credential_id}/revoke", headers=auth_headers()
+    )
+    assert revoke_response.status_code == 200, revoke_response.text
+
+    denied = client.get("/targets", headers=revoked_headers)
+    assert denied.status_code == 401
+    assert denied.json()["detail"] == "API key revoked"
+
+    with session_factory() as session:
+        audit_entry = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.actor == subject,
+                AuditLog.action == "access_denied",
+            )
+            .order_by(AuditLog.created_at.desc())
+            .first()
+        )
+
+        assert audit_entry is not None
+        snapshot = audit_entry.evidence_snapshot
+        assert snapshot.get("reason") == "credential_revoked"
+        assert snapshot.get("key_fingerprint") == fingerprint
+        assert snapshot.get("credential_status") == "revoked"
 def test_finding_contracts(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
@@ -701,7 +846,7 @@ def test_revoked_api_key_denial_is_audited(
         before = session.query(AuditLog).count()
 
     response = client.get("/targets", headers={"X-API-Key": revoked_key})
-    assert response.status_code == 403
+    assert response.status_code == 401
 
     with session_factory() as session:
         after = session.query(AuditLog).count()
@@ -1036,7 +1181,7 @@ def test_api_key_revocation_enforced_and_audited(
     revoked_response = client.get(
         "/targets", headers={"X-API-Key": "revoked-key"}
     )
-    assert revoked_response.status_code == 403
+    assert revoked_response.status_code == 401
 
     with session_factory() as session:
         audit_actions = [entry.action for entry in session.query(AuditLog).all()]

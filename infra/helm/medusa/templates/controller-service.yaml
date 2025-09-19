@@ -1,0 +1,26 @@
+{{- if .Values.controller.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "medusa.fullname" . }}-controller
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    {{- range $k, $v := .Values.controller.service.annotations }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+spec:
+  type: {{ .Values.controller.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: http
+      port: {{ .Values.controller.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end -}}

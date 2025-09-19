@@ -71,6 +71,37 @@ A successful run prints `Worker callback confirmed` and exits `0`. If the callba
 
 The MinIO console is available at `http://localhost:9001` with credentials from `.env`. Qdrant's HTTP API listens on `http://localhost:6333` for enrichment debugging.
 
+### CVE vector store configuration
+
+The enrichment worker now persists advisory embeddings to Qdrant in parallel with Redis result
+publication. Populate the following environment variables in `infra/docker/.env` before starting
+Compose so the worker authenticates to the local Qdrant instance:
+
+| Variable | Purpose |
+| --- | --- |
+| `CVE_ENRICHMENT_QDRANT_URL` | Base URL for the Qdrant HTTP API (e.g., `http://qdrant:6333`). |
+| `CVE_ENRICHMENT_QDRANT_COLLECTION` | Target collection name for advisory vectors. |
+| `CVE_ENRICHMENT_QDRANT_API_KEY` | Optional API key if Qdrant authentication is enabled. Leave blank for local development. |
+| `CVE_ENRICHMENT_QDRANT_TIMEOUT` | Request timeout in seconds for upsert operations. |
+| `CVE_ENRICHMENT_QDRANT_VECTOR_SIZE` | Deterministic embedding dimension emitted by the worker. |
+
+After the stack is running, create the collection (once) using Qdrant's API:
+
+```bash
+curl -X PUT \
+  "http://localhost:6333/collections/medusa-advisories" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "vectors": {
+          "size": 64,
+          "distance": "Cosine"
+        }
+      }'
+```
+
+Use the `size` value that matches `CVE_ENRICHMENT_QDRANT_VECTOR_SIZE`. The worker logs structured
+errors if a vector insert fails so operators can remediate without losing Redis callbacks.
+
 ### Dashboard login
 
 When you visit `http://localhost:3000` the browser prompts for HTTP basic authentication. The Compose defaults set `DASHBOARD_BASIC_USER=analyst` and `DASHBOARD_BASIC_PASSWORD=analyst`; update or rotate them in `.env` before exposing the stack anywhere beyond isolated development.

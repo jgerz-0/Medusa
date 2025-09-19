@@ -1,0 +1,38 @@
+{{- if and .Values.minio.enabled .Values.minio.consoleIngress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "medusa.fullname" . }}-minio-console
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: minio-console
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    {{- range $k, $v := .Values.minio.consoleIngress.annotations }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+spec:
+  {{- if .Values.minio.consoleIngress.className }}
+  ingressClassName: {{ .Values.minio.consoleIngress.className }}
+  {{- end }}
+  rules:
+    {{- range .Values.minio.consoleIngress.hosts }}
+    - host: {{ .host }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "medusa.fullname" $ }}-minio
+                port:
+                  number: {{ $.Values.minio.service.consolePort }}
+          {{- end }}
+    {{- end }}
+  {{- if .Values.minio.consoleIngress.tls }}
+  tls:
+    {{- toYaml .Values.minio.consoleIngress.tls | nindent 4 }}
+  {{- end }}
+{{- end -}}

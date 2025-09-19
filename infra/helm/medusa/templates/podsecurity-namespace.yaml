@@ -1,0 +1,14 @@
+{{- if and .Values.podSecurityStandards.enabled (not .Values.podSecurityStandards.namespaceLabelsOnly) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    pod-security.kubernetes.io/enforce: {{ .Values.podSecurityStandards.enforce | quote }}
+    pod-security.kubernetes.io/audit: {{ .Values.podSecurityStandards.audit | quote }}
+    pod-security.kubernetes.io/warn: {{ .Values.podSecurityStandards.warn | quote }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    medusa.security/pss: "Applies Pod Security Standards to the target namespace."
+{{- end }}
