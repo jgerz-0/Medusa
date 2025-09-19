@@ -47,6 +47,14 @@ from controller.db.models import (
     Target,
 )
 from controller.db.session import SessionLocal
+from controller.security.oidc import (
+    OIDCNotApplicableError,
+    OIDCSettings,
+    OIDCValidationError,
+    OIDCValidator,
+    build_validator,
+)
+from controller.security.rate_limit import RateLimiter
 from workers.enrichment.cve.schemas import CVEEnrichmentResult
 
 
@@ -580,6 +588,54 @@ class Settings(BaseSettings):
     binary_fuzzing_callback_token: str = Field(
         ..., description="Shared secret required for binary fuzzing worker callbacks."
     )
+    oidc_issuer: Optional[str] = Field(
+        default=None,
+        description=("OIDC issuer expected in validated bearer tokens."),
+    )
+    oidc_audience: Optional[str] = Field(
+        default=None,
+        description="Audience/client ID expected in validated bearer tokens.",
+    )
+    oidc_jwks_url: Optional[str] = Field(
+        default=None,
+        description="JWKS endpoint used to resolve signing keys for OIDC tokens.",
+    )
+    oidc_roles_claim: str = Field(
+        default="roles",
+        description="Claim name containing RBAC roles within validated OIDC tokens.",
+    )
+    oidc_subject_claim: str = Field(
+        default="sub",
+        description="Claim name providing the stable subject identifier for OIDC tokens.",
+    )
+    oidc_allowed_algorithms: List[str] = Field(
+        default_factory=lambda: ["RS256"],
+        description="Algorithms permitted when validating OIDC bearer tokens.",
+    )
+    oidc_jwks_cache_ttl_seconds: int = Field(
+        default=300,
+        ge=30,
+        description="Seconds JWKS responses are cached before revalidation.",
+    )
+    oidc_request_timeout_seconds: int = Field(
+        default=5,
+        ge=1,
+        description="Timeout in seconds for JWKS retrieval requests.",
+    )
+    rate_limit_max_requests: int = Field(
+        default=300,
+        ge=0,
+        description="Maximum requests permitted per principal within the window.",
+    )
+    rate_limit_window_seconds: int = Field(
+        default=60,
+        ge=1,
+        description="Sliding window interval for request rate limiting.",
+    )
+    rate_limit_exempt_subjects: List[str] = Field(
+        default_factory=list,
+        description="Subjects exempt from rate limiting (e.g., automation principals).",
+    )
 
     model_config = ConfigDict(env_prefix="MEDUSA_", case_sensitive=False)
 
@@ -589,6 +645,53 @@ def get_settings() -> Settings:
     """Return cached settings instance loaded from environment."""
 
     return Settings()
+
+
+@lru_cache()
+def get_oidc_validator(
+    issuer: Optional[str],
+    audience: Optional[str],
+    jwks_url: Optional[str],
+    roles_claim: str,
+    subject_claim: str,
+    allowed_algorithms: Tuple[str, ...],
+    cache_ttl_seconds: int,
+    request_timeout_seconds: int,
+) -> Optional[OIDCValidator]:
+    """Return an OIDC validator when configuration is provided."""
+
+    if not issuer or not jwks_url:
+        return None
+
+    config = OIDCSettings(
+        issuer=issuer,
+        jwks_url=jwks_url,
+        audience=audience,
+        roles_claim=roles_claim,
+        subject_claim=subject_claim,
+        allowed_algorithms=allowed_algorithms,
+        cache_ttl_seconds=cache_ttl_seconds,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+    return build_validator(config)
+
+
+@lru_cache()
+def get_rate_limiter(
+    max_requests: int,
+    window_seconds: int,
+    exempt_subjects: Tuple[str, ...],
+) -> Optional[RateLimiter]:
+    """Return a shared rate limiter instance based on configuration."""
+
+    if max_requests <= 0 or window_seconds <= 0:
+        return None
+
+    return RateLimiter.from_settings(
+        max_requests=max_requests,
+        window_seconds=window_seconds,
+        exempt_subjects=exempt_subjects,
+    )
 
 
 security_scheme = HTTPBearer(auto_error=False)
@@ -1082,7 +1185,7 @@ class Principal(BaseModel):
 
 class PrincipalCredentialCreateRequest(BaseModel):
     subject: str = Field(..., min_length=1, max_length=255)
-    auth_method: Literal["api_key", "jwt"]
+    auth_method: Literal["api_key", "jwt", "oidc"]
     roles: List[str] = Field(default_factory=list)
     description: Optional[str] = Field(default=None, max_length=255)
     secret: Optional[str] = Field(default=None, min_length=8, max_length=255)
@@ -1398,6 +1501,157 @@ def _authenticate_jwt(
     return Principal(subject=record.subject, auth_method="jwt", roles=roles)
 
 
+def _authenticate_oidc(
+    token: str,
+    *,
+    validator: OIDCValidator,
+    settings: Settings,
+    db: Session,
+) -> Principal:
+    """Authenticate an OpenID Connect bearer token."""
+
+    try:
+        payload, header = validator.validate(token)
+    except OIDCNotApplicableError:
+        raise
+    except OIDCValidationError as exc:
+        invalid_principal = Principal(
+            subject="oidc:invalid",
+            auth_method="oidc",
+            roles=[],
+        )
+        log_access_denied(
+            db,
+            principal=invalid_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=None,
+            reason=exc.reason,
+            detail="Invalid token",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata={"error": exc.message, "issuer": validator.issuer},
+        )
+
+    subject_claim = settings.oidc_subject_claim or validator.subject_claim
+    subject_value = payload.get(subject_claim) or payload.get("sub")
+    if not isinstance(subject_value, str) or not subject_value.strip():
+        invalid_principal = Principal(
+            subject="oidc:anonymous",
+            auth_method="oidc",
+            roles=[],
+        )
+        log_access_denied(
+            db,
+            principal=invalid_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=None,
+            reason="invalid_token_payload",
+            detail="Invalid token payload",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata={"claim": subject_claim},
+        )
+
+    token_roles_claim = settings.oidc_roles_claim or validator.roles_claim
+    raw_roles = payload.get(token_roles_claim) or []
+    normalized_roles = [
+        str(role).strip()
+        for role in raw_roles
+        if isinstance(role, (str, int))
+    ]
+    filtered_roles = [role for role in normalized_roles if role in ALLOWED_ROLES]
+
+    record = (
+        db.query(PrincipalCredential)
+        .filter(
+            PrincipalCredential.auth_method == "oidc",
+            PrincipalCredential.subject == subject_value,
+            PrincipalCredential.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if record is None:
+        unauthorized_principal = Principal(
+            subject=str(subject_value),
+            auth_method="oidc",
+            roles=filtered_roles,
+        )
+        log_access_denied(
+            db,
+            principal=unauthorized_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=None,
+            reason="subject_not_authorized",
+            detail="Subject not authorized",
+            status_code=status.HTTP_403_FORBIDDEN,
+            extra_metadata={
+                "issuer": validator.issuer,
+                "token_roles": filtered_roles,
+                "kid": header.get("kid"),
+            },
+        )
+
+    roles = list(record.roles or [])
+    if filtered_roles and not set(filtered_roles).issubset(set(roles)):
+        LOGGER.info(
+            "OIDC token roles exceed stored principal permissions",
+            extra={
+                "subject": subject_value,
+                "token_roles": filtered_roles,
+                "stored_roles": roles,
+            },
+        )
+
+    return Principal(subject=record.subject, auth_method="oidc", roles=roles)
+
+
+def enforce_request_rate_limit(
+    request: Request,
+    *,
+    principal: Principal,
+    db: Session,
+    settings: Settings,
+) -> None:
+    """Apply per-subject request rate limits when configured."""
+
+    limiter = get_rate_limiter(
+        settings.rate_limit_max_requests,
+        settings.rate_limit_window_seconds,
+        tuple(settings.rate_limit_exempt_subjects),
+    )
+    if limiter is None or limiter.is_exempt(principal.subject):
+        return
+
+    client_host = request.client.host if request.client else "unknown"
+    rate_key = principal.subject
+    if principal.auth_method == "unauthenticated":
+        rate_key = f"anonymous:{client_host}"
+
+    result = limiter.allow(rate_key)
+    if result.allowed:
+        return
+
+    metadata = dict(result.metadata)
+    metadata.setdefault("subject", principal.subject)
+    metadata.setdefault("client_host", client_host)
+    retry_after = metadata.get("retry_after", settings.rate_limit_window_seconds)
+    headers = {"Retry-After": str(retry_after)}
+
+    log_access_denied(
+        db,
+        principal=principal,
+        required_roles=[],
+        resource_type="rate_limiter",
+        resource_id=rate_key,
+        reason="rate_limit_exceeded",
+        detail="Too many requests",
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        extra_metadata=metadata,
+        headers=headers,
+    )
+
+
 def authenticate(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
@@ -1417,10 +1671,40 @@ def authenticate(
             source="header",
         )
         if principal is not None:
+            enforce_request_rate_limit(
+                request, principal=principal, db=db, settings=settings
+            )
             return principal
 
     if bearer_token:
-        return _authenticate_jwt(bearer_token, settings=settings, db=db)
+        validator = get_oidc_validator(
+            settings.oidc_issuer,
+            settings.oidc_audience,
+            settings.oidc_jwks_url,
+            settings.oidc_roles_claim,
+            settings.oidc_subject_claim,
+            tuple(settings.oidc_allowed_algorithms),
+            settings.oidc_jwks_cache_ttl_seconds,
+            settings.oidc_request_timeout_seconds,
+        )
+        if validator is not None:
+            try:
+                principal = _authenticate_oidc(
+                    bearer_token, validator=validator, settings=settings, db=db
+                )
+            except OIDCNotApplicableError:
+                principal = None
+            else:
+                enforce_request_rate_limit(
+                    request, principal=principal, db=db, settings=settings
+                )
+                return principal
+
+        principal = _authenticate_jwt(bearer_token, settings=settings, db=db)
+        enforce_request_rate_limit(
+            request, principal=principal, db=db, settings=settings
+        )
+        return principal
 
     anonymous = Principal(subject="anonymous", auth_method="unauthenticated", roles=[])
     log_access_denied(
@@ -1542,6 +1826,7 @@ def log_access_denied(
     detail: str = "Insufficient role for this operation",
     status_code: int = status.HTTP_403_FORBIDDEN,
     extra_metadata: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
 ) -> None:
     """Record an audit trail for denied access before raising an error."""
 
@@ -1571,7 +1856,7 @@ def log_access_denied(
         metadata=metadata,
     )
 
-    raise HTTPException(status_code=status_code, detail=detail)
+    raise HTTPException(status_code=status_code, detail=detail, headers=headers)
 
 
 def enforce_roles(
@@ -1790,12 +2075,17 @@ def create_principal_credential(
         if not secret:
             secret = secrets.token_urlsafe(32)
         key_hash = _hash_secret(secret)
-    else:
+    elif request.auth_method in {"jwt", "oidc"}:
         if secret:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="JWT principals do not accept shared secrets",
+                detail="JWT and OIDC principals do not accept shared secrets",
             )
+    else:  # pragma: no cover - guarded by request model validation
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported authentication method",
+        )
 
     requested_roles = request.roles
     if ROLE_ADMIN in requested_roles:

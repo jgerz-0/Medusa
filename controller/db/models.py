@@ -485,7 +485,7 @@ def _finding_enrichment_prevent_mutation(
 
 
 class PrincipalCredential(Base):
-    """Authentication material for API keys and JWT principals."""
+    """Authentication material for API keys, JWT, and OIDC principals."""
 
     __tablename__ = "principal_credentials"
 

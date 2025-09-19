@@ -267,7 +267,7 @@ def test_preprocess_enqueue_flow(
     assert job["object_bucket"] == "binary-uploads"
     assert job["metadata"]["target_scope"] == "firmware.example.com"
 
-    with _session_factory() as session:
+    with session_factory() as session:
         audit_entry = (
             session.query(AuditLog)
             .filter(AuditLog.action == "enqueue_binary_preprocess")
