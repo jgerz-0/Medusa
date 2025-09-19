@@ -24,6 +24,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from controller.severity import normalize_severity
+
 
 class Base(DeclarativeBase):
     """Base declarative class used by all ORM models."""
@@ -182,7 +184,14 @@ class Finding(TimestampMixin, Base):
     )
     evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending_validation", nullable=False)
+    validated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    validation_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    validation_metadata: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     assigned_to: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     validation_status: Mapped[str] = mapped_column(
@@ -464,6 +473,7 @@ def _binary_sample_update_hash(mapper, connection, target: BinarySample) -> None
 def _binary_static_analysis_set_hash(
     mapper, connection, target: BinaryStaticAnalysisFinding
 ) -> None:
+    target.severity = normalize_severity(target.severity)
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
     if not target.evidence_hash:
@@ -476,6 +486,7 @@ def _binary_static_analysis_set_hash(
 
 @event.listens_for(BinaryFuzzingFinding, "before_insert", propagate=True)
 def _binary_fuzzing_set_hash(mapper, connection, target: BinaryFuzzingFinding) -> None:
+    target.severity = normalize_severity(target.severity)
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
     if not target.evidence_hash:
@@ -522,8 +533,10 @@ def _binary_static_analysis_prevent_mutation(
 
 @event.listens_for(Finding, "before_insert", propagate=True)
 def _finding_set_hash(mapper, connection, target: Finding) -> None:
+    target.severity = normalize_severity(target.severity)
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
+    target.validation_metadata = _coerce_evidence(target.validation_metadata)
     target.tags = _normalize_tags(target.tags)
     target.status = _normalize_status(target.status)
     target.validation_status = _normalize_validation_status(

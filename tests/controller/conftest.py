@@ -13,8 +13,13 @@ from controller.main import (
     _hash_secret,
     app,
     get_db_session,
+    get_notification_service,
     get_queue_client,
     get_settings,
+)
+from controller.notifications import (
+    CriticalFindingNotification,
+    NotificationService,
 )
 
 
@@ -24,6 +29,26 @@ class FakeQueueClient(QueueClient):
 
     def enqueue(self, channel: str, payload):  # type: ignore[override]
         self.calls.append((channel, payload))
+
+
+class FakeNotificationService(NotificationService):
+    def __init__(self) -> None:
+        super().__init__(
+            slack_webhook=None,
+            email_sender=None,
+            email_recipients=[],
+            smtp_host=None,
+            smtp_port=None,
+            smtp_username=None,
+            smtp_password=None,
+            smtp_use_tls=False,
+        )
+        self.notifications: list[CriticalFindingNotification] = []
+
+    def notify_critical_finding(  # type: ignore[override]
+        self, payload: CriticalFindingNotification
+    ) -> None:
+        self.notifications.append(payload)
 
 
 @pytest.fixture()
@@ -42,6 +67,7 @@ def client():
         nuclei_callback_token="callback-secret",
         zap_callback_token="zap-secret",
         sqlmap_callback_token="sqlmap-secret",
+        validator_callback_token="validator-secret",
         enrichment_callback_token="enrichment-secret",
         validator_callback_token="validator-secret",
         binary_static_analysis_callback_token="static-secret",
@@ -92,6 +118,7 @@ def client():
         session.commit()
 
     queue = FakeQueueClient()
+    notification_service = FakeNotificationService()
 
     def override_settings() -> Settings:
         return settings
@@ -106,12 +133,16 @@ def client():
     def override_queue() -> FakeQueueClient:
         return queue
 
+    def override_notification_service() -> FakeNotificationService:
+        return notification_service
+
     app.dependency_overrides[get_settings] = override_settings
     app.dependency_overrides[get_db_session] = override_db
     app.dependency_overrides[get_queue_client] = override_queue
+    app.dependency_overrides[get_notification_service] = override_notification_service
 
     with TestClient(app) as test_client:
-        yield test_client, settings, TestingSessionLocal, queue
+        yield test_client, settings, TestingSessionLocal, queue, notification_service
 
     app.dependency_overrides.clear()
     get_settings.cache_clear()  # type: ignore[attr-defined]
