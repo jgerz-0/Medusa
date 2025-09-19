@@ -52,3 +52,23 @@ output "rds_master_credentials_secret_arn" {
   description = "Secrets Manager ARN storing the controller master credentials."
   value       = module.rds.master_credentials_secret_arn
 }
+
+output "artifact_bucket" {
+  description = "Artifact bucket identifiers for storing scan evidence."
+  value       = module.s3.artifact_bucket
+}
+
+output "artifact_controller_policy_document" {
+  description = "IAM policy document granting the controller wide access to artifact storage."
+  value       = module.s3.controller_policy_document
+}
+
+output "artifact_worker_policy_documents" {
+  description = "IAM policy documents scoped to worker prefixes for IRSA bindings."
+  value       = module.s3.worker_policy_documents
+}
+
+output "artifact_storage" {
+  description = "Aggregated artifact storage configuration consumed by downstream modules."
+  value       = module.s3.context
+}
