@@ -80,6 +80,9 @@ class Target(TimestampMixin, Base):
     scans: Mapped[list["Scan"]] = relationship(
         back_populates="target", cascade="all, delete-orphan"
     )
+    binary_samples: Mapped[list["BinarySample"]] = relationship(
+        back_populates="target", cascade="all, delete-orphan"
+    )
 
 
 class Scan(TimestampMixin, Base):
@@ -109,6 +112,9 @@ class Scan(TimestampMixin, Base):
         back_populates="scan", cascade="all, delete-orphan"
     )
     audit_entries: Mapped[list["AuditLog"]] = relationship(
+        back_populates="scan", cascade="all, delete-orphan"
+    )
+    binary_samples: Mapped[list["BinarySample"]] = relationship(
         back_populates="scan", cascade="all, delete-orphan"
     )
 
@@ -192,6 +198,55 @@ class AuditLog(Base):
 
     scan: Mapped[Optional["Scan"]] = relationship(back_populates="audit_entries")
     finding: Mapped[Optional["Finding"]] = relationship(back_populates="audit_entries")
+
+
+class BinarySample(TimestampMixin, Base):
+    """Normalized metadata about uploaded binaries produced by preprocessing."""
+
+    __tablename__ = "binary_samples"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    scan_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False
+    )
+    target_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("targets.id", ondelete="CASCADE"), nullable=False
+    )
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    magic_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    policy_status: Mapped[str] = mapped_column(String(32), default="allowed", nullable=False)
+    policy_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    storage_bucket: Mapped[str] = mapped_column(String(128), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    metadata_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    processed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), nullable=False
+    )
+
+    scan: Mapped["Scan"] = relationship(back_populates="binary_samples")
+    target: Mapped["Target"] = relationship(back_populates="binary_samples")
+
+
+@event.listens_for(BinarySample, "before_insert", propagate=True)
+def _binary_sample_set_hash(mapper, connection, target: BinarySample) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    target.policy_reasons = list(dict.fromkeys(target.policy_reasons or []))
+    if not target.metadata_hash:
+        target.metadata_hash = _hash_json(target.metadata_json)
+
+
+@event.listens_for(BinarySample, "before_update", propagate=True)
+def _binary_sample_update_hash(mapper, connection, target: BinarySample) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    target.policy_reasons = list(dict.fromkeys(target.policy_reasons or []))
+    target.metadata_hash = _hash_json(target.metadata_json)
 
 
 @event.listens_for(Finding, "before_insert", propagate=True)
@@ -306,7 +361,7 @@ class PrincipalCredential(Base):
     )
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    subject: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
     auth_method: Mapped[str] = mapped_column(String(32), nullable=False)
     key_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)

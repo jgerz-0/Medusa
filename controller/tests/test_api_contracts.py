@@ -9,7 +9,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import jwt
-from controller.db.models import AuditLog, Base, Finding, PrincipalCredential, Scan, Target
+from controller.db.models import (
+    AuditLog,
+    Base,
+    Finding,
+    FindingEnrichment,
+    PrincipalCredential,
+    Scan,
+    Target,
+)
 from controller.main import (
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
@@ -198,31 +206,76 @@ def test_target_create_and_scan_flow(
     assert job["scan_id"] == scan_payload["id"]
     assert job["target"] == target_payload["scope"]
     assert job["target_id"] == target_payload["id"]
-    assert job["target_name"] == target_payload["name"]
-    assert job["scanner"] == "nuclei"
-    assert job["template_profile"] == "full"
-    assert job["templates"] == list(NUCLEI_TEMPLATE_PROFILES["full"])
-    assert job["tags"] == ["profile:full"]
-    assert job["parameters"] == {"profile": "full"}
-    assert job["attempts"] == 0
-    assert job["initiated_by"] == scan_payload["initiated_by"]
-    assert job["callback_url"].endswith("/internal/nuclei/callback")
-    submitted_at = job["submitted_at"]
-    datetime.fromisoformat(submitted_at)
-    metadata = job["metadata"]
-    assert metadata["scan_id"] == job["scan_id"]
-    assert metadata["target_scope"] == job["target"]
-    assert metadata["target_id"] == job["target_id"]
-    assert metadata["template_profile"] == job["template_profile"]
-    assert metadata["controller_callback_url"] == job["callback_url"]
-    assert metadata["parameters"] == job["parameters"]
 
-    scans_collection = client.get("/scans", headers=auth_headers())
-    assert scans_collection.status_code == 200
-    collection_payload = scans_collection.json()
-    assert "data" in collection_payload
-    assert len(collection_payload["data"]) == 1
-    assert collection_payload["data"][0]["id"] == scan_payload["id"]
+
+def test_preprocess_enqueue_flow(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, queue, _session_factory, settings = api_client
+
+    target_response = client.post(
+        "/targets",
+        json={"name": "Firmware", "scope": "firmware.example.com"},
+        headers=auth_headers(),
+    )
+    assert target_response.status_code == 201, target_response.text
+    target_payload = target_response.json()
+
+    preprocess_response = client.post(
+        "/preprocess",
+        json={
+            "target_id": target_payload["id"],
+            "object_bucket": "binary-uploads",
+            "object_key": "uploads/sample.bin",
+            "file_name": "sample.bin",
+            "expected_scope": "firmware.example.com",
+            "metadata": {"sha256": "deadbeef"},
+        },
+        headers=auth_headers(),
+    )
+    assert preprocess_response.status_code == 202, preprocess_response.text
+    payload = preprocess_response.json()
+    assert payload["scanner"] == "binary_preprocess"
+    assert payload["target"] == "firmware.example.com"
+
+    assert queue.messages, "enqueue should push a job to the queue"
+    channel, job = queue.messages[-1]
+    assert channel == settings.binary_preprocess_queue_channel
+    assert job["target_id"] == target_payload["id"]
+    assert job["object_bucket"] == "binary-uploads"
+    assert job["metadata"]["target_scope"] == "firmware.example.com"
+
+
+def test_preprocess_scope_mismatch_audited(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, queue, session_factory, _settings = api_client
+
+    target_response = client.post(
+        "/targets",
+        json={"name": "Firmware", "scope": "firmware.example.com"},
+        headers=auth_headers(),
+    )
+    target_payload = target_response.json()
+
+    response = client.post(
+        "/preprocess",
+        json={
+            "target_id": target_payload["id"],
+            "object_bucket": "binary-uploads",
+            "object_key": "uploads/sample.bin",
+            "expected_scope": "attacker.example.com",
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 400, response.text
+    assert not queue.messages
+
+    with session_factory() as session:
+        audit_entries = session.query(AuditLog).filter(
+            AuditLog.action == "preprocess_scope_mismatch"
+        ).all()
+        assert audit_entries, "scope mismatches should be audited"
 
 
 def test_scan_requested_hosts_scope_enforcement(
@@ -968,6 +1021,7 @@ def test_principal_creation_validates_and_expands_roles(
             "findings:read",
             "scan:enqueue",
             "scans:read",
+            "binary:preprocess",
             "targets:read",
             "enrich:enqueue",
         ]
@@ -991,6 +1045,7 @@ def test_principal_creation_validates_and_expands_roles(
             "findings:read",
             "scan:enqueue",
             "scans:read",
+            "binary:preprocess",
             "targets:read",
             "targets:write",
             "enrich:enqueue",

@@ -10,10 +10,11 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, Union
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -32,7 +33,15 @@ from redis import Redis
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
-from controller.db.models import AuditLog, Finding, PrincipalCredential, Scan, Target
+from controller.db.models import (
+    AuditLog,
+    BinarySample,
+    Finding,
+    FindingEnrichment,
+    PrincipalCredential,
+    Scan,
+    Target,
+)
 from controller.db.session import SessionLocal
 from workers.enrichment.cve.schemas import CVEEnrichmentResult
 
@@ -45,6 +54,7 @@ ROLE_ANALYST = "analyst"
 ROLE_FINDINGS_READ = "findings:read"
 ROLE_SCANS_READ = "scans:read"
 ROLE_SCAN_ENQUEUE = "scan:enqueue"
+ROLE_BINARY_PREPROCESS_ENQUEUE = "binary:preprocess"
 ROLE_TARGETS_READ = "targets:read"
 ROLE_TARGETS_WRITE = "targets:write"
 ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
@@ -55,6 +65,7 @@ ALLOWED_ROLES = {
     ROLE_FINDINGS_READ,
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
+    ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -65,6 +76,7 @@ DEFAULT_ANALYST_ROLES = [
     ROLE_FINDINGS_READ,
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
+    ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_ENRICHMENT_ENQUEUE,
 ]
@@ -74,6 +86,7 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_FINDINGS_READ,
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
+    ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -232,6 +245,10 @@ class Settings(BaseSettings):
         "queues:enrichment:cve",
         description="Redis list channel for CVE enrichment jobs.",
     )
+    binary_preprocess_queue_channel: str = Field(
+        "queues:binary:preprocess",
+        description="Redis list channel for binary preprocessing jobs.",
+    )
     nuclei_callback_token: str = Field(
         ..., description="Shared secret token required for nuclei worker callbacks."
     )
@@ -258,13 +275,10 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {}
     return payload
 
+
 Network = Union[IPv4Network, IPv6Network]
 
-security_scheme = HTTPBearer(auto_error=False)
 
-def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Ensure JSON payloads are deterministic dictionaries."""
-    
 def _normalize_hostname(value: str) -> str:
     """Return a lowercase hostname without trailing dots or wildcard prefixes."""
 
@@ -272,10 +286,6 @@ def _normalize_hostname(value: str) -> str:
     if normalized.startswith("*."):
         normalized = normalized[2:]
     return normalized
-
-    if payload is None:
-        return {}
-    return payload
 
 def _hash_secret(secret: str) -> str:
     """Return a SHA-256 hash of the provided secret."""
@@ -389,6 +399,29 @@ class ScanRequest(BaseModel):
     )
     parameters: Dict[str, Any] = Field(
         default_factory=dict, description="Scanner-specific configuration payload"
+    )
+
+
+class BinaryPreprocessRequest(BaseModel):
+    target_id: str
+    object_bucket: str = Field(
+        ..., min_length=1, max_length=128, description="Bucket containing the uploaded artifact"
+    )
+    object_key: str = Field(
+        ..., min_length=1, max_length=512, description="Object key referencing the uploaded artifact"
+    )
+    file_name: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="Optional analyst-supplied filename to retain for context",
+    )
+    expected_scope: Optional[str] = Field(
+        default=None,
+        description="Optional assertion matching the controller's stored target scope",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Arbitrary metadata forwarded to the preprocess worker",
     )
 
 
@@ -690,12 +723,23 @@ def authenticate(
             auth_method="api_key",
             roles=list(DEFAULT_ADMIN_ROLES),
         )
+
+    if candidate_api_key:
+        api_key_hash = _hash_secret(candidate_api_key)
+        active_credential = (
+            db.query(PrincipalCredential)
+            .filter(
+                PrincipalCredential.auth_method == "api_key",
+                PrincipalCredential.key_hash == api_key_hash,
+                PrincipalCredential.revoked_at.is_(None),
+            )
+            .first()
+        )
         if active_credential:
-            roles = list(active_credential.roles or [])
             return Principal(
                 subject=active_credential.subject,
                 auth_method="api_key",
-                roles=roles,
+                roles=list(active_credential.roles or []),
             )
 
         revoked_credential = (
@@ -729,6 +773,10 @@ def authenticate(
                     "credential_id": str(revoked_credential.id),
                     "credential_status": "revoked",
                 },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Authentication required",
             )
 
     if credentials is None or credentials.scheme.lower() != "bearer":
@@ -782,42 +830,12 @@ def authenticate_worker(
         subject="worker:nuclei",
     )
 
-    token = request.headers.get("X-Callback-Token")
-    if not token or token != settings.nuclei_callback_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid callback token"
-          
-        worker_principal = Principal(
-            subject="worker:nuclei",
-            auth_method="shared_secret",
-            roles=[],
-        )
-        log_access_denied(
-            db,
-            principal=worker_principal,
-            required_roles=[],
-            resource_type="worker_callback",
-            resource_id="nuclei",
-            reason="invalid_callback_token",
-            detail="Invalid callback token",
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            extra_metadata={"token_provided": bool(token)},
-        )
-
 
 def authenticate_enrichment_worker(
     request: Request,
     settings: Settings = Depends(get_settings),
 ) -> Principal:
     """Authenticate enrichment worker callbacks using a dedicated shared secret."""
-
-def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
-    if principal.has_role(ROLE_ADMIN):
-        return
-    if not principal.has_any_role(required_roles):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient role for this operation",
     return _authenticate_callback_worker(
         request,
         expected_token=settings.enrichment_callback_token,
@@ -1190,7 +1208,13 @@ def create_target(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetResponse:
-    enforce_roles(principal, [ROLE_TARGETS_WRITE])
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_WRITE],
+        db,
+        resource_type="endpoint",
+        resource_id="/targets",
+    )
     existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
         raise HTTPException(
@@ -1223,7 +1247,13 @@ def list_targets(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetCollectionResponse:
-    enforce_roles(principal, [ROLE_TARGETS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/targets",
+    )
     targets = db.query(Target).order_by(Target.created_at.desc()).all()
 
     record_audit_event(
@@ -1249,7 +1279,13 @@ def enqueue_scan(
     queue: QueueClient = Depends(get_queue_client),
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
-    enforce_roles(principal, [ROLE_SCAN_ENQUEUE])
+    enforce_roles(
+        principal,
+        [ROLE_SCAN_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/scan",
+    )
 
     target = db.get(Target, scan_request.target_id)
     if target is None:
@@ -1267,6 +1303,23 @@ def enqueue_scan(
         scan_request.parameters
     )
 
+    requested_hosts_raw = _coerce_requested_hosts(
+        (scan_request.parameters or {}).get("requested_hosts")
+    )
+    rejected_hosts: List[str] = []
+    if requested_hosts_raw:
+        allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
+            target.scope, requested_hosts_raw
+        )
+        sanitized_parameters["requested_hosts"] = allowed_hosts
+        if rejected_hosts:
+            sanitized_parameters["rejected_hosts"] = rejected_hosts
+        if requested_hosts_raw and not allowed_hosts:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No requested hosts remain within the authorized target scope",
+            )
+
     scan = Scan(
         target_id=target.id,
         scanner=scan_request.scanner,
@@ -1280,6 +1333,24 @@ def enqueue_scan(
     submitted_at = datetime.now(tz=timezone.utc)
     callback_url = str(http_request.url_for("nuclei_callback"))
     job_id = str(uuid.uuid4())
+
+    job_metadata: Dict[str, Any] = {
+        "scan_id": str(scan.id),
+        "target_id": str(target.id),
+        "target_scope": target.scope,
+        "target_name": target.name,
+        "initiated_by": principal.subject,
+        "submitted_at": submitted_at.isoformat(),
+        "template_profile": profile,
+        "controller_callback_url": callback_url,
+        "parameters": sanitized_parameters,
+    }
+    if requested_hosts_raw:
+        job_metadata["requested_hosts_raw"] = requested_hosts_raw
+    if sanitized_parameters.get("requested_hosts"):
+        job_metadata["requested_hosts"] = sanitized_parameters["requested_hosts"]
+    if rejected_hosts:
+        job_metadata["rejected_hosts"] = rejected_hosts
 
     job_payload = {
         "job_id": job_id,
@@ -1296,17 +1367,7 @@ def enqueue_scan(
         "tags": tags,
         "initiated_by": principal.subject,
         "submitted_at": submitted_at.isoformat(),
-        "metadata": {
-            "scan_id": str(scan.id),
-            "target_id": str(target.id),
-            "target_scope": target.scope,
-            "target_name": target.name,
-            "initiated_by": principal.subject,
-            "submitted_at": submitted_at.isoformat(),
-            "template_profile": profile,
-            "controller_callback_url": callback_url,
-            "parameters": sanitized_parameters,
-        },
+        "metadata": job_metadata,
     }
     queue.enqueue(settings.nuclei_queue_channel, job_payload)
 
@@ -1322,6 +1383,128 @@ def enqueue_scan(
             "scanner": scan.scanner,
             "job_id": job_id,
             "template_profile": profile,
+            "requested_hosts": sanitized_parameters.get("requested_hosts", []),
+            "rejected_hosts": rejected_hosts,
+        },
+    )
+
+    return serialize_scan(scan)
+
+
+@app.post(
+    "/preprocess",
+    response_model=ScanResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_binary_preprocess(
+    request: BinaryPreprocessRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
+) -> ScanResponse:
+    """Queue a binary preprocessing task for an uploaded artifact."""
+
+    enforce_roles(
+        principal,
+        [ROLE_BINARY_PREPROCESS_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/preprocess",
+    )
+
+    target = db.get(Target, request.target_id)
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Target not found"
+        )
+
+    if not target.is_authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Target is currently outside the authorized scope",
+        )
+
+    if request.expected_scope:
+        provided = _normalize_hostname(request.expected_scope)
+        expected = _normalize_hostname(target.scope)
+        if provided != expected:
+            record_audit_event(
+                db,
+                actor=principal,
+                action="preprocess_scope_mismatch",
+                resource_type="target",
+                resource_id=target.id,
+                metadata={
+                    "provided_scope": request.expected_scope,
+                    "normalized_provided": provided,
+                    "expected_scope": expected,
+                },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Target scope assertion failed",
+            )
+
+    scan = Scan(
+        target_id=target.id,
+        scanner="binary_preprocess",
+        parameters={
+            "object_bucket": request.object_bucket,
+            "object_key": request.object_key,
+            "file_name": request.file_name,
+            "metadata": request.metadata,
+        },
+        initiated_by=principal.subject,
+    )
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+
+    submitted_at = datetime.now(tz=timezone.utc)
+    job_id = str(uuid.uuid4())
+
+    job_metadata: Dict[str, Any] = {
+        "scan_id": str(scan.id),
+        "target_id": str(target.id),
+        "target_scope": target.scope,
+        "target_name": target.name,
+        "object_bucket": request.object_bucket,
+        "object_key": request.object_key,
+        "file_name": request.file_name,
+        "submitted_at": submitted_at.isoformat(),
+        "initiated_by": principal.subject,
+    }
+    if request.metadata:
+        job_metadata["analyst_metadata"] = request.metadata
+
+    job_payload = {
+        "job_id": job_id,
+        "scan_id": str(scan.id),
+        "target_id": str(target.id),
+        "target_scope": target.scope,
+        "object_bucket": request.object_bucket,
+        "object_key": request.object_key,
+        "file_name": request.file_name,
+        "submitted_by": principal.subject,
+        "submitted_at": submitted_at.isoformat(),
+        "metadata": job_metadata,
+    }
+
+    queue.enqueue(settings.binary_preprocess_queue_channel, job_payload)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enqueue_binary_preprocess",
+        resource_type="scan",
+        resource_id=scan.id,
+        scan_id=scan.id,
+        metadata={
+            "target_id": target.id,
+            "object_bucket": request.object_bucket,
+            "object_key": request.object_key,
+            "job_id": job_id,
         },
     )
 
@@ -1402,7 +1585,13 @@ def list_scans(
 ) -> ScanCollectionResponse:
     """Return the most recent scans for the authenticated principal."""
 
-    enforce_roles(principal, [ROLE_SCANS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_SCANS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/scans",
+    )
     query = db.query(Scan).options(
         selectinload(Scan.target), selectinload(Scan.findings)
     )
@@ -1613,7 +1802,13 @@ def list_findings(
 ) -> FindingCollectionResponse:
     """Return the latest findings for the requested scope."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/findings",
+    )
     query = db.query(Finding)
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
@@ -1645,7 +1840,13 @@ def get_finding(
 ) -> FindingItemResponse:
     """Fetch a single finding for detailed analysis views."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/findings/{finding_id}",
+    )
     finding = db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(
