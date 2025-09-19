@@ -1522,6 +1522,7 @@ def list_findings(
         resource_type="endpoint",
         resource_id="/findings",
     )
+  
     query = db.query(Finding).options(selectinload(Finding.enrichments))
 
     if scan_id is not None:
@@ -1561,6 +1562,7 @@ def get_finding(
         resource_type="endpoint",
         resource_id=f"/findings/{finding_id}",
     )
+  
     finding = (
         db.query(Finding)
         .options(selectinload(Finding.enrichments))
