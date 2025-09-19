@@ -45,6 +45,12 @@ following secrets are set before starting the stack:
 - `BINARY_METADATA_PREFIX`
 - `S3_ACCESS_KEY_ID`
 - `S3_SECRET_ACCESS_KEY`
+- `MEDUSA_ENRICHMENT_CALLBACK_TOKEN`
+
+The controller expects `MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL` to match the
+worker's `CVE_ENRICHMENT_QUEUE_KEY`, and the shared callback token is used to
+authenticate `cve-enrichment-worker` responses when they are published back to
+the controller.
 
 Each worker reads the corresponding token via `NUCLEI_CALLBACK_TOKEN`,
 `ZAP_CALLBACK_TOKEN`, or `SQLMAP_CALLBACK_TOKEN` so callbacks are rejected if a
@@ -111,6 +117,10 @@ Compose so the worker authenticates to the local Qdrant instance:
 | `CVE_ENRICHMENT_QDRANT_API_KEY` | Optional API key if Qdrant authentication is enabled. Leave blank for local development. |
 | `CVE_ENRICHMENT_QDRANT_TIMEOUT` | Request timeout in seconds for upsert operations. |
 | `CVE_ENRICHMENT_QDRANT_VECTOR_SIZE` | Deterministic embedding dimension emitted by the worker. |
+
+The controller mirrors the worker configuration via `MEDUSA_CVE_ENRICHMENT_QDRANT_URL`
+and `MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION` so `/enrich` responses can include
+links to the correct vector store.
 
 After the stack is running, create the collection (once) using Qdrant's API:
 
