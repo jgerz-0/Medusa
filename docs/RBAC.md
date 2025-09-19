@@ -62,8 +62,10 @@ requirement.
 - `GET /findings` – requires any authenticated principal. Read-only access is
   typically granted via `findings:read`.
 
-Each RBAC decision is recorded via the audit logging pipeline, enabling
-post-incident review of every permitted or denied operation.
+Each RBAC decision—successful authorizations and explicit denials—is recorded
+via the audit logging pipeline. This ensures post-incident review includes both
+the sensitive operations that executed and the attempts that were blocked for
+missing roles or revoked credentials.
 
 ## Operational Workflow
 

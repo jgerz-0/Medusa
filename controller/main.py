@@ -443,9 +443,23 @@ def authenticate(
                 "Rejected revoked API key",
                 extra={"subject": revoked_credential.subject},
             )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+            revoked_principal = Principal(
+                subject=revoked_credential.subject,
+                auth_method="api_key",
+                roles=list(revoked_credential.roles or []),
+            )
+            log_access_denied(
+                db,
+                principal=revoked_principal,
+                required_roles=[],
+                resource_type="principal_credential",
+                resource_id=str(revoked_credential.id),
+                reason="credential_revoked",
                 detail="API key revoked",
+                extra_metadata={
+                    "credential_id": str(revoked_credential.id),
+                    "credential_status": "revoked",
+                },
             )
 
     if credentials is None or credentials.scheme.lower() != "bearer":
@@ -489,25 +503,94 @@ def authenticate(
 def authenticate_worker(
     request: Request,
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
 ) -> Principal:
     """Authenticate nuclei worker callbacks using a shared secret header."""
 
     token = request.headers.get("X-Callback-Token")
     if not token or token != settings.nuclei_callback_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid callback token"
+        worker_principal = Principal(
+            subject="worker:nuclei",
+            auth_method="shared_secret",
+            roles=[],
+        )
+        log_access_denied(
+            db,
+            principal=worker_principal,
+            required_roles=[],
+            resource_type="worker_callback",
+            resource_id="nuclei",
+            reason="invalid_callback_token",
+            detail="Invalid callback token",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata={"token_provided": bool(token)},
         )
 
     return Principal(subject="worker:nuclei", auth_method="shared_secret")
 
 
-def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
+def log_access_denied(
+    session: Session,
+    *,
+    principal: Principal,
+    required_roles: Iterable[str],
+    resource_type: str = "endpoint",
+    resource_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    detail: str = "Insufficient role for this operation",
+    status_code: int = status.HTTP_403_FORBIDDEN,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record an audit trail for denied access before raising an error."""
+
+    required_list = sorted({role for role in required_roles if role})
+    granted_list = sorted({role for role in principal.roles})
+    granted_set = set(granted_list)
+    missing_roles = [role for role in required_list if role not in granted_set]
+
+    metadata: Dict[str, Any] = {
+        "required_roles": required_list,
+        "granted_roles": granted_list,
+        "auth_method": principal.auth_method,
+    }
+    if missing_roles:
+        metadata["missing_roles"] = missing_roles
+    if reason:
+        metadata["reason"] = reason
+    if extra_metadata:
+        metadata.update(extra_metadata)
+
+    record_audit_event(
+        session,
+        actor=principal,
+        action="access_denied",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        metadata=metadata,
+    )
+
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+def enforce_roles(
+    principal: Principal,
+    required_roles: Iterable[str],
+    session: Session,
+    *,
+    resource_type: str = "endpoint",
+    resource_id: Optional[str] = None,
+) -> None:
+    normalized_roles = list(dict.fromkeys(required_roles))
     if principal.has_role(ROLE_ADMIN):
         return
-    if not principal.has_any_role(required_roles):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient role for this operation",
+    if not principal.has_any_role(normalized_roles):
+        log_access_denied(
+            session,
+            principal=principal,
+            required_roles=normalized_roles,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            reason="missing_required_roles",
         )
 
 
@@ -577,7 +660,13 @@ def list_principals(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> PrincipalCredentialCollectionResponse:
-    enforce_roles(principal, ["admin"])
+    enforce_roles(
+        principal,
+        ["admin"],
+        db,
+        resource_type="endpoint",
+        resource_id="/principals",
+    )
     records = (
         db.query(PrincipalCredential)
         .order_by(PrincipalCredential.created_at.desc())
@@ -610,7 +699,13 @@ def create_principal_credential(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> PrincipalCredentialCreatedResponse:
-    enforce_roles(principal, ["admin"])
+    enforce_roles(
+        principal,
+        ["admin"],
+        db,
+        resource_type="endpoint",
+        resource_id="/principals",
+    )
 
     existing = (
         db.query(PrincipalCredential)
@@ -683,7 +778,13 @@ def revoke_principal_credential(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> PrincipalCredentialResponse:
-    enforce_roles(principal, ["admin"])
+    enforce_roles(
+        principal,
+        ["admin"],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/principals/{credential_id}/revoke",
+    )
 
     credential = db.get(PrincipalCredential, credential_id)
     if credential is None:
@@ -723,7 +824,13 @@ def create_target(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetResponse:
-    enforce_roles(principal, [ROLE_TARGETS_WRITE])
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_WRITE],
+        db,
+        resource_type="endpoint",
+        resource_id="/targets",
+    )
     existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
         raise HTTPException(
@@ -756,7 +863,13 @@ def list_targets(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetCollectionResponse:
-    enforce_roles(principal, [ROLE_TARGETS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/targets",
+    )
     targets = db.query(Target).order_by(Target.created_at.desc()).all()
 
     record_audit_event(
@@ -781,7 +894,13 @@ def enqueue_scan(
     queue: QueueClient = Depends(get_queue_client),
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
-    enforce_roles(principal, [ROLE_SCAN_ENQUEUE])
+    enforce_roles(
+        principal,
+        [ROLE_SCAN_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/scan",
+    )
 
     target = db.get(Target, request.target_id)
     if target is None:
@@ -838,7 +957,13 @@ def enqueue_enrichment(
 ) -> EnrichmentResponse:
     """Queue a CVE enrichment job for the specified finding."""
 
-    enforce_roles(principal, [ROLE_ENRICHMENT_ENQUEUE])
+    enforce_roles(
+        principal,
+        [ROLE_ENRICHMENT_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/enrich",
+    )
 
     finding = db.get(Finding, request.finding_id)
     if finding is None:
@@ -898,7 +1023,13 @@ def list_scans(
 ) -> ScanCollectionResponse:
     """Return the most recent scans for the authenticated principal."""
 
-    enforce_roles(principal, [ROLE_SCANS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_SCANS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/scans",
+    )
     query = db.query(Scan).options(
         selectinload(Scan.target), selectinload(Scan.findings)
     )
@@ -1008,7 +1139,13 @@ def list_findings(
 ) -> FindingCollectionResponse:
     """Return the latest findings for the requested scope."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/findings",
+    )
     query = db.query(Finding)
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
@@ -1040,7 +1177,13 @@ def get_finding(
 ) -> FindingItemResponse:
     """Fetch a single finding for detailed analysis views."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}",
+    )
     finding = db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(
