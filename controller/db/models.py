@@ -43,11 +43,17 @@ def _coerce_evidence(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return payload
 
 
-def _hash_evidence(payload: Dict[str, Any]) -> str:
-    """Create a SHA-256 hash of evidence JSON for immutability guarantees."""
+def _hash_json(payload: Any) -> str:
+    """Create a SHA-256 hash of arbitrary JSON-serialisable payloads."""
 
     normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _hash_evidence(payload: Dict[str, Any]) -> str:
+    """Create a SHA-256 hash of evidence JSON for immutability guarantees."""
+
+    return _hash_json(payload)
 
 
 class TimestampMixin:
@@ -130,6 +136,35 @@ class Finding(TimestampMixin, Base):
     audit_entries: Mapped[list["AuditLog"]] = relationship(
         back_populates="finding", cascade="all, delete-orphan"
     )
+    enrichments: Mapped[list["FindingEnrichment"]] = relationship(
+        back_populates="finding", cascade="all, delete-orphan"
+    )
+
+
+class FindingEnrichment(TimestampMixin, Base):
+    """Immutable enrichment payloads linked to findings."""
+
+    __tablename__ = "finding_enrichments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    finding_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False
+    )
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    generated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    advisories: Mapped[list[Dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    advisories_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    errors: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    errors_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    provenance: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    provenance_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    finding: Mapped["Finding"] = relationship(back_populates="enrichments")
 
 
 class AuditLog(Base):
@@ -199,6 +234,59 @@ def _auditlog_prevent_evidence_mutation(mapper, connection, target: AuditLog) ->
     hash_attr = state.attrs.evidence_hash
     if evidence_attr.history.has_changes() or hash_attr.history.has_changes():
         raise ValueError("Audit log evidence is immutable by design.")
+
+
+def _normalize_json_payload(value: Any, default_factory):
+    """Ensure JSON payloads stored in enrichment rows are deterministic."""
+
+    if value is None:
+        return default_factory()
+    return value
+
+
+@event.listens_for(FindingEnrichment, "before_insert", propagate=True)
+def _finding_enrichment_set_hash(
+    mapper, connection, target: FindingEnrichment
+) -> None:
+    target.advisories = list(_normalize_json_payload(target.advisories, list))
+    target.errors = dict(_normalize_json_payload(target.errors, dict))
+    target.provenance = dict(_normalize_json_payload(target.provenance, dict))
+
+    if not target.advisories_hash:
+        target.advisories_hash = _hash_json(target.advisories)
+    if not target.errors_hash:
+        target.errors_hash = _hash_json(target.errors)
+    if not target.provenance_hash:
+        target.provenance_hash = _hash_json(target.provenance)
+
+    if not target.payload_hash:
+        payload = {
+            "advisories": target.advisories_hash,
+            "errors": target.errors_hash,
+            "provenance": target.provenance_hash,
+        }
+        target.payload_hash = _hash_json(payload)
+
+
+@event.listens_for(FindingEnrichment, "before_update", propagate=True)
+def _finding_enrichment_prevent_mutation(
+    mapper, connection, target: FindingEnrichment
+) -> None:
+    state = inspect(target)
+    changed = any(
+        state.attrs[column].history.has_changes()
+        for column in (
+            "advisories",
+            "errors",
+            "provenance",
+            "advisories_hash",
+            "errors_hash",
+            "provenance_hash",
+            "payload_hash",
+        )
+    )
+    if changed:
+        raise ValueError("Finding enrichment payloads are immutable once recorded.")
 
 
 class PrincipalCredential(Base):

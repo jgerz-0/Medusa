@@ -9,7 +9,15 @@ from sqlalchemy.pool import StaticPool
 
 import jwt
 
-from controller.db.models import AuditLog, Base, Finding, PrincipalCredential, Scan, Target
+from controller.db.models import (
+    AuditLog,
+    Base,
+    Finding,
+    FindingEnrichment,
+    PrincipalCredential,
+    Scan,
+    Target,
+)
 from controller.main import (
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
@@ -42,6 +50,7 @@ def api_client() -> (
         nuclei_queue_channel="nuclei:test",
         jwt_secret="unit-test-secret",
         nuclei_callback_token="callback-secret",
+        enrichment_callback_token="enrichment-secret",
     )
 
     engine = create_engine(
@@ -93,6 +102,10 @@ def api_client() -> (
 
 def auth_headers() -> dict[str, str]:
     return {"X-API-Key": "test-key"}
+
+
+def enrichment_headers() -> dict[str, str]:
+    return {"X-Callback-Token": "enrichment-secret"}
 
 
 def test_target_create_and_scan_flow(
@@ -257,12 +270,145 @@ def test_finding_contracts(
     assert finding_item["status"] == "open"
     assert finding_item["template_id"] == "CVE-2024-0001"
     assert finding_item["evidence"]
+    assert finding_item["enrichments"] == []
     datetime.fromisoformat(finding_item["detected_at"])  # raises on invalid format
 
     detail_response = client.get(f"/findings/{finding_id}", headers=auth_headers())
     assert detail_response.status_code == 200
     detail_payload = detail_response.json()
     assert detail_payload["data"]["id"] == finding_id
+    assert detail_payload["data"]["enrichments"] == []
+
+
+def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:
+    with session_factory() as session:
+        target = Target(name="Prod API", scope="prod.example.com", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="nuclei",
+            status="completed",
+            initiated_by="tester",
+            parameters={},
+        )
+        session.add(scan)
+        session.flush()
+
+        finding = Finding(
+            scan_id=scan.id,
+            title="SQL injection",
+            severity="high",
+            cve_id="CVE-2024-9999",
+            description="Unsanitised input",
+            metadata_json={"template": "cve"},
+            evidence={"request": "GET /?id='"},
+            evidence_hash="",
+        )
+        session.add(finding)
+        session.commit()
+        return finding.id, scan.id
+
+
+def test_enrichment_callback_persists_results(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    finding_id, _scan_id = _persist_sample_finding(session_factory)
+
+    payload = {
+        "job_id": "job-success-1",
+        "finding_id": finding_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "advisories": [
+            {
+                "source": "nvd",
+                "identifier": "CVE-2024-9999",
+                "summary": "Example summary",
+                "severity": "HIGH",
+                "cvss_score": 8.9,
+                "published": "2024-02-01T00:00:00+00:00",
+                "modified": "2024-02-02T00:00:00+00:00",
+                "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-9999"],
+                "raw": {"id": "CVE-2024-9999"},
+            }
+        ],
+        "errors": {},
+    }
+
+    response = client.post(
+        "/internal/enrich/callback",
+        json=payload,
+        headers=enrichment_headers(),
+    )
+    assert response.status_code == 204, response.text
+
+    with session_factory() as session:
+        enrichment = (
+            session.query(FindingEnrichment)
+            .filter(FindingEnrichment.job_id == payload["job_id"])
+            .one()
+        )
+        assert enrichment.payload_hash
+        assert enrichment.provenance["worker_subject"] == "worker:enrichment"
+
+        audit = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.action == "enrichment_callback",
+                AuditLog.finding_id == finding_id,
+            )
+            .first()
+        )
+        assert audit is not None
+
+    detail = client.get(f"/findings/{finding_id}", headers=auth_headers())
+    assert detail.status_code == 200
+    detail_payload = detail.json()["data"]
+    assert detail_payload["enrichments"], detail_payload
+    latest = detail_payload["enrichments"][0]
+    assert latest["job_id"] == payload["job_id"]
+    assert latest["advisories"][0]["identifier"] == "CVE-2024-9999"
+
+
+def test_enrichment_callback_records_errors(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    finding_id, _scan_id = _persist_sample_finding(session_factory)
+
+    payload = {
+        "job_id": "job-error-1",
+        "finding_id": finding_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "advisories": [],
+        "errors": {"nvd": "timeout"},
+    }
+
+    response = client.post(
+        "/internal/enrich/callback",
+        json=payload,
+        headers=enrichment_headers(),
+    )
+    assert response.status_code == 204, response.text
+
+    with session_factory() as session:
+        enrichment = (
+            session.query(FindingEnrichment)
+            .filter(FindingEnrichment.job_id == payload["job_id"])
+            .one()
+        )
+        assert enrichment.errors["nvd"] == "timeout"
+        assert enrichment.errors_hash
+
+    listing = client.get("/findings", headers=auth_headers())
+    assert listing.status_code == 200
+    listing_payload = listing.json()["data"]
+    assert listing_payload[0]["enrichments"][0]["errors"]["nvd"] == "timeout"
+
+    detail = client.get(f"/findings/{finding_id}", headers=auth_headers())
+    assert detail.status_code == 200
 
     with session_factory() as session:
         audit_entries = session.query(AuditLog).all()
