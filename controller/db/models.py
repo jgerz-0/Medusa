@@ -6,7 +6,7 @@ import datetime
 import hashlib
 import json
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from sqlalchemy import (
     JSON,
@@ -56,6 +56,34 @@ def _hash_evidence(payload: Dict[str, Any]) -> str:
     """Create a SHA-256 hash of evidence JSON for immutability guarantees."""
 
     return _hash_json(payload)
+
+
+def _normalize_tags(value: Optional[Iterable[str]]) -> list[str]:
+    """Normalize analyst-supplied tags into a deterministic list."""
+
+    if not value:
+        return []
+    normalized: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            continue
+        candidate = raw.strip().lower()
+        if not candidate:
+            continue
+        if candidate not in normalized:
+            normalized.append(candidate)
+    return normalized
+
+
+def _normalize_status(value: Optional[str]) -> str:
+    """Clamp finding workflow status to the supported vocabulary."""
+
+    allowed = {"open", "acknowledged", "resolved"}
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in allowed:
+            return lowered
+    return "open"
 
 
 class TimestampMixin:
@@ -153,12 +181,20 @@ class Finding(TimestampMixin, Base):
     validation_metadata: Mapped[Dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False
     )
+    assigned_to: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
 
     scan: Mapped["Scan"] = relationship(back_populates="findings")
     audit_entries: Mapped[list["AuditLog"]] = relationship(
         back_populates="finding", cascade="all, delete-orphan"
     )
     enrichments: Mapped[list["FindingEnrichment"]] = relationship(
+        back_populates="finding", cascade="all, delete-orphan"
+    )
+    comments: Mapped[list["FindingComment"]] = relationship(
+        back_populates="finding", cascade="all, delete-orphan"
+    )
+    tickets: Mapped[list["FindingTicket"]] = relationship(
         back_populates="finding", cascade="all, delete-orphan"
     )
 
@@ -216,6 +252,48 @@ class AuditLog(Base):
 
     scan: Mapped[Optional["Scan"]] = relationship(back_populates="audit_entries")
     finding: Mapped[Optional["Finding"]] = relationship(back_populates="audit_entries")
+
+
+class FindingComment(Base):
+    """Immutable analyst commentary linked to findings."""
+
+    __tablename__ = "finding_comments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    finding_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False
+    )
+    author: Mapped[str] = mapped_column(String(128), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    metadata_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), nullable=False
+    )
+
+    finding: Mapped["Finding"] = relationship(back_populates="comments")
+
+
+class FindingTicket(TimestampMixin, Base):
+    """Deterministic ticket metadata for external integrations."""
+
+    __tablename__ = "finding_tickets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    finding_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False
+    )
+    integration: Mapped[str] = mapped_column(String(32), nullable=False)
+    reference: Mapped[str] = mapped_column(String(128), nullable=False)
+    url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    payload: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    finding: Mapped["Finding"] = relationship(back_populates="tickets")
 
 
 class BinarySample(TimestampMixin, Base):
@@ -409,6 +487,10 @@ def _finding_set_hash(mapper, connection, target: Finding) -> None:
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
     target.validation_metadata = _coerce_evidence(target.validation_metadata)
+    target.tags = _normalize_tags(target.tags)
+    target.status = _normalize_status(target.status)
+    if target.assigned_to:
+        target.assigned_to = target.assigned_to.strip()
     if not target.evidence_hash:
         payload = {
             "metadata": target.metadata_json,
@@ -423,12 +505,59 @@ def _finding_prevent_evidence_mutation(mapper, connection, target: Finding) -> N
     metadata_attr = state.attrs.metadata_json
     evidence_attr = state.attrs.evidence
     hash_attr = state.attrs.evidence_hash
+    target.tags = _normalize_tags(target.tags)
+    target.status = _normalize_status(target.status)
+    if target.assigned_to:
+        target.assigned_to = target.assigned_to.strip()
     if (
         metadata_attr.history.has_changes()
         or evidence_attr.history.has_changes()
         or hash_attr.history.has_changes()
     ):
         raise ValueError("Finding evidence payloads are immutable once persisted.")
+
+
+@event.listens_for(FindingComment, "before_insert", propagate=True)
+def _finding_comment_set_hash(mapper, connection, target: FindingComment) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    if not target.metadata_hash:
+        target.metadata_hash = _hash_json(target.metadata_json)
+
+
+@event.listens_for(FindingComment, "before_update", propagate=True)
+def _finding_comment_immutable(mapper, connection, target: FindingComment) -> None:
+    state = inspect(target)
+    if state.attrs.message.history.has_changes() or state.attrs.metadata_json.history.has_changes():
+        raise ValueError("Finding comments are immutable once persisted.")
+
+
+@event.listens_for(FindingTicket, "before_insert", propagate=True)
+def _finding_ticket_set_hash(mapper, connection, target: FindingTicket) -> None:
+    target.payload = _coerce_evidence(target.payload)
+    target.payload_hash = target.payload_hash or _hash_json(target.payload)
+    if target.integration:
+        target.integration = target.integration.strip().lower()
+    if target.reference:
+        target.reference = target.reference.strip()
+    if target.status:
+        target.status = target.status.strip().lower()
+
+
+@event.listens_for(FindingTicket, "before_update", propagate=True)
+def _finding_ticket_prevent_payload_mutation(
+    mapper, connection, target: FindingTicket
+) -> None:
+    state = inspect(target)
+    payload_attr = state.attrs.payload
+    payload_hash_attr = state.attrs.payload_hash
+    if payload_attr.history.has_changes() or payload_hash_attr.history.has_changes():
+        raise ValueError("Ticket payloads are immutable once recorded.")
+    if target.integration:
+        target.integration = target.integration.strip().lower()
+    if target.reference:
+        target.reference = target.reference.strip()
+    if target.status:
+        target.status = target.status.strip().lower()
 
 
 @event.listens_for(AuditLog, "before_insert", propagate=True)
@@ -499,7 +628,7 @@ def _finding_enrichment_prevent_mutation(
 
 
 class PrincipalCredential(Base):
-    """Authentication material for API keys and JWT principals."""
+    """Authentication material for API keys, JWT, and OIDC principals."""
 
     __tablename__ = "principal_credentials"
 

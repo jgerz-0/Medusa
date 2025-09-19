@@ -35,6 +35,9 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
               <span className="text-xs text-gray-400">
                 Scanner {scannerLabel(finding)} • Rule {finding.template_id}
               </span>
+              <span className="text-xs text-gray-500">
+                {finding.assigned_to ? `Assigned to ${finding.assigned_to}` : 'Unassigned'} • {finding.comment_count} comment{finding.comment_count === 1 ? '' : 's'}
+              </span>
             </div>
           )
         },
@@ -47,6 +50,26 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
           key: 'status',
           header: 'Status',
           render: (finding) => <StatusBadge value={finding.status} />
+        },
+        {
+          key: 'tags',
+          header: 'Tags',
+          render: (finding) => (
+            <div className="flex flex-wrap gap-1 text-xs text-gray-300">
+              {finding.tags.length > 0 ? (
+                finding.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-full bg-surface-muted/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-300"
+                  >
+                    {tag}
+                  </span>
+                ))
+              ) : (
+                <span className="text-gray-500">none</span>
+              )}
+            </div>
+          )
         },
         {
           key: 'enrichment',

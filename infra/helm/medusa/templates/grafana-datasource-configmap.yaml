@@ -1,0 +1,31 @@
+{{- if and .Values.metrics.grafana.enabled .Values.metrics.grafana.datasources.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "medusa.fullname" . }}-grafana-datasources
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: grafana-datasources
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    grafana_datasource: "1"
+  annotations:
+    medusa.security/description: "Grafana datasource configuration targeting the bundled Prometheus server."
+    {{- range $k, $v := .Values.metrics.grafana.datasources.annotations }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        isDefault: true
+        url: {{ default (printf "http://%s-prometheus-server" .Release.Name) .Values.metrics.grafana.datasources.url | quote }}
+        jsonData:
+          httpMethod: GET
+          manageAlerts: false
+          timeInterval: "30s"
+        secureJsonData: {}
+{{- end }}

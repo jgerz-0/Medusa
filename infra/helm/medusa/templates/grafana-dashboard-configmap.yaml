@@ -1,0 +1,255 @@
+{{- if and .Values.metrics.grafana.enabled .Values.metrics.grafana.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "medusa.fullname" . }}-grafana-dashboards
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: grafana-dashboards
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: {{ default "Medusa" .Values.metrics.grafana.dashboards.folder | quote }}
+    medusa.security/description: "Operational dashboards for controller metrics and audit activity."
+    {{- range $k, $v := .Values.metrics.grafana.dashboards.annotations }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+data:
+  medusa-controller.json: |
+    {
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": "-- Grafana --",
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "editable": true,
+      "fiscalYearStartMonth": 1,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "liveNow": false,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "req/s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 0
+          },
+          "id": 1,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(medusa_controller_http_requests_total[5m])) by (endpoint, status_code)",
+              "legendFormat": "{{endpoint}} {{status_code}}",
+              "refId": "A"
+            }
+          ],
+          "title": "HTTP Request Rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 0
+          },
+          "id": 2,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(medusa_controller_http_request_duration_seconds_bucket[5m])) by (le, endpoint))",
+              "legendFormat": "p95 {{endpoint}}",
+              "refId": "A"
+            }
+          ],
+          "title": "HTTP Latency (p95)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "req/s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 8
+          },
+          "id": 3,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(medusa_audit_events_total[5m])) by (action)",
+              "legendFormat": "{{action}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Audit Events by Action",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "req/s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 8
+          },
+          "id": 4,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(medusa_jobs_enqueued_total[5m])) by (job_type)",
+              "legendFormat": "{{job_type}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Jobs Enqueued",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "req/s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 16
+          },
+          "id": 5,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(medusa_worker_callbacks_total[5m])) by (worker)",
+              "legendFormat": "{{worker}}",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(rate(medusa_worker_callback_items_total[5m])) by (worker)",
+              "legendFormat": "items {{worker}}",
+              "refId": "B"
+            }
+          ],
+          "title": "Worker Callbacks",
+          "type": "timeseries"
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 38,
+      "style": "dark",
+      "tags": [
+        "medusa",
+        "security"
+      ],
+      "templating": {
+        "list": []
+      },
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "timepicker": {
+        "refresh_intervals": [
+          "10s",
+          "30s",
+          "1m",
+          "5m",
+          "15m"
+        ]
+      },
+      "timezone": "",
+      "title": "Medusa Controller Observability",
+      "uid": "medusa-controller",
+      "version": 1
+    }
+{{- end }}
