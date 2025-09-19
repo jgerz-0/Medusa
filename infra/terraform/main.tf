@@ -94,6 +94,34 @@ module "eks" {
   tags = local.common_tags
 }
 
+module "s3" {
+  source = "./modules/s3"
+
+  project_name = local.project_name
+  environment  = local.environment
+
+  artifact_bucket_name   = var.artifact_bucket_name
+  artifact_bucket_prefix = var.artifact_bucket_prefix
+  artifact_bucket_suffix = var.artifact_bucket_suffix
+  force_destroy          = var.artifact_bucket_force_destroy
+  versioning_enabled     = var.artifact_bucket_versioning_enabled
+
+  enable_artifact_expiration           = var.artifact_enable_expiration
+  artifact_retention_days              = var.artifact_retention_days
+  enable_noncurrent_version_expiration = var.artifact_enable_noncurrent_version_expiration
+  noncurrent_version_retention_days    = var.artifact_noncurrent_version_retention_days
+  abort_incomplete_multipart_upload_days = var.artifact_abort_incomplete_multipart_upload_days
+
+  worker_access = var.artifact_worker_prefixes
+
+  create_kms_key                   = var.artifact_create_kms_key
+  kms_key_arn                      = var.artifact_kms_key_arn
+  kms_key_alias                    = var.artifact_kms_key_alias
+  kms_key_deletion_window_in_days  = var.artifact_kms_deletion_window_in_days
+
+  tags = local.common_tags
+}
+
 module "rds" {
   source = "./modules/rds"
 
@@ -139,6 +167,8 @@ locals {
     cluster_iam_role_arn = module.eks.cluster_iam_role_arn
     node_iam_role_arns = module.eks.node_iam_role_arns
   }
+
+  artifact_storage_context = module.s3.context
 
   rds_context = module.rds.controller_context
 

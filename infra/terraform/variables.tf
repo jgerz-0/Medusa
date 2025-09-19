@@ -222,6 +222,116 @@ variable "managed_node_groups" {
   default = {}
 }
 
+variable "artifact_bucket_name" {
+  description = "Explicit S3 bucket name for storing scan artifacts. When null, a deterministic name is derived."
+  type        = string
+  default     = null
+}
+
+variable "artifact_bucket_prefix" {
+  description = "Prefix combined with the environment when deriving the artifact bucket name."
+  type        = string
+  default     = null
+}
+
+variable "artifact_bucket_suffix" {
+  description = "Suffix appended to the derived artifact bucket name when overrides are omitted."
+  type        = string
+  default     = "artifacts"
+}
+
+variable "artifact_bucket_force_destroy" {
+  description = "Force bucket deletion even when objects remain. Use only for non-production environments."
+  type        = bool
+  default     = false
+}
+
+variable "artifact_bucket_versioning_enabled" {
+  description = "Toggle S3 versioning on the artifact bucket."
+  type        = bool
+  default     = true
+}
+
+variable "artifact_enable_expiration" {
+  description = "Whether to expire current object versions after the configured retention window."
+  type        = bool
+  default     = true
+}
+
+variable "artifact_retention_days" {
+  description = "Retention period in days for current object versions."
+  type        = number
+  default     = 365
+}
+
+variable "artifact_enable_noncurrent_version_expiration" {
+  description = "Whether to purge noncurrent object versions after the configured retention window."
+  type        = bool
+  default     = true
+}
+
+variable "artifact_noncurrent_version_retention_days" {
+  description = "Retention period in days for noncurrent object versions."
+  type        = number
+  default     = 90
+}
+
+variable "artifact_abort_incomplete_multipart_upload_days" {
+  description = "Days after initiation before incomplete multipart uploads are aborted. Set to null to disable."
+  type        = number
+  default     = 7
+}
+
+variable "artifact_worker_prefixes" {
+  description = "Map of Medusa worker identifiers to the S3 prefixes they manage."
+  type = map(object({
+    prefix       = string
+    allow_delete = optional(bool, true)
+  }))
+  default = {
+    nuclei = {
+      prefix       = "nuclei/"
+      allow_delete = true
+    }
+    binary_preprocess = {
+      prefix       = "preprocess/metadata/"
+      allow_delete = true
+    }
+    binary_static_analysis = {
+      prefix       = "analysis/reports/"
+      allow_delete = true
+    }
+    binary_fuzzing = {
+      prefix       = "analysis/fuzzing/"
+      allow_delete = true
+    }
+  }
+}
+
+variable "artifact_create_kms_key" {
+  description = "Whether to create a dedicated KMS key for artifact encryption."
+  type        = bool
+  default     = true
+}
+
+variable "artifact_kms_key_arn" {
+  description = "Existing KMS key ARN to reuse for artifact encryption."
+  type        = string
+  default     = null
+}
+
+variable "artifact_kms_key_alias" {
+  description = "Alias assigned when the module provisions the artifact KMS key."
+  type        = string
+  default     = null
+}
+
+variable "artifact_kms_deletion_window_in_days" {
+  description = "Waiting period in days before a scheduled KMS key deletion executes."
+  type        = number
+  default     = 30
+}
+
 variable "rds_database_name" {
   description = "Primary database name provisioned for the Medusa controller."
   type        = string

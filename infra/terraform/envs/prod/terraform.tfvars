@@ -22,6 +22,11 @@ availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
 private_subnet_cidrs = ["10.60.1.0/24", "10.60.2.0/24", "10.60.3.0/24"]
 public_subnet_cidrs = ["10.60.101.0/24", "10.60.102.0/24", "10.60.103.0/24"]
 
+# S3 artifact storage
+artifact_bucket_name                       = "medusa-prod-artifacts"
+artifact_retention_days                    = 365
+artifact_noncurrent_version_retention_days = 180
+
 cluster_version = "1.29"
 cluster_endpoint_public_access = false
 cluster_endpoint_private_access = true
