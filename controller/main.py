@@ -414,6 +414,25 @@ def authenticate(
                 roles=list(DEFAULT_ADMIN_ROLES),
             )
 
+    if candidate_api_key:
+        key_hash = _hash_secret(candidate_api_key)
+        record = (
+            db.query(PrincipalCredential)
+            .filter(
+                PrincipalCredential.auth_method == "api_key",
+                PrincipalCredential.key_hash == key_hash,
+                PrincipalCredential.revoked_at.is_(None),
+            )
+            .first()
+        )
+        if record:
+            roles = list(record.roles or [])
+            return Principal(
+                subject=record.subject,
+                auth_method="api_key",
+                roles=roles,
+            )
+
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required"
