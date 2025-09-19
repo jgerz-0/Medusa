@@ -1,4 +1,4 @@
-"""Validator worker for Medusa findings."""
+"""Validator worker that performs deterministic retests before promotion."""
 
 from __future__ import annotations
 

@@ -4,21 +4,24 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import json
 import logging
 import secrets
+import smtplib
+import textwrap
 import time
 import uuid
 from copy import deepcopy
-from datetime import datetime, timezone, date
+from datetime import date, datetime, timezone
+from email.message import EmailMessage
 from io import BytesIO
-import html
-import textwrap
 from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, Union
 
 import jwt
+import requests
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -47,6 +50,7 @@ from controller.db.models import (
     BinaryStaticAnalysisFinding,
     Finding,
     FindingEnrichment,
+    FindingValidation,
     FindingComment,
     FindingTicket,
     PrincipalCredential,
@@ -87,6 +91,7 @@ ROLE_TARGETS_WRITE = "targets:write"
 ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
 ROLE_REPORT_EXPORT = "report:export"
 ROLE_TICKETING_CREATE = "ticket:create"
+ROLE_VALIDATION_ENQUEUE = "validation:enqueue"
 
 ALLOWED_ROLES = {
     ROLE_ADMIN,
@@ -100,6 +105,7 @@ ALLOWED_ROLES = {
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
+    ROLE_VALIDATION_ENQUEUE,
     ROLE_REPORT_EXPORT,
     ROLE_TICKETING_CREATE,
 }
@@ -122,6 +128,7 @@ DEFAULT_ANALYST_ROLES = [
     ROLE_BINARY_FUZZING_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_ENRICHMENT_ENQUEUE,
+    ROLE_VALIDATION_ENQUEUE,
     ROLE_REPORT_EXPORT,
 ]
 
@@ -136,6 +143,7 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
+    ROLE_VALIDATION_ENQUEUE,
     ROLE_REPORT_EXPORT,
     ROLE_TICKETING_CREATE,
 ]
@@ -225,6 +233,15 @@ ALLOWED_SQLMAP_TAMPER_SCRIPTS: Tuple[str, ...] = (
     "modsecurityversioned",
     "space2comment",
 )
+
+ALLOWED_VALIDATION_STATUSES: Tuple[str, ...] = (
+    "pending",
+    "queued",
+    "running",
+    "passed",
+    "failed",
+)
+FINAL_VALIDATION_STATUSES: Tuple[str, ...] = ("passed", "failed")
 
 
 def _normalize_profile(requested_profile: Any) -> str:
@@ -568,7 +585,7 @@ class Settings(BaseSettings):
     )
     validator_queue_channel: str = Field(
         "queues:validator:jobs",
-        description="Redis list channel for finding validation jobs.",
+        description="Redis list channel for validation agent jobs.",
     )
     jwt_secret: str = Field(
         ..., description="JWT secret used to validate bearer tokens."
@@ -616,12 +633,47 @@ class Settings(BaseSettings):
     enrichment_callback_token: str = Field(
         ..., description="Shared secret required for enrichment worker callbacks."
     )
+    validator_callback_token: str = Field(
+        ..., description="Shared secret required for validator agent callbacks."
+    )
     binary_static_analysis_callback_token: str = Field(
         ...,
         description="Shared secret required for binary static analysis worker callbacks.",
     )
     binary_fuzzing_callback_token: str = Field(
         ..., description="Shared secret required for binary fuzzing worker callbacks."
+    )
+    slack_webhook_url: Optional[str] = Field(
+        default=None,
+        description="Incoming webhook URL for Slack critical finding notifications.",
+    )
+    email_smtp_host: Optional[str] = Field(
+        default=None,
+        description="SMTP host used to dispatch critical finding notifications.",
+    )
+    email_smtp_port: int = Field(
+        default=587,
+        description="SMTP port used when dispatching notification emails.",
+    )
+    email_username: Optional[str] = Field(
+        default=None,
+        description="Username for SMTP authentication if required.",
+    )
+    email_password: Optional[str] = Field(
+        default=None,
+        description="Password for SMTP authentication if required.",
+    )
+    email_from: Optional[str] = Field(
+        default=None,
+        description="Sender address used for notification emails.",
+    )
+    email_recipients: List[str] = Field(
+        default_factory=list,
+        description="Recipient addresses that receive critical finding notifications.",
+    )
+    email_use_tls: bool = Field(
+        default=True,
+        description="Enable STARTTLS when connecting to the SMTP server.",
     )
       
     notification_slack_webhook: Optional[str] = Field(
@@ -1156,6 +1208,56 @@ class EnrichmentResponse(BaseModel):
     sources: List[str] = Field(default_factory=list)
 
 
+class ValidationRequest(BaseModel):
+    finding_id: str = Field(..., min_length=1, description="Identifier of the finding to retest")
+    notes: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Optional analyst context for the validator agent.",
+    )
+    force: bool = Field(
+        default=False,
+        description="Allow revalidation even if a successful result already exists.",
+    )
+
+
+class ValidationResponse(BaseModel):
+    job_id: str
+    finding_id: str
+    queued_at: datetime
+    status: str
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, value: str) -> str:
+        lowered = value.lower()
+        if lowered not in ALLOWED_VALIDATION_STATUSES:
+            raise ValueError("Unsupported validation status")
+        return lowered
+
+
+class ValidationCallbackRequest(BaseModel):
+    job_id: str = Field(..., min_length=1)
+    finding_id: str = Field(..., min_length=1)
+    status: str = Field(..., min_length=1, max_length=32)
+    validator: str = Field(..., min_length=1, max_length=128)
+    executed_at: datetime
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    notes: Optional[str] = Field(default=None, max_length=2000)
+    requested_by: Optional[str] = Field(default=None, max_length=128)
+    requested_at: Optional[datetime] = None
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, value: str) -> str:
+        lowered = value.lower()
+        allowed = {"passed", "failed"}
+        if lowered not in allowed:
+            raise ValueError("Unsupported validation status")
+        return lowered
+
+
 class FindingEnrichmentSummary(BaseModel):
     id: str
     job_id: str
@@ -1187,6 +1289,27 @@ class FindingCommentSummary(BaseModel):
     created_at: datetime
 
 
+class FindingValidationSummary(BaseModel):
+    id: str
+    job_id: str
+    status: str
+    validator: str
+    executed_at: datetime
+    requested_by: Optional[str] = None
+    requested_at: Optional[datetime] = None
+    notes: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, value: str) -> str:
+        lowered = value.lower()
+        if lowered not in ALLOWED_VALIDATION_STATUSES:
+            raise ValueError("Unsupported validation status")
+        return lowered
+
+
 class FindingResponse(BaseModel):
     id: str
     scan_id: str
@@ -1214,6 +1337,10 @@ class FindingResponse(BaseModel):
     tags: List[str] = Field(default_factory=list)
     comment_count: int = 0
     tickets: List[FindingTicketSummary] = Field(default_factory=list)
+    validation_status: str
+    validated_at: Optional[datetime] = None
+    validations: List[FindingValidationSummary] = Field(default_factory=list)
+    cvss: float
 
 
 class FindingCollectionResponse(BaseModel):
@@ -3227,6 +3354,113 @@ def enqueue_enrichment(
     )
 
 
+@app.post(
+    "/validate",
+    response_model=ValidationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_validation(
+    request: ValidationRequest,
+    http_request: Request,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
+) -> ValidationResponse:
+    """Queue a validator job to retest a high-value finding."""
+
+    enforce_roles(
+        principal,
+        [ROLE_VALIDATION_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/validate",
+    )
+
+    finding = (
+        db.query(Finding)
+        .options(selectinload(Finding.scan).selectinload(Scan.target))
+        .filter(Finding.id == request.finding_id)
+        .one_or_none()
+    )
+    if finding is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Finding not found",
+        )
+
+    if (
+        not request.force
+        and finding.validation_status in FINAL_VALIDATION_STATUSES
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Finding already validated",
+        )
+
+    queued_at = datetime.now(tz=timezone.utc)
+    job_id = str(uuid.uuid4())
+    callback_url = str(http_request.url_for("validator_callback"))
+
+    metadata: Dict[str, Any] = {
+        "finding_id": finding.id,
+        "scan_id": finding.scan_id,
+        "severity": finding.severity,
+        "requested_by": principal.subject,
+        "requested_at": queued_at.isoformat(),
+        "finding_metadata": deepcopy(finding.metadata_json or {}),
+    }
+    if finding.scan and finding.scan.target:
+        metadata["target_id"] = finding.scan.target.id
+        metadata["target_scope"] = finding.scan.target.scope
+        metadata["target_name"] = finding.scan.target.name
+    if finding.scan:
+        metadata["scanner"] = finding.scan.scanner
+    if request.notes:
+        metadata["analyst_notes"] = request.notes
+
+    job_payload = {
+        "job_id": job_id,
+        "finding_id": finding.id,
+        "scan_id": finding.scan_id,
+        "severity": finding.severity,
+        "callback_url": callback_url,
+        "metadata": metadata,
+        "evidence": deepcopy(finding.evidence or {}),
+        "attempts": 0,
+        "submitted_at": queued_at.isoformat(),
+    }
+
+    queue.enqueue(settings.validator_queue_channel, job_payload)
+    metrics.record_job_enqueued("validation")
+
+    finding.validation_status = "queued"
+    finding.validated_at = None
+    db.commit()
+    db.refresh(finding)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enqueue_validation",
+        resource_type="finding",
+        resource_id=finding.id,
+        finding_id=finding.id,
+        metadata={
+            "job_id": job_id,
+            "force": request.force,
+            "notes_provided": bool(request.notes),
+        },
+    )
+
+    return ValidationResponse(
+        job_id=job_id,
+        finding_id=finding.id,
+        queued_at=queued_at,
+        status=finding.validation_status,
+    )
+
+
 app.add_api_route(
     "/scans",
     enqueue_scan,
@@ -4120,6 +4354,104 @@ def enrichment_callback(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@app.post(
+    "/internal/validator/callback",
+    response_model=FindingItemResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def validator_callback(
+    payload: ValidationCallbackRequest,
+    request: Request,
+    db: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> FindingItemResponse:
+    """Persist validator retest results before promoting findings."""
+
+    principal = _authenticate_callback_worker(
+        request,
+        expected_token=settings.validator_callback_token,
+        subject="validator-worker",
+        db=db,
+        resource_id=payload.job_id,
+    )
+
+    finding = (
+        db.query(Finding)
+        .options(
+            selectinload(Finding.validations),
+            selectinload(Finding.scan).selectinload(Scan.target),
+        )
+        .filter(Finding.id == payload.finding_id)
+        .one_or_none()
+    )
+    if finding is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Finding not found",
+        )
+
+    existing = (
+        db.query(FindingValidation)
+        .filter(FindingValidation.job_id == payload.job_id)
+        .one_or_none()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Validation already recorded",
+        )
+
+    executed_at = payload.executed_at.astimezone(timezone.utc)
+    validation = FindingValidation(
+        finding_id=finding.id,
+        job_id=payload.job_id,
+        status=payload.status,
+        validator=payload.validator,
+        executed_at=executed_at,
+        requested_by=payload.requested_by,
+        requested_at=payload.requested_at,
+        notes=payload.notes,
+        metadata_json=deepcopy(_normalize_payload(payload.metadata)),
+        evidence=deepcopy(_normalize_payload(payload.evidence)),
+        evidence_hash="",
+        metadata_hash="",
+    )
+    db.add(validation)
+
+    normalized_status = payload.status.lower()
+    finding.validation_status = normalized_status
+    if normalized_status == "passed":
+        finding.validated_at = executed_at
+    elif normalized_status == "failed":
+        finding.validated_at = None
+
+    db.commit()
+    db.refresh(finding)
+    db.refresh(validation)
+
+    metrics.record_worker_callback("validator", 1)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="validator_callback",
+        resource_type="finding",
+        resource_id=str(finding.id),
+        scan_id=finding.scan_id,
+        finding_id=finding.id,
+        metadata={
+            "job_id": payload.job_id,
+            "status": normalized_status,
+            "validator": payload.validator,
+        },
+    )
+
+    if normalized_status == "passed":
+        _dispatch_validation_notifications(finding, validation, settings)
+
+    return FindingItemResponse(data=serialize_finding(finding))
+
+
 def _retrieve_finding_records(
     db: Session,
     *,
@@ -4134,6 +4466,7 @@ def _retrieve_finding_records(
         selectinload(Finding.enrichments),
         selectinload(Finding.comments),
         selectinload(Finding.tickets),
+        selectinload(Finding.validations),
     )
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
@@ -4179,6 +4512,7 @@ def _get_mutable_finding(db: Session, finding_id: str) -> Finding:
             selectinload(Finding.enrichments),
             selectinload(Finding.comments),
             selectinload(Finding.tickets),
+            selectinload(Finding.validations),
             selectinload(Finding.scan).selectinload(Scan.target),
         )
         .filter(Finding.id == finding_id)
@@ -4930,6 +5264,7 @@ def export_findings_report(
                 selectinload(Finding.enrichments),
                 selectinload(Finding.comments),
                 selectinload(Finding.tickets),
+                selectinload(Finding.validations),
                 selectinload(Finding.scan).selectinload(Scan.target),
             )
             .filter(Finding.id.in_(request.finding_ids))
@@ -5210,6 +5545,90 @@ def serialize_comment(comment: FindingComment) -> FindingCommentSummary:
     )
 
 
+def _post_slack_notification(webhook_url: str, payload: Dict[str, Any]) -> None:
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=5)
+        response.raise_for_status()
+    except requests.RequestException as exc:  # pragma: no cover - network errors
+        LOGGER.warning(
+            "Failed to dispatch Slack notification",
+            extra={"error": str(exc)},
+        )
+
+
+def _send_email_notification(settings: Settings, subject: str, body: str) -> None:
+    if not settings.email_smtp_host or not settings.email_from or not settings.email_recipients:
+        return
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings.email_from
+    message["To"] = ", ".join(settings.email_recipients)
+    message.set_content(body)
+
+    try:
+        with smtplib.SMTP(
+            settings.email_smtp_host,
+            settings.email_smtp_port,
+            timeout=10,
+        ) as client:
+            if settings.email_use_tls:
+                client.starttls()
+            if settings.email_username and settings.email_password:
+                client.login(settings.email_username, settings.email_password)
+            client.send_message(message)
+    except Exception as exc:  # pragma: no cover - depends on external SMTP
+        LOGGER.warning(
+            "Failed to dispatch email notification",
+            extra={
+                "error": str(exc),
+                "recipients": len(settings.email_recipients),
+            },
+        )
+
+
+def _dispatch_validation_notifications(
+    finding: Finding, validation: FindingValidation, settings: Settings
+) -> None:
+    if finding.severity.lower() != "critical":
+        return
+
+    target_scope = None
+    target_name = None
+    scanner_name = None
+    if finding.scan:
+        scanner_name = finding.scan.scanner
+        if finding.scan.target:
+            target_scope = finding.scan.target.scope
+            target_name = finding.scan.target.name
+
+    summary_lines = [
+        f"Finding: {finding.title}",
+        f"Severity: {finding.severity.upper()}",
+        f"Validator: {validation.validator}",
+        f"Validated At: {validation.executed_at.isoformat()}",
+    ]
+    if target_scope:
+        summary_lines.append(f"Scope: {target_scope}")
+    elif target_name:
+        summary_lines.append(f"Target: {target_name}")
+    if scanner_name:
+        summary_lines.append(f"Scanner: {scanner_name}")
+    if validation.notes:
+        summary_lines.append(f"Notes: {validation.notes}")
+
+    body = "\n".join(summary_lines)
+    subject = f"Medusa critical finding validated: {finding.title}"
+
+    if settings.slack_webhook_url:
+        slack_payload = {
+            "text": f":rotating_light: {subject}\n{body}",
+        }
+        _post_slack_notification(settings.slack_webhook_url, slack_payload)
+
+    _send_email_notification(settings, subject, body)
+
+
 def serialize_finding(finding: Finding) -> FindingResponse:
     """Project a Finding ORM object into the deterministic UI schema."""
 
@@ -5296,6 +5715,29 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         )
         tickets_payload = [serialize_ticket(ticket) for ticket in ordered_tickets]
 
+    validations_payload: List[FindingValidationSummary] = []
+    if hasattr(finding, "validations") and finding.validations:
+        ordered_validations = sorted(
+            finding.validations,
+            key=lambda record: record.executed_at,
+            reverse=True,
+        )
+        for validation in ordered_validations:
+            validations_payload.append(
+                FindingValidationSummary(
+                    id=str(validation.id),
+                    job_id=validation.job_id,
+                    status=validation.status,
+                    validator=validation.validator,
+                    executed_at=validation.executed_at,
+                    requested_by=validation.requested_by,
+                    requested_at=validation.requested_at,
+                    notes=validation.notes,
+                    metadata=deepcopy(validation.metadata_json or {}),
+                    evidence=deepcopy(validation.evidence or {}),
+                )
+            )
+
     return FindingResponse(
         id=str(finding.id),
         scan_id=str(finding.scan_id),
@@ -5319,6 +5761,10 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         tags=list(finding.tags or []),
         comment_count=len(getattr(finding, "comments", []) or []),
         tickets=tickets_payload,
+        validation_status=finding.validation_status or "pending",
+        validated_at=finding.validated_at,
+        validations=validations_payload,
+        cvss=_severity_to_cvss(finding.severity),
     )
 
 
@@ -5376,6 +5822,10 @@ def serialize_binary_static_finding(
         tags=[],
         comment_count=0,
         tickets=[],
+        validation_status="pending",
+        validated_at=None,
+        validations=[],
+        cvss=_severity_to_cvss(record.severity),
     )
 
 
@@ -5432,6 +5882,10 @@ def serialize_binary_fuzzing_finding(
         tags=[],
         comment_count=0,
         tickets=[],
+        validation_status="pending",
+        validated_at=None,
+        validations=[],
+        cvss=_severity_to_cvss(record.severity),
     )
 
 
