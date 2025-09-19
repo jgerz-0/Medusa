@@ -77,3 +77,21 @@ post-incident review of every permitted or denied operation.
 
 Treat API key material as sensitive. Rotate credentials by inserting a new
 record and setting `revoked_at` on the prior entry.
+
+## Credential Rotation
+
+Credential material must be rotated whenever secrets are exposed or on a
+scheduled cadence. The controller enforces a partial unique index on
+`principal_credentials.subject` scoped to rows where `revoked_at IS NULL`. This
+ensures only one active credential exists for a subject while retaining all
+revoked entries for audit investigations.
+
+Rotation flow:
+
+1. Issue `POST /principals/{credential_id}/revoke` for the existing credential.
+2. Issue `POST /principals` with the same subject to mint a replacement key.
+3. Distribute the newly returned secret and destroy the retired material.
+
+Historical rows remain queryable via `/principals` and in the database. They
+preserve role assignments and hash fingerprints to support forensic review
+without blocking future re-issuance.

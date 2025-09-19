@@ -146,6 +146,71 @@ def test_target_create_and_scan_flow(
     assert collection_payload["data"][0]["id"] == scan_payload["id"]
 
 
+def test_principal_rotation_flow(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    subject = "rotate-svc"
+
+    create_response = client.post(
+        "/principals",
+        json={
+            "subject": subject,
+            "auth_method": "api_key",
+            "roles": ["analyst"],
+            "description": "rotation-test",
+        },
+        headers=auth_headers(),
+    )
+    assert create_response.status_code == 201, create_response.text
+    first_payload = create_response.json()
+    first_secret = first_payload["secret"]
+    assert isinstance(first_secret, str) and first_secret
+    first_id = first_payload["id"]
+    assert first_payload["revoked_at"] is None
+
+    revoke_response = client.post(
+        f"/principals/{first_id}/revoke", headers=auth_headers()
+    )
+    assert revoke_response.status_code == 200, revoke_response.text
+    revoked_payload = revoke_response.json()
+    assert revoked_payload["revoked_at"] is not None
+
+    rotate_response = client.post(
+        "/principals",
+        json={
+            "subject": subject,
+            "auth_method": "api_key",
+            "roles": ["analyst"],
+            "description": "rotation-test",
+        },
+        headers=auth_headers(),
+    )
+    assert rotate_response.status_code == 201, rotate_response.text
+    second_payload = rotate_response.json()
+    second_secret = second_payload["secret"]
+    assert isinstance(second_secret, str) and second_secret
+    assert second_secret != first_secret
+    assert second_payload["id"] != first_id
+    assert second_payload["revoked_at"] is None
+
+    with session_factory() as session:
+        records = (
+            session.query(PrincipalCredential)
+            .filter(PrincipalCredential.subject == subject)
+            .order_by(PrincipalCredential.id.asc())
+            .all()
+        )
+
+        assert len(records) == 2
+        active = [record for record in records if record.revoked_at is None]
+        revoked = [record for record in records if record.revoked_at is not None]
+        assert len(active) == 1
+        assert len(revoked) == 1
+        assert active[0].key_hash == _hash_secret(second_secret)
+        assert revoked[0].key_hash == _hash_secret(first_secret)
+
+
 def test_finding_contracts(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:

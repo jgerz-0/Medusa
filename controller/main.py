@@ -615,6 +615,7 @@ def create_principal_credential(
     existing = (
         db.query(PrincipalCredential)
         .filter(PrincipalCredential.subject == request.subject)
+        .filter(PrincipalCredential.revoked_at.is_(None))
         .first()
     )
     if existing:
