@@ -61,9 +61,68 @@ requirement.
   `targets:write` when write restrictions are needed.
 - `GET /findings` – requires any authenticated principal. Read-only access is
   typically granted via `findings:read`.
+- `GET /audit-log` – requires `admin`. This route exposes sensitive telemetry
+  about every privileged operation and must stay locked down.
 
 Each RBAC decision is recorded via the audit logging pipeline, enabling
 post-incident review of every permitted or denied operation.
+
+## Audit Log Access Workflow
+
+The controller exposes immutable audit trails via `GET /audit-log`. This
+endpoint is restricted to administrators (`admin` role) because it leaks
+sensitive operational metadata:
+
+- `actor` – principal string that performed the action.
+- `action` – controller event key such as `enqueue_scan` or `list_targets`.
+- `scan_id` / `finding_id` – optional foreign keys when the event relates to a
+  specific scan or finding.
+- `message` – human-readable context recorded by the caller.
+- `evidence_snapshot` – JSON payload containing resource metadata at the time
+  of the action.
+- `evidence_hash` – SHA-256 digest of the snapshot to prove immutability.
+- `created_at` – UTC timestamp when the event was captured.
+
+### Request Parameters
+
+Administrators can filter the log using optional query parameters:
+
+- `actor` – exact match on the principal subject.
+- `action` – exact match on the audit action key.
+- `scan_id` – limit results to a single scan identifier.
+- `limit` / `offset` – pagination controls (defaults: `limit=50`, `offset=0`).
+
+Each response returns deterministic pagination metadata:
+
+```json
+{
+  "data": [
+    {
+      "id": "a3e...",
+      "actor": "bootstrap-admin",
+      "action": "enqueue_scan",
+      "message": "scheduled nuclei sweep",
+      "scan_id": "c1b...",
+      "finding_id": null,
+      "evidence_snapshot": {
+        "resource_type": "scan",
+        "resource_id": "c1b...",
+        "scanner": "nuclei"
+      },
+      "evidence_hash": "1d1f...",
+      "created_at": "2024-03-08T12:15:00+00:00"
+    }
+  ],
+  "meta": {
+    "total": 42,
+    "limit": 50,
+    "offset": 0
+  }
+}
+```
+
+Every successful listing writes an additional `list_audit_log` entry so the
+system can attest to who inspected the logs and when.
 
 ## Operational Workflow
 

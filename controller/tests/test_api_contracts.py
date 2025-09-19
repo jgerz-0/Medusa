@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Generator, Tuple
 
 import pytest
@@ -296,6 +296,139 @@ def test_scans_listing_enforces_role_requirements(
     )
     assert analyst_response.status_code == 200
 
+
+def test_audit_log_listing_filters_and_audits(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    now = datetime.now(tz=timezone.utc)
+
+    with session_factory() as session:
+        target = Target(name="Audit Target", scope="audit.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="nuclei",
+            parameters={"profile": "full"},
+            initiated_by="bootstrap-admin",
+        )
+        session.add(scan)
+        session.flush()
+
+        entries = [
+            AuditLog(
+                actor="bootstrap-admin",
+                action="create_target",
+                message="seed entry",
+                evidence_snapshot={"resource_type": "target", "resource_id": target.id},
+                evidence_hash="",
+                created_at=now - timedelta(minutes=5),
+            ),
+            AuditLog(
+                actor="auditor@example.com",
+                action="list_findings",
+                message="read findings",
+                scan_id=scan.id,
+                evidence_snapshot={
+                    "resource_type": "finding",
+                    "scan_id": scan.id,
+                    "note": "seed",
+                },
+                evidence_hash="",
+                created_at=now - timedelta(minutes=3),
+            ),
+            AuditLog(
+                actor="bootstrap-admin",
+                action="delete_target",
+                message="cleanup",
+                evidence_snapshot={"resource_type": "target", "resource_id": "old-id"},
+                evidence_hash="",
+                created_at=now - timedelta(minutes=1),
+            ),
+        ]
+        session.add_all(entries)
+        session.commit()
+        scan_id = scan.id
+
+    response = client.get("/audit-log", headers=auth_headers())
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["meta"] == {"total": 3, "limit": 50, "offset": 0}
+    returned_timestamps = [
+        datetime.fromisoformat(item["created_at"])
+        for item in payload["data"]
+    ]
+    assert returned_timestamps == sorted(returned_timestamps, reverse=True)
+    assert payload["data"][0]["action"] == "delete_target"
+    assert payload["data"][0]["actor"] == "bootstrap-admin"
+
+    actor_response = client.get(
+        "/audit-log",
+        params={"actor": "auditor@example.com"},
+        headers=auth_headers(),
+    )
+    assert actor_response.status_code == 200
+    actor_payload = actor_response.json()
+    assert actor_payload["meta"]["total"] == 1
+    assert all(
+        entry["actor"] == "auditor@example.com" for entry in actor_payload["data"]
+    )
+
+    action_response = client.get(
+        "/audit-log",
+        params={"action": "delete_target"},
+        headers=auth_headers(),
+    )
+    assert action_response.status_code == 200
+    action_payload = action_response.json()
+    assert action_payload["meta"]["total"] == 1
+    assert action_payload["data"][0]["action"] == "delete_target"
+
+    scan_response = client.get(
+        "/audit-log",
+        params={"scan_id": scan_id},
+        headers=auth_headers(),
+    )
+    assert scan_response.status_code == 200
+    scan_payload = scan_response.json()
+    assert scan_payload["meta"]["total"] == 1
+    assert all(entry["scan_id"] == scan_id for entry in scan_payload["data"])
+
+    with session_factory() as session:
+        recorded_actions = [entry.action for entry in session.query(AuditLog).all()]
+    assert "list_audit_log" in recorded_actions
+
+
+def test_audit_log_requires_admin_role(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, _session_factory, settings = api_client
+
+    analyst_response = client.post(
+        "/principals",
+        json={
+            "subject": "audit-analyst@example.com",
+            "auth_method": "jwt",
+            "roles": ["analyst"],
+        },
+        headers=auth_headers(),
+    )
+    assert analyst_response.status_code == 201
+
+    analyst_token = jwt.encode(
+        {"sub": "audit-analyst@example.com"},
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
+
+    response = client.get(
+        "/audit-log", headers={"Authorization": f"Bearer {analyst_token}"}
+    )
+    assert response.status_code == 403
 
 def test_principal_creation_validates_and_expands_roles(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
