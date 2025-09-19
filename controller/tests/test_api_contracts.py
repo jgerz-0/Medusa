@@ -226,7 +226,7 @@ def test_target_create_and_scan_flow(
 def test_preprocess_enqueue_flow(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
-    client, queue, _session_factory, settings = api_client
+    client, queue, session_factory, settings = api_client
 
     target_response = client.post(
         "/targets",
