@@ -108,6 +108,61 @@ def enrichment_headers() -> dict[str, str]:
     return {"X-Callback-Token": "enrichment-secret"}
 
 
+def _create_finding_record(session_factory: sessionmaker) -> str:
+    """Persist a minimal target/scan/finding for RBAC regression tests."""
+
+    with session_factory() as session:
+        target = Target(name="RBAC Target", scope="rbac.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="nuclei",
+            initiated_by="rbac-tester",
+            status="completed",
+            parameters={"profile": "regression"},
+        )
+        session.add(scan)
+        session.flush()
+
+        finding = Finding(
+            scan_id=scan.id,
+            title="Synthetic SQL Injection",
+            severity="high",
+            cve_id="CVE-2099-0001",
+            description="Regression finding for RBAC coverage.",
+            metadata_json={"vector": "GET /?id=1"},
+            evidence={"proof": "error-based"},
+            evidence_hash="",
+        )
+        session.add(finding)
+        session.commit()
+
+        return str(finding.id)
+
+
+def _provision_principal(
+    client: TestClient, subject: str, roles: list[str]
+) -> Tuple[str, dict[str, str]]:
+    """Create a new API key credential and return the secret and auth header."""
+
+    response = client.post(
+        "/principals",
+        json={
+            "subject": subject,
+            "auth_method": "api_key",
+            "roles": roles,
+            "description": "rbac-regression",
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    secret = payload["secret"]
+    return secret, {"X-API-Key": secret}
+
+
 def test_target_create_and_scan_flow(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
@@ -278,6 +333,62 @@ def test_finding_contracts(
     detail_payload = detail_response.json()
     assert detail_payload["data"]["id"] == finding_id
     assert detail_payload["data"]["enrichments"] == []
+
+
+def test_audit_log_rbac_regression(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, _session_factory, _settings = api_client
+
+    _secret, limited_headers = _provision_principal(
+        client, subject="audit-rbac", roles=["scan:enqueue"]
+    )
+
+    forbidden = client.get("/audit-log", headers=limited_headers)
+    assert forbidden.status_code == 403
+
+    allowed = client.get("/audit-log", headers=auth_headers())
+    assert allowed.status_code == 200, allowed.text
+    payload = allowed.json()
+    assert "data" in payload
+
+
+def test_findings_list_rbac_regression(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    finding_id = _create_finding_record(session_factory)
+
+    _secret, limited_headers = _provision_principal(
+        client, subject="findings-rbac", roles=["scan:enqueue"]
+    )
+
+    forbidden = client.get("/findings", headers=limited_headers)
+    assert forbidden.status_code == 403
+
+    response = client.get("/findings", headers=auth_headers())
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert any(item["id"] == finding_id for item in payload.get("data", []))
+
+
+def test_findings_detail_rbac_regression(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    finding_id = _create_finding_record(session_factory)
+
+    _secret, limited_headers = _provision_principal(
+        client, subject="finding-detail-rbac", roles=["scan:enqueue"]
+    )
+
+    forbidden = client.get(f"/findings/{finding_id}", headers=limited_headers)
+    assert forbidden.status_code == 403
+
+    response = client.get(f"/findings/{finding_id}", headers=auth_headers())
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["data"]["id"] == finding_id
 
 
 def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:

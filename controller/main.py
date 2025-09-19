@@ -785,7 +785,7 @@ def list_audit_log(
 ) -> AuditLogCollectionResponse:
     """Return audit log entries for administrative review."""
 
-    enforce_roles(principal, [ROLE_ADMIN])
+    enforce_roles(principal, [ROLE_ADMIN], db)
 
     query = db.query(AuditLog)
     applied_filters: Dict[str, Any] = {}
@@ -1388,7 +1388,7 @@ def list_findings(
 ) -> FindingCollectionResponse:
     """Return the latest findings for the requested scope."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    enforce_roles(principal, [ROLE_FINDINGS_READ], db)
     query = db.query(Finding).options(selectinload(Finding.enrichments))
 
     if scan_id is not None:
@@ -1421,7 +1421,7 @@ def get_finding(
 ) -> FindingItemResponse:
     """Fetch a single finding for detailed analysis views."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    enforce_roles(principal, [ROLE_FINDINGS_READ], db)
     finding = (
         db.query(Finding)
         .options(selectinload(Finding.enrichments))
