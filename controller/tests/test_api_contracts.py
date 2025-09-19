@@ -9,7 +9,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import jwt
-from controller.db.models import AuditLog, Base, Finding, PrincipalCredential, Scan, Target
+from controller.db.models import (
+    AuditLog,
+    Base,
+    Finding,
+    FindingEnrichment,
+    PrincipalCredential,
+    Scan,
+    Target,
+)
 from controller.main import (
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
@@ -41,8 +49,12 @@ def api_client() -> (
         database_url="sqlite+pysqlite:///:memory:",
         redis_url="redis://localhost:6379/0",
         nuclei_queue_channel="nuclei:test",
+        zap_queue_channel="zap:test",
+        sqlmap_queue_channel="sqlmap:test",
         jwt_secret="unit-test-secret",
         nuclei_callback_token="callback-secret",
+        zap_callback_token="zap-callback",
+        sqlmap_callback_token="sqlmap-callback",
         enrichment_callback_token="enrichment-secret",
     )
 

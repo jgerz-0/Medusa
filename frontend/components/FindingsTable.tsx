@@ -8,6 +8,11 @@ function relativeTime(value: string) {
   return formatDistanceToNow(new Date(value), { addSuffix: true });
 }
 
+function scannerLabel(finding: Finding) {
+  const rawScanner = finding.metadata?.['scanner'] as unknown;
+  return typeof rawScanner === 'string' && rawScanner.trim() ? rawScanner : 'unknown';
+}
+
 export function FindingsTable({ findings }: { findings: Finding[] }) {
   return (
     <DataTable<Finding>
@@ -27,7 +32,9 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
               >
                 {finding.title}
               </Link>
-              <span className="text-xs text-gray-400">Template {finding.template_id}</span>
+              <span className="text-xs text-gray-400">
+                Scanner {scannerLabel(finding)} • Rule {finding.template_id}
+              </span>
             </div>
           )
         },

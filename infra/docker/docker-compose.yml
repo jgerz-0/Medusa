@@ -81,7 +81,11 @@ services:
       MEDUSA_DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
       MEDUSA_REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
       MEDUSA_NUCLEI_QUEUE_CHANNEL: ${MEDUSA_NUCLEI_QUEUE_CHANNEL:-queues:nuclei:jobs}
+      MEDUSA_ZAP_QUEUE_CHANNEL: ${MEDUSA_ZAP_QUEUE_CHANNEL:-queues:zap:jobs}
+      MEDUSA_SQLMAP_QUEUE_CHANNEL: ${MEDUSA_SQLMAP_QUEUE_CHANNEL:-queues:sqlmap:jobs}
       MEDUSA_NUCLEI_CALLBACK_TOKEN: ${MEDUSA_NUCLEI_CALLBACK_TOKEN:-local-dev-nuclei-callback}
+      MEDUSA_ZAP_CALLBACK_TOKEN: ${MEDUSA_ZAP_CALLBACK_TOKEN:-local-dev-zap-callback}
+      MEDUSA_SQLMAP_CALLBACK_TOKEN: ${MEDUSA_SQLMAP_CALLBACK_TOKEN:-local-dev-sqlmap-callback}
       MEDUSA_JWT_SECRET: ${MEDUSA_JWT_SECRET:-change-this-in-production}
     depends_on:
       postgres:
@@ -185,6 +189,58 @@ services:
         condition: service_healthy
     volumes:
       - ../../workers/web/nuclei:/app:delegated
+
+  zap-worker:
+    build:
+      context: ../..
+      dockerfile: workers/web/zap/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_zap_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      ZAP_QUEUE_KEY: ${ZAP_QUEUE_KEY:-queues:zap:jobs}
+      ZAP_DEAD_LETTER_KEY: ${ZAP_DEAD_LETTER_KEY:-queues:zap:dead}
+      ZAP_CALLBACK_TOKEN: ${ZAP_CALLBACK_TOKEN:-local-dev-zap-callback}
+      ZAP_CALLBACK_VERIFY_TLS: ${ZAP_CALLBACK_VERIFY_TLS:-false}
+      ZAP_CALLBACK_TIMEOUT: ${ZAP_CALLBACK_TIMEOUT:-30}
+      ZAP_POLL_TIMEOUT: ${ZAP_POLL_TIMEOUT:-2}
+      ZAP_MAX_RETRIES: ${ZAP_MAX_RETRIES:-3}
+      ZAP_WORK_DIR: ${ZAP_WORK_DIR:-/tmp/zap}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/web/zap:/app:delegated
+
+  sqlmap-worker:
+    build:
+      context: ../..
+      dockerfile: workers/web/sqlmap/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_sqlmap_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      SQLMAP_QUEUE_KEY: ${SQLMAP_QUEUE_KEY:-queues:sqlmap:jobs}
+      SQLMAP_DEAD_LETTER_KEY: ${SQLMAP_DEAD_LETTER_KEY:-queues:sqlmap:dead}
+      SQLMAP_CALLBACK_TOKEN: ${SQLMAP_CALLBACK_TOKEN:-local-dev-sqlmap-callback}
+      SQLMAP_CALLBACK_VERIFY_TLS: ${SQLMAP_CALLBACK_VERIFY_TLS:-false}
+      SQLMAP_CALLBACK_TIMEOUT: ${SQLMAP_CALLBACK_TIMEOUT:-30}
+      SQLMAP_POLL_TIMEOUT: ${SQLMAP_POLL_TIMEOUT:-2}
+      SQLMAP_MAX_RETRIES: ${SQLMAP_MAX_RETRIES:-3}
+      SQLMAP_WORK_DIR: ${SQLMAP_WORK_DIR:-/tmp/sqlmap}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/web/sqlmap:/app:delegated
 
 volumes:
   frontend_node_modules:

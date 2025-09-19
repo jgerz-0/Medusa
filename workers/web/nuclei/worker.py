@@ -538,6 +538,7 @@ def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> Lis
             "matched_at": evidence.get("matched_at"),
             "host": record.get("host"),
             "tags": combined_tags,
+            "scanner": job.scanner or "nuclei",
         }
         metadata = {k: v for k, v in metadata_source.items() if v}
 

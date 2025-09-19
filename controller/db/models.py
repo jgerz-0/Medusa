@@ -306,7 +306,7 @@ class PrincipalCredential(Base):
     )
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    subject: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
     auth_method: Mapped[str] = mapped_column(String(32), nullable=False)
     key_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)

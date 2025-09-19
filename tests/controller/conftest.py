@@ -34,9 +34,13 @@ def client():
         database_url="sqlite+pysqlite:///:memory:",
         redis_url="redis://localhost:6379/0",
         nuclei_queue_channel="test-nuclei",
+        zap_queue_channel="test-zap",
+        sqlmap_queue_channel="test-sqlmap",
         cve_enrichment_queue_channel="test-enrichment",
         jwt_secret="unit-test-secret",
         nuclei_callback_token="callback-secret",
+        zap_callback_token="zap-secret",
+        sqlmap_callback_token="sqlmap-secret",
         enrichment_callback_token="enrichment-secret",
     )
 

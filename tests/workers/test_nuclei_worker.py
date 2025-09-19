@@ -3,7 +3,7 @@ from datetime import datetime
 from unittest import mock
 
 import pytest
-from controller.main import CallbackFinding, NUCLEI_TEMPLATE_PROFILES, NucleiCallbackRequest
+from controller.main import CallbackFinding, NUCLEI_TEMPLATE_PROFILES, ScanCallbackRequest
 from controller.main import Settings
 from workers.web.nuclei import worker
 
@@ -57,6 +57,8 @@ def test_worker_config_defaults_align_with_controller(monkeypatch):
     settings = Settings(
         jwt_secret="test-jwt",
         nuclei_callback_token="nuclei-secret",
+        zap_callback_token="zap-secret",
+        sqlmap_callback_token="sqlmap-secret",
         enrichment_callback_token="enrichment-secret",
     )
 
@@ -235,7 +237,7 @@ def test_process_job_posts_callback(sample_job):
     mock_s3.put_object.assert_called()
 
     # Validate payload against controller schema (extras ignored by design).
-    model = NucleiCallbackRequest.model_validate(payload)
+    model = ScanCallbackRequest.model_validate(payload)
     assert model.scan_id == payload["scan_id"]
     assert model.status == "completed"
 
