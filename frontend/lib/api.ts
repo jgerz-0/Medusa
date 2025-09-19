@@ -1,5 +1,14 @@
 import { controllerApiKey, controllerBaseUrl, controllerJwt } from './config';
-import type { Finding, Scan, Target } from './types';
+import type {
+  Finding,
+  FindingComment,
+  FindingTimelineEvent,
+  FindingsTimelineBucket,
+  ReportExportResponse,
+  Scan,
+  Target,
+  FindingTicket
+} from './types';
 
 type ApiCollectionResponse<T> = {
   data: T;
@@ -8,6 +17,53 @@ type ApiCollectionResponse<T> = {
 type ApiItemResponse<T> = {
   data: T;
 };
+
+interface FindingItemResponse extends ApiItemResponse<Finding> {}
+
+export interface FindingsQuery {
+  targetId?: string;
+  scanId?: string;
+  severity?: string;
+  status?: string;
+  tag?: string;
+  assignedTo?: string;
+  from?: string;
+  to?: string;
+}
+
+function buildPath(
+  path: string,
+  params?: Record<string, string | string[] | undefined>
+): string {
+  if (!params) {
+    return path;
+  }
+
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item !== undefined && item !== null && `${item}`.trim() !== '') {
+          search.append(key, `${item}`.trim());
+        }
+      }
+      continue;
+    }
+
+    if (value === undefined || value === null) {
+      continue;
+    }
+
+    const normalized = `${value}`.trim();
+    if (normalized === '') {
+      continue;
+    }
+    search.set(key, normalized);
+  }
+
+  const query = search.toString();
+  return query ? `${path}?${query}` : path;
+}
 
 export interface ValidationIssue {
   field: string;
@@ -190,14 +246,162 @@ export async function fetchScans(): Promise<Scan[]> {
   return payload.data;
 }
 
-export async function fetchFindings(): Promise<Finding[]> {
-  const payload = await request<ApiCollectionResponse<Finding[]>>('/findings');
+export async function fetchFindings(query?: FindingsQuery): Promise<Finding[]> {
+  const path = buildPath('/findings', {
+    target_id: query?.targetId,
+    scan_id: query?.scanId,
+    severity: query?.severity,
+    status: query?.status,
+    tag: query?.tag,
+    assigned_to: query?.assignedTo,
+    from: query?.from,
+    to: query?.to
+  });
+  const payload = await request<ApiCollectionResponse<Finding[]>>(path);
   return payload.data;
 }
 
 export async function fetchFinding(id: string): Promise<Finding> {
   const payload = await request<ApiItemResponse<Finding>>(`/findings/${id}`);
   return payload.data;
+}
+
+export async function fetchFindingComments(findingId: string): Promise<FindingComment[]> {
+  const payload = await request<ApiCollectionResponse<FindingComment[]>>(
+    `/findings/${findingId}/comments`
+  );
+  return payload.data;
+}
+
+export async function fetchFindingTimeline(
+  findingId: string
+): Promise<FindingTimelineEvent[]> {
+  const payload = await request<ApiCollectionResponse<FindingTimelineEvent[]>>(
+    `/findings/${findingId}/timeline`
+  );
+  return payload.data;
+}
+
+export async function fetchFindingsTimeline(
+  query?: FindingsQuery
+): Promise<FindingsTimelineBucket[]> {
+  const path = buildPath('/findings/timeline', {
+    target_id: query?.targetId,
+    scan_id: query?.scanId,
+    severity: query?.severity,
+    status: query?.status,
+    tag: query?.tag,
+    assigned_to: query?.assignedTo,
+    from: query?.from,
+    to: query?.to
+  });
+  const payload = await request<ApiCollectionResponse<FindingsTimelineBucket[]>>(path);
+  return payload.data;
+}
+
+export async function createFindingComment(
+  findingId: string,
+  message: string
+): Promise<FindingComment> {
+  return request<FindingComment>(`/findings/${findingId}/comments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message })
+  });
+}
+
+export async function assignFinding(
+  findingId: string,
+  assignee: string
+): Promise<Finding> {
+  const payload = await request<FindingItemResponse>(`/findings/${findingId}/assign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assignee })
+  });
+  return payload.data;
+}
+
+export async function updateFindingStatus(
+  findingId: string,
+  statusValue: Finding['status']
+): Promise<Finding> {
+  const payload = await request<FindingItemResponse>(`/findings/${findingId}/status`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: statusValue })
+  });
+  return payload.data;
+}
+
+export async function updateFindingTags(
+  findingId: string,
+  tags: string[]
+): Promise<Finding> {
+  const payload = await request<FindingItemResponse>(`/findings/${findingId}/tags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags })
+  });
+  return payload.data;
+}
+
+export interface FindingsReportRequest {
+  findingIds?: string[];
+  scanId?: string;
+  format?: 'html' | 'pdf';
+}
+
+export async function exportFindingsReport(
+  payload: FindingsReportRequest
+): Promise<ReportExportResponse> {
+  return request<ReportExportResponse>('/reports/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      finding_ids: payload.findingIds ?? [],
+      scan_id: payload.scanId,
+      format: payload.format ?? 'pdf'
+    })
+  });
+}
+
+export async function createJiraTicket(payload: {
+  findingId: string;
+  projectKey: string;
+  issueType: string;
+  summary: string;
+  description?: string;
+}): Promise<FindingTicket> {
+  return request<FindingTicket>('/tickets/jira', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      finding_id: payload.findingId,
+      project_key: payload.projectKey,
+      issue_type: payload.issueType,
+      summary: payload.summary,
+      description: payload.description
+    })
+  });
+}
+
+export async function createGitHubTicket(payload: {
+  findingId: string;
+  repository: string;
+  title: string;
+  body?: string;
+}): Promise<FindingTicket> {
+  return request<FindingTicket>('/tickets/github', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      finding_id: payload.findingId,
+      repository: payload.repository,
+      title: payload.title,
+      body: payload.body
+    })
+  });
 }
 
 export async function fetchTargets(): Promise<Target[]> {

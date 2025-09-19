@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -9,7 +10,10 @@ import secrets
 import time
 import uuid
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
+from io import BytesIO
+import html
+import textwrap
 from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, Union
@@ -17,7 +21,8 @@ from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
 try:  # pragma: no cover - compatibility shim for environments without pydantic-settings
     from pydantic_settings import BaseSettings
@@ -42,6 +47,8 @@ from controller.db.models import (
     BinaryStaticAnalysisFinding,
     Finding,
     FindingEnrichment,
+    FindingComment,
+    FindingTicket,
     PrincipalCredential,
     Scan,
     Target,
@@ -64,6 +71,8 @@ ROLE_BINARY_FUZZING_ENQUEUE = "binary:fuzzing"
 ROLE_TARGETS_READ = "targets:read"
 ROLE_TARGETS_WRITE = "targets:write"
 ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
+ROLE_REPORT_EXPORT = "report:export"
+ROLE_TICKETING_CREATE = "ticket:create"
 
 ALLOWED_ROLES = {
     ROLE_ADMIN,
@@ -77,6 +86,8 @@ ALLOWED_ROLES = {
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
+    ROLE_REPORT_EXPORT,
+    ROLE_TICKETING_CREATE,
 }
 
 DEFAULT_ANALYST_ROLES = [
@@ -89,6 +100,7 @@ DEFAULT_ANALYST_ROLES = [
     ROLE_BINARY_FUZZING_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_ENRICHMENT_ENQUEUE,
+    ROLE_REPORT_EXPORT,
 ]
 
 DEFAULT_ADMIN_ROLES = [
@@ -102,6 +114,8 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
+    ROLE_REPORT_EXPORT,
+    ROLE_TICKETING_CREATE,
 ]
 
 CALLBACK_TOKEN_HEADER = "X-Callback-Token"
@@ -999,6 +1013,23 @@ class FindingEnrichmentSummary(BaseModel):
     payload_hash: str
 
 
+class FindingTicketSummary(BaseModel):
+    id: str
+    integration: str
+    reference: str
+    status: str
+    url: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class FindingCommentSummary(BaseModel):
+    id: str
+    author: str
+    message: str
+    created_at: datetime
+
+
 class FindingResponse(BaseModel):
     id: str
     scan_id: str
@@ -1018,6 +1049,10 @@ class FindingResponse(BaseModel):
     sample_id: Optional[str] = None
     tool: Optional[str] = None
     category: Literal["web", "binary_static", "binary_fuzzing"]
+    assigned_to: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    comment_count: int = 0
+    tickets: List[FindingTicketSummary] = Field(default_factory=list)
 
 
 class FindingCollectionResponse(BaseModel):
@@ -1026,6 +1061,114 @@ class FindingCollectionResponse(BaseModel):
 
 class FindingItemResponse(BaseModel):
     data: FindingResponse
+
+
+class FindingCommentCollectionResponse(BaseModel):
+    data: List[FindingCommentSummary]
+
+
+class FindingTimelineEvent(BaseModel):
+    kind: str
+    actor: str
+    created_at: datetime
+    message: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class FindingTimelineResponse(BaseModel):
+    data: List[FindingTimelineEvent]
+
+
+class FindingTimelineBucket(BaseModel):
+    date: datetime
+    open: int
+    acknowledged: int
+    resolved: int
+    total: int
+
+
+class FindingTimelineCollectionResponse(BaseModel):
+    data: List[FindingTimelineBucket]
+
+
+class FindingAssignmentRequest(BaseModel):
+    assignee: str = Field(..., min_length=1, max_length=128)
+
+
+class FindingStatusUpdateRequest(BaseModel):
+    status: Literal["open", "acknowledged", "resolved"]
+
+
+class FindingTagsUpdateRequest(BaseModel):
+    tags: List[str] = Field(default_factory=list)
+
+
+class FindingCommentRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+
+
+class ReportExportRequest(BaseModel):
+    format: Literal["html", "pdf"] = "html"
+    finding_ids: List[str] = Field(default_factory=list)
+    scan_id: Optional[str] = None
+
+    @field_validator("finding_ids", mode="before")
+    @classmethod
+    def _normalize_ids(cls, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+            normalized: List[str] = []
+            for item in value:
+                if not isinstance(item, str):
+                    continue
+                candidate = item.strip()
+                if candidate:
+                    normalized.append(candidate)
+            return normalized
+        return []
+
+    @model_validator(mode="after")
+    def _ensure_scope(self) -> "ReportExportRequest":
+        if not self.finding_ids and not self.scan_id:
+            raise ValueError("Provide at least one finding_id or scan_id for export")
+        return self
+
+
+class ReportExportResponse(BaseModel):
+    report_id: str
+    format: Literal["html", "pdf"]
+    generated_at: datetime
+    finding_count: int
+    content: str = Field(description="Base64-encoded report content")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class JiraTicketRequest(BaseModel):
+    finding_id: str = Field(..., min_length=1)
+    project_key: str = Field(..., min_length=2, max_length=10)
+    issue_type: str = Field(default="Bug", min_length=1, max_length=64)
+    summary: str = Field(..., min_length=5, max_length=255)
+    description: Optional[str] = None
+
+
+class GitHubTicketRequest(BaseModel):
+    finding_id: str = Field(..., min_length=1)
+    repository: str = Field(..., min_length=2, max_length=200)
+    title: str = Field(..., min_length=5, max_length=255)
+    body: Optional[str] = None
+
+
+class TicketResponse(BaseModel):
+    id: str
+    integration: str
+    reference: str
+    status: str
+    url: Optional[str]
+    created_at: datetime
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class CallbackFinding(BaseModel):
@@ -3282,24 +3425,21 @@ def enrichment_callback(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@app.get("/findings", response_model=FindingCollectionResponse)
-def list_findings(
-    target_id: Optional[str] = None,
-    scan_id: Optional[str] = None,
-    principal: Principal = Depends(authenticate),
-    db: Session = Depends(get_db_session),
-) -> FindingCollectionResponse:
-    """Return the latest findings for the requested scope."""
-
-    enforce_roles(
-        principal,
-        [ROLE_FINDINGS_READ],
-        db,
-        resource_type="endpoint",
-        resource_id="/findings",
+def _retrieve_finding_records(
+    db: Session,
+    *,
+    target_id: Optional[str],
+    scan_id: Optional[str],
+) -> Tuple[
+    List[Finding],
+    List[BinaryStaticAnalysisFinding],
+    List[BinaryFuzzingFinding],
+]:
+    query = db.query(Finding).options(
+        selectinload(Finding.enrichments),
+        selectinload(Finding.comments),
+        selectinload(Finding.tickets),
     )
-
-    query = db.query(Finding).options(selectinload(Finding.enrichments))
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
     elif target_id is not None:
@@ -3334,6 +3474,259 @@ def list_findings(
         BinaryFuzzingFinding.executed_at.desc()
     ).all()
 
+    return findings, static_findings, fuzzing_findings
+
+
+def _get_mutable_finding(db: Session, finding_id: str) -> Finding:
+    finding = (
+        db.query(Finding)
+        .options(
+            selectinload(Finding.enrichments),
+            selectinload(Finding.comments),
+            selectinload(Finding.tickets),
+            selectinload(Finding.scan).selectinload(Scan.target),
+        )
+        .filter(Finding.id == finding_id)
+        .one_or_none()
+    )
+    if finding is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+        )
+    return finding
+
+
+def _filter_finding_responses(
+    responses: Iterable[FindingResponse],
+    *,
+    severity: Optional[str],
+    status_filter: Optional[str],
+    tag: Optional[str],
+    assigned_to: Optional[str],
+    since: Optional[datetime],
+    until: Optional[datetime],
+) -> Tuple[List[FindingResponse], Dict[str, Optional[str]]]:
+    normalized_severity = severity.lower().strip() if severity else None
+    normalized_status = status_filter.lower().strip() if status_filter else None
+    normalized_tag = tag.lower().strip() if tag else None
+    normalized_assignee = assigned_to.strip() if assigned_to else None
+
+    def _matches(record: FindingResponse) -> bool:
+        if normalized_severity and record.severity != normalized_severity:
+            return False
+        if normalized_status and record.status != normalized_status:
+            return False
+        if normalized_tag and normalized_tag not in record.tags:
+            return False
+        if normalized_assignee and record.assigned_to != normalized_assignee:
+            return False
+        if since and record.detected_at < since:
+            return False
+        if until and record.detected_at > until:
+            return False
+        return True
+
+    filtered = [record for record in responses if _matches(record)]
+    metadata = {
+        "severity": normalized_severity,
+        "status": normalized_status,
+        "tag": normalized_tag,
+        "assigned_to": normalized_assignee,
+        "from": since.isoformat() if since else None,
+        "to": until.isoformat() if until else None,
+    }
+    return filtered, metadata
+
+
+def _build_timeline_buckets(
+    responses: Iterable[FindingResponse],
+) -> List[FindingTimelineBucket]:
+    timeline: Dict[date, Dict[str, int]] = {}
+    for record in responses:
+        detected = record.detected_at.astimezone(timezone.utc)
+        key = detected.date()
+        bucket = timeline.setdefault(key, {"open": 0, "acknowledged": 0, "resolved": 0})
+        bucket[record.status] = bucket.get(record.status, 0) + 1
+
+    ordered: List[FindingTimelineBucket] = []
+    for day in sorted(timeline.keys()):
+        counts = timeline[day]
+        timestamp = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+        total = counts.get("open", 0) + counts.get("acknowledged", 0) + counts.get("resolved", 0)
+        ordered.append(
+            FindingTimelineBucket(
+                date=timestamp,
+                open=counts.get("open", 0),
+                acknowledged=counts.get("acknowledged", 0),
+                resolved=counts.get("resolved", 0),
+                total=total,
+            )
+        )
+    return ordered
+
+
+def _severity_to_cvss(severity: str) -> float:
+    mapping = {
+        "critical": 9.5,
+        "high": 8.0,
+        "medium": 6.0,
+        "low": 3.0,
+        "info": 0.0,
+    }
+    return mapping.get(severity.lower(), 0.0)
+
+
+def _generate_ticket_reference(prefix: str, finding_id: str, summary: str) -> str:
+    normalized_prefix = prefix.strip().upper()
+    digest = hashlib.sha1(f"{finding_id}:{summary}".encode("utf-8")).hexdigest()
+    return f"{normalized_prefix}-{digest[:8].upper()}"
+
+
+def _render_report_html(findings: List[FindingResponse]) -> str:
+    rows: List[str] = []
+    for record in findings:
+        evidence_text = record.evidence or "Evidence not provided."
+        tags = ", ".join(record.tags) if record.tags else "none"
+        cvss_score = _severity_to_cvss(record.severity)
+        enrichments = len(record.enrichments)
+        rows.append(
+            """
+            <section class="finding">
+              <h2>{title}</h2>
+              <p class="meta">Severity: {severity} • Status: {status} • CVSS: {cvss:.1f}</p>
+              <p class="meta">Scan: {scan_id} • Detected: {detected} • Tags: {tags}</p>
+              <p class="description">{description}</p>
+              <pre class="evidence">{evidence}</pre>
+              <p class="meta">Enrichments attached: {enrichments}</p>
+            </section>
+            """.format(
+                title=html.escape(record.title),
+                severity=html.escape(record.severity),
+                status=html.escape(record.status),
+                cvss=cvss_score,
+                scan_id=html.escape(record.scan_id),
+                detected=html.escape(record.detected_at.isoformat()),
+                tags=html.escape(tags),
+                description=html.escape(record.description),
+                evidence=html.escape(evidence_text),
+                enrichments=enrichments,
+            )
+        )
+
+    body = "\n".join(rows)
+    generated = datetime.now(tz=timezone.utc).isoformat()
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <title>Medusa Findings Report</title>
+        <style>
+          body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; padding: 2rem; }}
+          h1 {{ color: #38bdf8; }}
+          .finding {{ border: 1px solid #1e293b; border-radius: 0.5rem; padding: 1.5rem; margin-bottom: 1.5rem; background: #1f2937; }}
+          .meta {{ font-size: 0.85rem; color: #94a3b8; margin: 0.25rem 0; }}
+          .description {{ margin: 1rem 0; line-height: 1.5; }}
+          pre.evidence {{ background: #0f172a; padding: 1rem; overflow-x: auto; border-radius: 0.5rem; }}
+        </style>
+      </head>
+      <body>
+        <h1>Medusa Findings Report</h1>
+        <p class="meta">Generated at {generated}</p>
+        {body}
+      </body>
+    </html>
+    """.strip()
+
+
+def _render_report_pdf(findings: List[FindingResponse]) -> bytes:
+    def _escape(content: str) -> str:
+        return content.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    lines: List[str] = [
+        f"Medusa Findings Report generated {datetime.now(tz=timezone.utc).isoformat()}"
+    ]
+    for record in findings:
+        lines.append("")
+        lines.append(f"Finding {record.id}: {record.title} [{record.severity.upper()}]")
+        lines.append(f"Status: {record.status} | CVSS {_severity_to_cvss(record.severity):.1f}")
+        lines.append(f"Detected: {record.detected_at.isoformat()} | Scan: {record.scan_id}")
+        lines.append(
+            f"Tags: {', '.join(record.tags) if record.tags else 'none'}"
+        )
+        description = textwrap.wrap(record.description, 90)
+        lines.extend(description)
+        evidence = record.evidence or "Evidence not provided."
+        for segment in textwrap.wrap(f"Evidence: {evidence}", 90):
+            lines.append(segment)
+
+    content_segments = ["BT /F1 12 Tf 50 750 Td"]
+    for index, line in enumerate(lines):
+        if index == 0:
+            content_segments.append(f"({_escape(line)}) Tj")
+        else:
+            content_segments.append(f"T* ({_escape(line)}) Tj")
+    content_segments.append("ET")
+    content_stream = "\n".join(content_segments)
+    stream_bytes = content_stream.encode("utf-8")
+
+    objects = [
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+        f"4 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n{content_stream}\nendstream\nendobj\n",
+        "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    ]
+
+    buffer = BytesIO()
+    buffer.write(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(buffer.tell())
+        buffer.write(obj.encode("utf-8"))
+    xref_position = buffer.tell()
+    buffer.write(f"xref\n0 {len(offsets)}\n".encode("utf-8"))
+    buffer.write(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        buffer.write(f"{offset:010} 00000 n \n".encode("utf-8"))
+    buffer.write(
+        b"trailer\n<< /Size %d /Root 1 0 R >>\n" % len(offsets)
+    )
+    buffer.write(b"startxref\n")
+    buffer.write(f"{xref_position}\n".encode("utf-8"))
+    buffer.write(b"%%EOF")
+    return buffer.getvalue()
+
+
+@app.get("/findings", response_model=FindingCollectionResponse)
+def list_findings(
+    target_id: Optional[str] = None,
+    scan_id: Optional[str] = None,
+    severity: Optional[str] = Query(None, description="Filter by severity"),
+    status_filter: Optional[str] = Query(
+        None, alias="status", description="Filter by workflow status"
+    ),
+    tag: Optional[str] = Query(None, description="Filter by tag"),
+    assigned_to: Optional[str] = Query(None, description="Filter by assignee"),
+    since: Optional[datetime] = Query(None, alias="from"),
+    until: Optional[datetime] = Query(None, alias="to"),
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingCollectionResponse:
+    """Return the latest findings for the requested scope."""
+
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/findings",
+    )
+
+    findings, static_findings, fuzzing_findings = _retrieve_finding_records(
+        db, target_id=target_id, scan_id=scan_id
+    )
+
     aggregated: List[Tuple[datetime, FindingResponse]] = []
     for record in findings:
         aggregated.append((record.created_at, serialize_finding(record)))
@@ -3351,6 +3744,20 @@ def list_findings(
         for _, response in sorted(aggregated, key=lambda item: item[0], reverse=True)
     ]
 
+    filtered, metadata_filters = _filter_finding_responses(
+        ordered,
+        severity=severity,
+        status_filter=status_filter,
+        tag=tag,
+        assigned_to=assigned_to,
+        since=since,
+        until=until,
+    )
+
+    web_count = sum(1 for record in filtered if record.category == "web")
+    static_count = sum(1 for record in filtered if record.category == "binary_static")
+    fuzzing_count = sum(1 for record in filtered if record.category == "binary_fuzzing")
+
     record_audit_event(
         db,
         actor=principal,
@@ -3360,13 +3767,88 @@ def list_findings(
         scan_id=scan_id,
         metadata={
             "target_id": target_id,
-            "count": len(ordered),
-            "binary_static_count": len(static_findings),
-            "binary_fuzzing_count": len(fuzzing_findings),
+            "count": len(filtered),
+            "web_count": web_count,
+            "binary_static_count": static_count,
+            "binary_fuzzing_count": fuzzing_count,
+            "filters": metadata_filters,
         },
     )
 
-    return FindingCollectionResponse(data=ordered)
+    return FindingCollectionResponse(data=filtered)
+
+
+@app.get("/findings/timeline", response_model=FindingTimelineCollectionResponse)
+def list_findings_timeline(
+    target_id: Optional[str] = None,
+    scan_id: Optional[str] = None,
+    severity: Optional[str] = Query(None, description="Filter by severity"),
+    status_filter: Optional[str] = Query(
+        None, alias="status", description="Filter by workflow status"
+    ),
+    tag: Optional[str] = Query(None, description="Filter by tag"),
+    assigned_to: Optional[str] = Query(None, description="Filter by assignee"),
+    since: Optional[datetime] = Query(None, alias="from"),
+    until: Optional[datetime] = Query(None, alias="to"),
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingTimelineCollectionResponse:
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/findings/timeline",
+    )
+
+    findings, static_findings, fuzzing_findings = _retrieve_finding_records(
+        db, target_id=target_id, scan_id=scan_id
+    )
+
+    aggregated: List[Tuple[datetime, FindingResponse]] = []
+    for record in findings:
+        aggregated.append((record.created_at, serialize_finding(record)))
+    for record in static_findings:
+        aggregated.append(
+            (record.executed_at, serialize_binary_static_finding(record))
+        )
+    for record in fuzzing_findings:
+        aggregated.append(
+            (record.executed_at, serialize_binary_fuzzing_finding(record))
+        )
+
+    ordered = [
+        response
+        for _, response in sorted(aggregated, key=lambda item: item[0], reverse=True)
+    ]
+
+    filtered, metadata_filters = _filter_finding_responses(
+        ordered,
+        severity=severity,
+        status_filter=status_filter,
+        tag=tag,
+        assigned_to=assigned_to,
+        since=since,
+        until=until,
+    )
+
+    buckets = _build_timeline_buckets(filtered)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="findings_timeline",
+        resource_type="finding",
+        resource_id=None,
+        scan_id=scan_id,
+        metadata={
+            "target_id": target_id,
+            "bucket_count": len(buckets),
+            "filters": metadata_filters,
+        },
+    )
+
+    return FindingTimelineCollectionResponse(data=buckets)
 
 
 @app.get("/findings/{finding_id}", response_model=FindingItemResponse)
@@ -3438,6 +3920,551 @@ def get_finding(
     )
 
 
+@app.get("/findings/{finding_id}/timeline", response_model=FindingTimelineResponse)
+def get_finding_timeline(
+    finding_id: str,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingTimelineResponse:
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}/timeline",
+    )
+
+    finding = _get_mutable_finding(db, finding_id)
+
+    audit_entries = (
+        db.query(AuditLog)
+        .filter(AuditLog.finding_id == finding_id)
+        .order_by(AuditLog.created_at.asc())
+        .all()
+    )
+
+    events: List[FindingTimelineEvent] = []
+    detection_actor = None
+    if finding.scan and finding.scan.initiated_by:
+        detection_actor = finding.scan.initiated_by
+    elif finding.scan:
+        detection_actor = finding.scan.scanner
+    else:
+        detection_actor = "system"
+    events.append(
+        FindingTimelineEvent(
+            kind="finding.detected",
+            actor=detection_actor,
+            created_at=finding.created_at,
+            metadata={
+                "severity": finding.severity,
+                "status": finding.status,
+                "scanner": finding.scan.scanner if finding.scan else None,
+            },
+        )
+    )
+
+    for entry in audit_entries:
+        snapshot = deepcopy(_normalize_payload(entry.evidence_snapshot))
+        events.append(
+            FindingTimelineEvent(
+                kind=f"audit.{entry.action}",
+                actor=entry.actor,
+                created_at=entry.created_at,
+                message=entry.message,
+                metadata=snapshot,
+            )
+        )
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="get_finding_timeline",
+        resource_type="finding",
+        resource_id=finding_id,
+        finding_id=finding_id,
+        metadata={"event_count": len(events)},
+    )
+
+    return FindingTimelineResponse(data=events)
+
+
+@app.get("/findings/{finding_id}/comments", response_model=FindingCommentCollectionResponse)
+def list_finding_comments(
+    finding_id: str,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingCommentCollectionResponse:
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}/comments",
+    )
+
+    _ = _get_mutable_finding(db, finding_id)
+    comments = (
+        db.query(FindingComment)
+        .filter(FindingComment.finding_id == finding_id)
+        .order_by(FindingComment.created_at.asc())
+        .all()
+    )
+    payload = [serialize_comment(comment) for comment in comments]
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="list_finding_comments",
+        resource_type="finding",
+        resource_id=finding_id,
+        finding_id=finding_id,
+        metadata={"count": len(payload)},
+    )
+
+    return FindingCommentCollectionResponse(data=payload)
+
+
+@app.post(
+    "/findings/{finding_id}/comments",
+    response_model=FindingCommentSummary,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_finding_comment(
+    finding_id: str,
+    request: FindingCommentRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingCommentSummary:
+    enforce_roles(
+        principal,
+        [ROLE_ANALYST],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}/comments",
+    )
+
+    finding = _get_mutable_finding(db, finding_id)
+
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Comment body cannot be empty",
+        )
+
+    comment = FindingComment(
+        finding_id=finding_id,
+        author=principal.subject,
+        message=message,
+        metadata_json={"source": "analyst"},
+        metadata_hash="",
+    )
+    db.add(comment)
+    db.commit()
+    db.refresh(comment)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="comment_finding",
+        resource_type="finding",
+        resource_id=finding_id,
+        finding_id=finding_id,
+        metadata={"comment_id": comment.id, "message_preview": message[:120]},
+    )
+
+    # Refresh finding to update comment count for subsequent operations
+    db.refresh(finding)
+
+    return serialize_comment(comment)
+
+
+@app.post(
+    "/findings/{finding_id}/assign", response_model=FindingItemResponse
+)
+def assign_finding(
+    finding_id: str,
+    request: FindingAssignmentRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingItemResponse:
+    enforce_roles(
+        principal,
+        [ROLE_ANALYST],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}/assign",
+    )
+
+    finding = _get_mutable_finding(db, finding_id)
+    previous_status = finding.status
+    sanitized_assignee = request.assignee.strip()
+    if not sanitized_assignee:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Assignee cannot be blank",
+        )
+    finding.assigned_to = sanitized_assignee
+    if finding.status == "open":
+        finding.status = "acknowledged"
+    db.add(finding)
+    db.commit()
+    db.refresh(finding)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="assign_finding",
+        resource_type="finding",
+        resource_id=finding_id,
+        finding_id=finding_id,
+        metadata={
+            "assigned_to": sanitized_assignee,
+            "previous_status": previous_status,
+        },
+    )
+
+    return FindingItemResponse(data=serialize_finding(finding))
+
+
+@app.post(
+    "/findings/{finding_id}/status", response_model=FindingItemResponse
+)
+def update_finding_status(
+    finding_id: str,
+    request: FindingStatusUpdateRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingItemResponse:
+    enforce_roles(
+        principal,
+        [ROLE_ANALYST],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}/status",
+    )
+
+    finding = _get_mutable_finding(db, finding_id)
+    previous_status = finding.status
+    finding.status = request.status
+    db.add(finding)
+    db.commit()
+    db.refresh(finding)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="update_finding_status",
+        resource_type="finding",
+        resource_id=finding_id,
+        finding_id=finding_id,
+        metadata={
+            "previous_status": previous_status,
+            "new_status": request.status,
+        },
+    )
+
+    return FindingItemResponse(data=serialize_finding(finding))
+
+
+@app.post(
+    "/findings/{finding_id}/tags", response_model=FindingItemResponse
+)
+def update_finding_tags(
+    finding_id: str,
+    request: FindingTagsUpdateRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingItemResponse:
+    enforce_roles(
+        principal,
+        [ROLE_ANALYST],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}/tags",
+    )
+
+    finding = _get_mutable_finding(db, finding_id)
+    normalized_tags = _sanitize_tags(request.tags)
+    finding.tags = normalized_tags
+    db.add(finding)
+    db.commit()
+    db.refresh(finding)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="update_finding_tags",
+        resource_type="finding",
+        resource_id=finding_id,
+        finding_id=finding_id,
+        metadata={"tags": normalized_tags},
+    )
+
+    return FindingItemResponse(data=serialize_finding(finding))
+
+
+@app.post("/reports/export", response_model=ReportExportResponse)
+def export_findings_report(
+    request: ReportExportRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> ReportExportResponse:
+    enforce_roles(
+        principal,
+        [ROLE_REPORT_EXPORT],
+        db,
+        resource_type="endpoint",
+        resource_id="/reports/export",
+    )
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/reports/export",
+    )
+
+    findings_map: Dict[str, FindingResponse] = {}
+
+    if request.finding_ids:
+        query = (
+            db.query(Finding)
+            .options(
+                selectinload(Finding.enrichments),
+                selectinload(Finding.comments),
+                selectinload(Finding.tickets),
+                selectinload(Finding.scan).selectinload(Scan.target),
+            )
+            .filter(Finding.id.in_(request.finding_ids))
+        )
+        for record in query.all():
+            findings_map[str(record.id)] = serialize_finding(record)
+
+    if request.scan_id:
+        scan_findings, static_findings, fuzzing_findings = _retrieve_finding_records(
+            db, target_id=None, scan_id=request.scan_id
+        )
+        for record in scan_findings:
+            findings_map[str(record.id)] = serialize_finding(record)
+        for record in static_findings:
+            finding_response = serialize_binary_static_finding(record)
+            findings_map[finding_response.id] = finding_response
+        for record in fuzzing_findings:
+            finding_response = serialize_binary_fuzzing_finding(record)
+            findings_map[finding_response.id] = finding_response
+
+    responses = list(findings_map.values())
+    if not responses:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No findings available for export",
+        )
+
+    ordered = sorted(responses, key=lambda item: item.detected_at, reverse=True)
+
+    if request.format == "html":
+        report_bytes = _render_report_html(ordered).encode("utf-8")
+    else:
+        report_bytes = _render_report_pdf(ordered)
+
+    encoded_content = base64.b64encode(report_bytes).decode("ascii")
+    generated_at = datetime.now(tz=timezone.utc)
+    report_id = str(uuid.uuid4())
+
+    severity_counts: Dict[str, int] = {}
+    status_counts: Dict[str, int] = {}
+    for record in ordered:
+        severity_counts[record.severity] = severity_counts.get(record.severity, 0) + 1
+        status_counts[record.status] = status_counts.get(record.status, 0) + 1
+
+    metadata = {
+        "requested_findings": request.finding_ids,
+        "scan_id": request.scan_id,
+        "severity_counts": severity_counts,
+        "status_counts": status_counts,
+        "format": request.format,
+    }
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="export_report",
+        resource_type="finding",
+        resource_id=None,
+        metadata={
+            "report_id": report_id,
+            "format": request.format,
+            "finding_count": len(ordered),
+            "severity_counts": severity_counts,
+        },
+    )
+
+    return ReportExportResponse(
+        report_id=report_id,
+        format=request.format,
+        generated_at=generated_at,
+        finding_count=len(ordered),
+        content=encoded_content,
+        metadata=metadata,
+    )
+
+
+@app.post("/tickets/jira", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
+def create_jira_ticket(
+    request: JiraTicketRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> TicketResponse:
+    enforce_roles(
+        principal,
+        [ROLE_TICKETING_CREATE],
+        db,
+        resource_type="endpoint",
+        resource_id="/tickets/jira",
+    )
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/tickets/jira",
+    )
+
+    finding = _get_mutable_finding(db, request.finding_id)
+    if finding.scan and finding.scan.target and not finding.scan.target.is_authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Target scope is not authorized for ticketing",
+        )
+
+    reference = _generate_ticket_reference(
+        request.project_key, finding.id, request.summary
+    )
+    payload = {
+        "project_key": request.project_key.upper(),
+        "issue_type": request.issue_type,
+        "summary": request.summary,
+        "description": request.description or finding.description,
+        "severity": finding.severity,
+        "cvss": _severity_to_cvss(finding.severity),
+        "finding_id": finding.id,
+    }
+
+    ticket = FindingTicket(
+        finding_id=finding.id,
+        integration="jira",
+        reference=reference,
+        url=None,
+        status="queued",
+        payload=payload,
+        payload_hash="",
+        created_by=principal.subject,
+    )
+    db.add(ticket)
+    db.commit()
+    db.refresh(ticket)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="create_jira_ticket",
+        resource_type="finding",
+        resource_id=finding.id,
+        finding_id=finding.id,
+        metadata={"reference": reference, "project_key": request.project_key.upper()},
+    )
+
+    return TicketResponse(
+        id=ticket.id,
+        integration="jira",
+        reference=reference,
+        status=ticket.status,
+        url=ticket.url,
+        created_at=ticket.created_at,
+        metadata=payload,
+    )
+
+
+@app.post(
+    "/tickets/github",
+    response_model=TicketResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_github_ticket(
+    request: GitHubTicketRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> TicketResponse:
+    enforce_roles(
+        principal,
+        [ROLE_TICKETING_CREATE],
+        db,
+        resource_type="endpoint",
+        resource_id="/tickets/github",
+    )
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/tickets/github",
+    )
+
+    finding = _get_mutable_finding(db, request.finding_id)
+    if finding.scan and finding.scan.target and not finding.scan.target.is_authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Target scope is not authorized for ticketing",
+        )
+
+    repo_slug = request.repository.strip().replace("/", "-")
+    reference = _generate_ticket_reference(f"GH-{repo_slug}", finding.id, request.title)
+    payload = {
+        "repository": request.repository,
+        "title": request.title,
+        "body": request.body or finding.description,
+        "severity": finding.severity,
+        "cvss": _severity_to_cvss(finding.severity),
+        "finding_id": finding.id,
+    }
+
+    ticket = FindingTicket(
+        finding_id=finding.id,
+        integration="github",
+        reference=reference,
+        url=None,
+        status="queued",
+        payload=payload,
+        payload_hash="",
+        created_by=principal.subject,
+    )
+    db.add(ticket)
+    db.commit()
+    db.refresh(ticket)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="create_github_ticket",
+        resource_type="finding",
+        resource_id=finding.id,
+        finding_id=finding.id,
+        metadata={"reference": reference, "repository": request.repository},
+    )
+
+    return TicketResponse(
+        id=ticket.id,
+        integration="github",
+        reference=reference,
+        status=ticket.status,
+        url=ticket.url,
+        created_at=ticket.created_at,
+        metadata=payload,
+    )
+
+
 def serialize_scan(scan: Scan) -> ScanResponse:
     """Project a Scan ORM object into the API contract expected by the UI."""
 
@@ -3460,6 +4487,31 @@ def serialize_scan(scan: Scan) -> ScanResponse:
         started_at=scan.started_at,
         completed_at=scan.completed_at,
         findings_count=findings_count,
+    )
+
+
+def serialize_ticket(ticket: FindingTicket) -> FindingTicketSummary:
+    """Serialize ticket metadata for API consumers."""
+
+    return FindingTicketSummary(
+        id=str(ticket.id),
+        integration=ticket.integration,
+        reference=ticket.reference,
+        status=ticket.status,
+        url=ticket.url,
+        created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
+    )
+
+
+def serialize_comment(comment: FindingComment) -> FindingCommentSummary:
+    """Serialize immutable analyst commentary."""
+
+    return FindingCommentSummary(
+        id=str(comment.id),
+        author=comment.author,
+        message=comment.message,
+        created_at=comment.created_at,
     )
 
 
@@ -3523,6 +4575,15 @@ def serialize_finding(finding: Finding) -> FindingResponse:
                 )
             )
 
+    tickets_payload: List[FindingTicketSummary] = []
+    if hasattr(finding, "tickets") and finding.tickets:
+        ordered_tickets = sorted(
+            finding.tickets,
+            key=lambda record: record.created_at,
+            reverse=True,
+        )
+        tickets_payload = [serialize_ticket(ticket) for ticket in ordered_tickets]
+
     return FindingResponse(
         id=str(finding.id),
         scan_id=str(finding.scan_id),
@@ -3532,7 +4593,7 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         description=finding.description,
         detected_at=detected_at,
         updated_at=finding.updated_at or detected_at,
-        status="open",
+        status=finding.status or "open",
         template_id=template_id,
         evidence=evidence_text,
         remediation=None,
@@ -3542,6 +4603,10 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         sample_id=None,
         tool=str(tool_value) if tool_value else scanner_value,
         category="web",
+        assigned_to=finding.assigned_to,
+        tags=list(finding.tags or []),
+        comment_count=len(getattr(finding, "comments", []) or []),
+        tickets=tickets_payload,
     )
 
 
@@ -3587,6 +4652,10 @@ def serialize_binary_static_finding(
         sample_id=str(record.sample_id),
         tool=record.tool,
         category="binary_static",
+        assigned_to=None,
+        tags=[],
+        comment_count=0,
+        tickets=[],
     )
 
 
@@ -3631,6 +4700,10 @@ def serialize_binary_fuzzing_finding(
         sample_id=str(record.sample_id),
         tool=record.tool,
         category="binary_fuzzing",
+        assigned_to=None,
+        tags=[],
+        comment_count=0,
+        tickets=[],
     )
 
 
@@ -3648,6 +4721,8 @@ __all__ = [
     "TargetCollectionResponse",
     "FindingResponse",
     "FindingEnrichmentSummary",
+    "FindingCommentSummary",
+    "FindingTicketSummary",
     "FindingCollectionResponse",
     "FindingItemResponse",
     "get_db_session",

@@ -19,6 +19,10 @@ describe('FindingsTable', () => {
       {
         id: 'finding-001',
         scan_id: 'scan-001',
+        scanner: 'nuclei',
+        sample_id: null,
+        tool: null,
+        category: 'network',
         title: 'TLS certificate expired',
         description: 'TLS certificate expired',
         cve_id: null,
@@ -49,13 +53,19 @@ describe('FindingsTable', () => {
             provenance_hash: 'hash-c',
             payload_hash: 'hash-d'
           }
-        ]
-        ,
-        metadata: { scanner: 'nuclei', rule_id: 'nuclei-tls-expired' }
+        ],
+        metadata: { scanner: 'nuclei', rule_id: 'nuclei-tls-expired' },
+        tags: ['tls', 'expired'],
+        comment_count: 1,
+        tickets: []
       },
       {
         id: 'finding-002',
         scan_id: 'scan-001',
+        scanner: 'nuclei',
+        sample_id: null,
+        tool: null,
+        category: 'network',
         title: 'Directory listing enabled',
         description: 'Directory listing enabled',
         cve_id: null,
@@ -65,7 +75,10 @@ describe('FindingsTable', () => {
         detected_at: '2024-01-31T16:00:00Z',
         updated_at: '2024-01-31T18:00:00Z',
         enrichments: [],
-        metadata: { scanner: 'nuclei', rule_id: 'nuclei-dir-listing' }
+        metadata: { scanner: 'nuclei', rule_id: 'nuclei-dir-listing' },
+        tags: [],
+        comment_count: 0,
+        tickets: []
       }
     ];
 
@@ -84,6 +97,10 @@ describe('FindingsTable', () => {
       {
         id: 'finding-zap',
         scan_id: 'scan-zap',
+        scanner: 'zap',
+        sample_id: null,
+        tool: 'zap-baseline',
+        category: 'network',
         title: 'Cross-site scripting',
         description: 'Reflected XSS detected',
         cve_id: 'CVE-2024-9999',
@@ -94,11 +111,28 @@ describe('FindingsTable', () => {
         updated_at: '2024-02-01T08:10:00Z',
         evidence: 'alert() payload reflected',
         enrichments: [],
-        metadata: { scanner: 'zap', rule_id: 'zap:40012' }
+        metadata: { scanner: 'zap', rule_id: 'zap:40012' },
+        tags: ['xss'],
+        comment_count: 2,
+        tickets: [
+          {
+            id: 'ticket-1',
+            integration: 'jira',
+            reference: 'MED-123',
+            status: 'open',
+            url: 'https://jira.example.com/browse/MED-123',
+            created_at: '2024-02-01T08:05:00Z',
+            metadata: {}
+          }
+        ]
       },
       {
         id: 'finding-sqlmap',
         scan_id: 'scan-sqlmap',
+        scanner: 'sqlmap',
+        sample_id: null,
+        tool: 'sqlmap',
+        category: 'network',
         title: 'Boolean-based SQLi',
         description: 'Time based injection',
         cve_id: null,
@@ -109,7 +143,10 @@ describe('FindingsTable', () => {
         updated_at: '2024-02-01T07:05:00Z',
         evidence: null,
         enrichments: [],
-        metadata: { scanner: 'sqlmap', rule_id: 'sqlmap:id' }
+        metadata: { scanner: 'sqlmap', rule_id: 'sqlmap:id' },
+        tags: ['injection'],
+        comment_count: 0,
+        tickets: []
       }
     ];
 
