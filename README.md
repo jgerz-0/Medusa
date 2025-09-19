@@ -23,6 +23,8 @@ Phase 1 establishes the local development baseline that every later milestone bu
 
 Progress on these items should be tracked through issues mapped to the roadmap phases in `ROADMAP.md`.
 
+The Minimal Next.js UI now redirects the root route to `/scans`, exposes a `/scans` dashboard with manual nuclei launch controls, and provides a `/findings` view with filtering for severity, status, and scan context.
+
 ## Quickstart (Local Development)
 
 ### Prerequisites
@@ -45,7 +47,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-The compose file mounts `controller/`, `workers/web/nuclei/`, and `frontend/` into their respective containers so host edits trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Persistent data lives under `infra/docker/data/`.
+The compose file mounts `controller/`, `workers/web/nuclei/`, `workers/binary/preprocess/`, `workers/binary/fuzzing/`, and `frontend/` into their respective containers so host edits trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Persistent data lives under `infra/docker/data/`.
 
 ### 3. Run migrations and validate the pipeline
 ```bash
@@ -97,6 +99,12 @@ These commands run entirely on the host using SQLite so you can iterate without 
 | Baseline Web Recon | `web-baseline` | Derived from the selected target | Daily surface validation against hardened nuclei defaults. |
 | API Deep Dive | `api-deep-dive` | `api.medusa.local` | Authenticated API sweeps with throttled rates. |
 | External Attack Surface | `external-attack-surface` | `www.medusa.local`, `portal.medusa.local` | Weekly external perimeter checks targeting high-signal templates. |
+
+Controller presets map directly to curated nuclei template bundles:
+
+- `web-baseline` executes hardened configuration, panel, and DNS transfer checks (`phpinfo-detect`, `jenkins-login`, `dns-zone-transfer`).
+- `api-deep-dive` layers in API documentation exposures to catch leaky Postman portals and Swagger consoles before authenticated sweeps.
+- `external-attack-surface` extends the baseline with high-signal CVE probes and weak SSH cipher enumeration for weekly perimeter sweeps.
 
 Status banners track optimistic queueing (`Queueing…`), success acknowledgements, and controller validation failures so analysts can move quickly without sacrificing auditability.
 

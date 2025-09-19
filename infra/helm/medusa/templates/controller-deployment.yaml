@@ -1,0 +1,136 @@
+{{- if .Values.controller.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "medusa.fullname" . }}-controller
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "medusa.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "medusa.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: controller
+        {{- range $k, $v := .Values.controller.podLabels }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+      annotations:
+        checksum/secrets: {{ include "medusa.secrets.checksum" . | sha256sum }}
+        {{- range $k, $v := .Values.controller.podAnnotations }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ default (printf "%s-controller" (include "medusa.fullname" .)) .Values.controller.serviceAccount.name }}
+      securityContext:
+        {{- if .Values.controller.podSecurityContext }}
+        {{- toYaml .Values.controller.podSecurityContext | nindent 8 }}
+        {{- end }}
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.controller.image.repository }}:{{ default .Chart.AppVersion .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          {{- if .Values.controller.securityContext.enabled }}
+          securityContext:
+            runAsNonRoot: {{ .Values.controller.securityContext.runAsNonRoot }}
+            runAsUser: {{ .Values.controller.securityContext.runAsUser }}
+            runAsGroup: {{ .Values.controller.securityContext.runAsGroup }}
+            allowPrivilegeEscalation: {{ .Values.controller.securityContext.allowPrivilegeEscalation }}
+            seccompProfile:
+              type: {{ .Values.controller.securityContext.seccompProfile.type }}
+            capabilities:
+              {{- toYaml .Values.controller.securityContext.capabilities | nindent 14 }}
+          {{- end }}
+          env:
+            - name: MEDUSA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_DATABASE_URL
+            - name: MEDUSA_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_REDIS_URL
+            - name: MEDUSA_NUCLEI_QUEUE_CHANNEL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_NUCLEI_QUEUE_CHANNEL
+            - name: MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL
+            - name: MEDUSA_NUCLEI_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_NUCLEI_CALLBACK_TOKEN
+            - name: MEDUSA_ENRICHMENT_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_ENRICHMENT_CALLBACK_TOKEN
+            - name: MEDUSA_CVE_ENRICHMENT_QDRANT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: CVE_ENRICHMENT_QDRANT_URL
+            - name: MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: CVE_ENRICHMENT_QDRANT_COLLECTION
+            - name: MEDUSA_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_JWT_SECRET
+            - name: MEDUSA_ANALYST_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_ANALYST_API_KEY
+            {{- range .Values.controller.env.extra }}
+            - {{- toYaml . | nindent 14 }}
+            {{- end }}
+          {{- if .Values.controller.envFrom }}
+          envFrom:
+            {{- toYaml .Values.controller.envFrom | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.controller.service.port }}
+          readinessProbe:
+            {{- toYaml .Values.controller.readinessProbe | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.controller.livenessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.controller.persistence.enabled }}
+            - name: controller-data
+              mountPath: /var/lib/medusa
+            {{- end }}
+      volumes:
+        {{- if .Values.controller.persistence.enabled }}
+        - name: controller-data
+          persistentVolumeClaim:
+            claimName: {{ include "medusa.fullname" . }}-controller
+        {{- end }}
+{{- end -}}

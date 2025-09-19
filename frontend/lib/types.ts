@@ -28,6 +28,10 @@ export interface Scan {
 export interface Finding {
   id: string;
   scan_id: string;
+  scanner: string;
+  sample_id: string | null;
+  tool: string | null;
+  category: string | null;
   title: string;
   description: string;
   cve_id?: string | null;
@@ -38,4 +42,78 @@ export interface Finding {
   updated_at: string;
   evidence?: string | null;
   remediation?: string | null;
+  enrichments: FindingEnrichment[];
+  metadata: Record<string, unknown>;
+  assigned_to?: string | null;
+  tags: string[];
+  comment_count: number;
+  tickets: FindingTicket[];
+}
+
+export interface CVEAdvisory {
+  source: string;
+  identifier: string;
+  summary?: string | null;
+  severity?: string | null;
+  cvss_score?: number | null;
+  published?: string | null;
+  modified?: string | null;
+  references: string[];
+  raw?: Record<string, unknown>;
+}
+
+export interface FindingEnrichment {
+  id: string;
+  job_id: string;
+  generated_at: string;
+  recorded_at: string;
+  advisories: CVEAdvisory[];
+  advisories_hash: string;
+  errors: Record<string, string>;
+  errors_hash: string;
+  provenance: Record<string, unknown>;
+  provenance_hash: string;
+  payload_hash: string;
+}
+
+export interface FindingComment {
+  id: string;
+  author: string;
+  message: string;
+  created_at: string;
+}
+
+export interface FindingTimelineEvent {
+  kind: string;
+  actor: string;
+  created_at: string;
+  message?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface FindingsTimelineBucket {
+  date: string;
+  open: number;
+  acknowledged: number;
+  resolved: number;
+  total: number;
+}
+
+export interface FindingTicket {
+  id: string;
+  integration: string;
+  reference: string;
+  status: string;
+  url?: string | null;
+  created_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface ReportExportResponse {
+  report_id: string;
+  format: 'html' | 'pdf';
+  generated_at: string;
+  finding_count: number;
+  content: string;
+  metadata: Record<string, unknown>;
 }

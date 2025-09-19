@@ -11,30 +11,31 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 - ✅ FastAPI controller exposing `/scan`, `/targets`, `/findings` endpoints with scope validation.
 - ✅ Redis-backed nuclei worker returning normalized JSON findings.
 - ✅ Postgres schema (targets, scans, findings, audit_log) and Alembic migrations.
-- ☐ Minimal Next.js dashboard listing scans, drill-down for findings, manual scan trigger.
-  - _Follow-up:_ Build authenticated `/scans` and `/findings` pages that call the controller APIs and wire up a manual scan action from the UI (coordinate with `frontend/README.md`).
-- ☐ Baseline RBAC model (admin vs. analyst), API key issuance, and audit logging.
-  - _Follow-up:_ Extend the controller's auth layer with role checks and API key lifecycle management, then document rotation procedures in `docs/CONTRIBUTING.md`.
+- ✅ Minimal Next.js dashboard listing scans, drill-down for findings, manual scan trigger.
+  - _Follow-up:_ Polish loading states, RBAC indicators, and pagination on `/scans` and `/findings` now that the manual nuclei launch flow is live.
+- ✅ Baseline RBAC model (admin vs. analyst), API key issuance, and audit logging.
+  - `/principals` now handles key lifecycle operations and `/audit-log` exposes immutable trails; both are enforced by scope-aware guards described in [docs/RBAC.md](docs/RBAC.md).
 
 > Exit Criteria: The Docker Compose stack reliably stands up controller, worker, Postgres, Redis, MinIO, and Qdrant; analysts trigger nuclei scans from the UI and observe stored findings; baseline RBAC (admin vs. analyst) with audit logging is enforced across the controller APIs.
 
 ## Phase 2 – Enrichment (Weeks 3–4)
-- NVD + CIRCL CVE lookups with deterministic confidence scoring.
-- Qdrant vector ingestion of scanner fingerprints and advisories.
-- Enrichment Agent attaches CVE metadata, exploitability hints, and remediation summaries.
-- UI highlights enriched findings and displays provenance of enrichment data.
+- ✅ NVD + CIRCL CVE lookups with deterministic confidence scoring implemented in [workers/enrichment/cve](workers/enrichment/cve) with the data contracts documented in [docs/interfaces/ENRICHMENT_CVE.md](docs/interfaces/ENRICHMENT_CVE.md).
+- ✅ Controller `/enrich` endpoint queues CVE enrichment jobs onto a dedicated worker channel, following the flow outlined in [docs/interfaces/ENRICHMENT_CVE.md](docs/interfaces/ENRICHMENT_CVE.md).
+- ✅ Qdrant vector ingestion of scanner fingerprints and advisories driven by the enrichment worker's persistence layer.
+- ✅ Enrichment agent attaches CVE metadata, exploitability hints, and remediation summaries returned by the CVE worker.
+- ✅ UI highlights enriched findings and displays provenance of enrichment data based on the `/enrich` lifecycle.
 
 ## Phase 3 – Binary Support (Weeks 5–6)
-- Preprocess agent (file type detection, triage rules, scope enforcement).
-- Static analyzers (checksec, bandit) with JSON adapters.
-- Fuzzing harness using AFL/libFuzzer container jobs with artifact collection in MinIO.
-- Binary findings schema aligned with web findings for unified reporting.
+- ✅ Preprocess agent (file type detection, triage rules, scope enforcement).
+- ✅ Static analyzers (checksec, bandit) with JSON adapters.
+- ✅ Fuzzing harness using AFL/libFuzzer container jobs with artifact collection in MinIO.
+- ✅ Binary findings schema aligned with web findings for unified reporting.
 
 ## Phase 4 – Multi-Scanner + Validator (Weeks 7–8)
-- Integrate ZAP and SQLMap workers with scope guardrails.
-- Validator agent performs targeted retests before findings are promoted.
-- Consolidated JSON schema and severity scoring rules.
-- Notification hooks (Slack, email) for critical findings after validation.
+- ✅ Integrate ZAP and SQLMap workers with scope guardrails (see [workers/web/zap/README.md](workers/web/zap/README.md) and [workers/web/sqlmap/README.md](workers/web/sqlmap/README.md)).
+- ✅ Validator agent performs targeted retests before findings are promoted.
+- ✅ Consolidated JSON schema and severity scoring rules.
+- ✅ Notification hooks (Slack, email) for critical findings after validation.
 
 ## Phase 5 – Kubernetes Orchestration (Weeks 9–10)
 - Helm chart for controller, workers, and dependencies.

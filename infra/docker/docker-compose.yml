@@ -81,9 +81,21 @@ services:
       MEDUSA_DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
       MEDUSA_REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
       MEDUSA_NUCLEI_QUEUE_CHANNEL: ${MEDUSA_NUCLEI_QUEUE_CHANNEL:-queues:nuclei:jobs}
+      MEDUSA_ZAP_QUEUE_CHANNEL: ${MEDUSA_ZAP_QUEUE_CHANNEL:-queues:zap:jobs}
+      MEDUSA_SQLMAP_QUEUE_CHANNEL: ${MEDUSA_SQLMAP_QUEUE_CHANNEL:-queues:sqlmap:jobs}
+      MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: ${MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL:-queues:enrichment:cve}
+      MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: ${MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL:-queues:binary:preprocess}
+      MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: ${MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL:-queues:binary:static-analysis}
+      MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: ${MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL:-queues:binary:fuzzing}
       MEDUSA_NUCLEI_CALLBACK_TOKEN: ${MEDUSA_NUCLEI_CALLBACK_TOKEN:-local-dev-nuclei-callback}
+      MEDUSA_ZAP_CALLBACK_TOKEN: ${MEDUSA_ZAP_CALLBACK_TOKEN:-local-dev-zap-callback}
+      MEDUSA_SQLMAP_CALLBACK_TOKEN: ${MEDUSA_SQLMAP_CALLBACK_TOKEN:-local-dev-sqlmap-callback}
+      MEDUSA_ENRICHMENT_CALLBACK_TOKEN: ${MEDUSA_ENRICHMENT_CALLBACK_TOKEN:-local-dev-enrichment-callback}
+      MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: ${MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN:-local-dev-binary-static-callback}
+      MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: ${MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN:-local-dev-binary-fuzzing-callback}
       MEDUSA_JWT_SECRET: ${MEDUSA_JWT_SECRET:-change-this-in-production}
-      MEDUSA_API_KEYS: ${MEDUSA_API_KEYS:-frontend-dev-key,nuclei-smoke-key}
+      MEDUSA_CVE_ENRICHMENT_QDRANT_URL: ${MEDUSA_CVE_ENRICHMENT_QDRANT_URL:-http://qdrant:6333}
+      MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION: ${MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION:-medusa-advisories}
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,6 +109,15 @@ services:
       - "${MEDUSA_CONTROLLER_PORT:-8000}:8000"
     volumes:
       - ../../controller:/app/controller:delegated
+      - principal_secrets:/var/lib/medusa
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        poetry run alembic upgrade head
+        poetry run python scripts/seed_principals.py --env-file /var/lib/medusa/principal_credentials.env
+        uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
       interval: 10s
@@ -113,7 +134,6 @@ services:
       - .env
     environment:
       CONTROLLER_API_BASE_URL: ${CONTROLLER_API_BASE_URL:-http://controller:8000}
-      CONTROLLER_API_KEY: ${CONTROLLER_API_KEY:-frontend-dev-key}
       CONTROLLER_JWT: ${CONTROLLER_JWT:-}
       DASHBOARD_BASIC_USER: ${DASHBOARD_BASIC_USER:-analyst}
       DASHBOARD_BASIC_PASSWORD: ${DASHBOARD_BASIC_PASSWORD:-analyst}
@@ -128,7 +148,22 @@ services:
       - ../../frontend:/app/frontend:delegated
       - frontend_node_modules:/app/frontend/node_modules
       - frontend_next_cache:/app/frontend/.next
-    command: ["/bin/sh", "-c", "pnpm install --prefer-offline --ignore-scripts && pnpm dev --hostname 0.0.0.0 --port 3000"]
+      - principal_secrets:/var/lib/medusa:ro
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        if [ -f /var/lib/medusa/principal_credentials.env ]; then
+          set -a
+          . /var/lib/medusa/principal_credentials.env
+          set +a
+        fi
+        if [ -z "${CONTROLLER_API_KEY}" ] && [ -n "${MEDUSA_ANALYST_API_KEY}" ]; then
+          export CONTROLLER_API_KEY="${MEDUSA_ANALYST_API_KEY}"
+        fi
+        pnpm install --prefer-offline --ignore-scripts
+        pnpm dev --hostname 0.0.0.0 --port 3000
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 15s
@@ -164,6 +199,175 @@ services:
     volumes:
       - ../../workers/web/nuclei:/app:delegated
 
+  zap-worker:
+    build:
+      context: ../..
+      dockerfile: workers/web/zap/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_zap_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      ZAP_QUEUE_KEY: ${ZAP_QUEUE_KEY:-queues:zap:jobs}
+      ZAP_DEAD_LETTER_KEY: ${ZAP_DEAD_LETTER_KEY:-queues:zap:dead}
+      ZAP_CALLBACK_TOKEN: ${ZAP_CALLBACK_TOKEN:-local-dev-zap-callback}
+      ZAP_CALLBACK_VERIFY_TLS: ${ZAP_CALLBACK_VERIFY_TLS:-false}
+      ZAP_CALLBACK_TIMEOUT: ${ZAP_CALLBACK_TIMEOUT:-30}
+      ZAP_POLL_TIMEOUT: ${ZAP_POLL_TIMEOUT:-2}
+      ZAP_MAX_RETRIES: ${ZAP_MAX_RETRIES:-3}
+      ZAP_WORK_DIR: ${ZAP_WORK_DIR:-/tmp/zap}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/web/zap:/app:delegated
+
+  sqlmap-worker:
+    build:
+      context: ../..
+      dockerfile: workers/web/sqlmap/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_sqlmap_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      SQLMAP_QUEUE_KEY: ${SQLMAP_QUEUE_KEY:-queues:sqlmap:jobs}
+      SQLMAP_DEAD_LETTER_KEY: ${SQLMAP_DEAD_LETTER_KEY:-queues:sqlmap:dead}
+      SQLMAP_CALLBACK_TOKEN: ${SQLMAP_CALLBACK_TOKEN:-local-dev-sqlmap-callback}
+      SQLMAP_CALLBACK_VERIFY_TLS: ${SQLMAP_CALLBACK_VERIFY_TLS:-false}
+      SQLMAP_CALLBACK_TIMEOUT: ${SQLMAP_CALLBACK_TIMEOUT:-30}
+      SQLMAP_POLL_TIMEOUT: ${SQLMAP_POLL_TIMEOUT:-2}
+      SQLMAP_MAX_RETRIES: ${SQLMAP_MAX_RETRIES:-3}
+      SQLMAP_WORK_DIR: ${SQLMAP_WORK_DIR:-/tmp/sqlmap}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/web/sqlmap:/app:delegated
+
+  binary-preprocess-worker:
+    build:
+      context: ../..
+      dockerfile: workers/binary/preprocess/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_binary_preprocess_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
+      BINARY_PREPROCESS_QUEUE_KEY: ${BINARY_PREPROCESS_QUEUE_KEY:-queues:binary:preprocess}
+      BINARY_PREPROCESS_DEAD_LETTER_KEY: ${BINARY_PREPROCESS_DEAD_LETTER_KEY:-queues:binary:preprocess:dead}
+      BINARY_METADATA_BUCKET: ${BINARY_METADATA_BUCKET:-binary-metadata}
+      BINARY_METADATA_PREFIX: ${BINARY_METADATA_PREFIX:-preprocess/metadata/}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-medusaadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-medusaadmin123}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ../../controller:/app/controller:delegated
+      - ../../workers/binary/preprocess:/app/workers/binary/preprocess:delegated
+
+  binary-fuzzing-worker:
+    build:
+      context: ../..
+      dockerfile: workers/binary/fuzzing/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_binary_fuzzing_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      BINARY_FUZZING_QUEUE_KEY: ${BINARY_FUZZING_QUEUE_KEY:-queues:binary:fuzzing}
+      BINARY_FUZZING_DEAD_LETTER_KEY: ${BINARY_FUZZING_DEAD_LETTER_KEY:-queues:binary:fuzzing:dead}
+      BINARY_FUZZING_BUCKET: ${BINARY_FUZZING_BUCKET:-}
+      BINARY_FUZZING_PREFIX: ${BINARY_FUZZING_PREFIX:-analysis/fuzzing/}
+      BINARY_FUZZING_POLL_TIMEOUT: ${BINARY_FUZZING_POLL_TIMEOUT:-5}
+      BINARY_FUZZING_MAX_ATTEMPTS: ${BINARY_FUZZING_MAX_ATTEMPTS:-3}
+      BINARY_FUZZING_RUNTIME: ${BINARY_FUZZING_RUNTIME:-docker}
+      BINARY_FUZZING_RUNTIME_FLAGS: ${BINARY_FUZZING_RUNTIME_FLAGS:-}
+      BINARY_FUZZING_AFL_IMAGE: ${BINARY_FUZZING_AFL_IMAGE:-docker.io/medusa/afl:latest}
+      BINARY_FUZZING_LIBFUZZER_IMAGE: ${BINARY_FUZZING_LIBFUZZER_IMAGE:-docker.io/medusa/libfuzzer:latest}
+      BINARY_FUZZING_AFL_COMMAND: ${BINARY_FUZZING_AFL_COMMAND:-/opt/medusa/run_afl}
+      BINARY_FUZZING_LIBFUZZER_COMMAND: ${BINARY_FUZZING_LIBFUZZER_COMMAND:-/opt/medusa/run_libfuzzer}
+      BINARY_FUZZING_ENABLE_AFL: ${BINARY_FUZZING_ENABLE_AFL:-1}
+      BINARY_FUZZING_ENABLE_LIBFUZZER: ${BINARY_FUZZING_ENABLE_LIBFUZZER:-1}
+      BINARY_FUZZING_MAX_DURATION: ${BINARY_FUZZING_MAX_DURATION:-900}
+      BINARY_FUZZING_CALLBACK_TOKEN: ${BINARY_FUZZING_CALLBACK_TOKEN:-local-dev-binary-fuzzing-callback}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-medusaadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-medusaadmin123}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ../../workers/binary/fuzzing:/app/workers/binary/fuzzing:delegated
+      # Reuse the host container runtime; tighten permissions in production.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+  cve-enrichment-worker:
+    build:
+      context: ../..
+      dockerfile: workers/enrichment/cve/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_cve_enrichment_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
+      BINARY_PREPROCESS_QUEUE_KEY: ${BINARY_PREPROCESS_QUEUE_KEY:-queues:binary:preprocess}
+      BINARY_PREPROCESS_DEAD_LETTER_KEY: ${BINARY_PREPROCESS_DEAD_LETTER_KEY:-queues:binary:preprocess:dead}
+      BINARY_METADATA_BUCKET: ${BINARY_METADATA_BUCKET:-binary-metadata}
+      BINARY_METADATA_PREFIX: ${BINARY_METADATA_PREFIX:-preprocess/metadata/}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-medusaadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-medusaadmin123}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      CVE_ENRICHMENT_QUEUE_KEY: ${CVE_ENRICHMENT_QUEUE_KEY:-queues:enrichment:cve}
+      CVE_ENRICHMENT_RESULT_QUEUE_KEY: ${CVE_ENRICHMENT_RESULT_QUEUE_KEY:-queues:enrichment:cve:results}
+      CVE_ENRICHMENT_ERROR_QUEUE_KEY: ${CVE_ENRICHMENT_ERROR_QUEUE_KEY:-queues:enrichment:cve:errors}
+      CVE_ENRICHMENT_MAX_ATTEMPTS: ${CVE_ENRICHMENT_MAX_ATTEMPTS:-3}
+      CVE_ENRICHMENT_RETRY_BACKOFF_SECONDS: ${CVE_ENRICHMENT_RETRY_BACKOFF_SECONDS:-2.0}
+      CVE_ENRICHMENT_QUEUE_POLL_TIMEOUT: ${CVE_ENRICHMENT_QUEUE_POLL_TIMEOUT:-5}
+      CVE_ENRICHMENT_HTTP_TIMEOUT: ${CVE_ENRICHMENT_HTTP_TIMEOUT:-30}
+      CVE_ENRICHMENT_QDRANT_URL: ${CVE_ENRICHMENT_QDRANT_URL:-http://qdrant:6333}
+      CVE_ENRICHMENT_QDRANT_COLLECTION: ${CVE_ENRICHMENT_QDRANT_COLLECTION:-medusa-advisories}
+      CVE_ENRICHMENT_QDRANT_API_KEY: ${CVE_ENRICHMENT_QDRANT_API_KEY:-}
+      CVE_ENRICHMENT_QDRANT_TIMEOUT: ${CVE_ENRICHMENT_QDRANT_TIMEOUT:-5}
+      CVE_ENRICHMENT_QDRANT_VECTOR_SIZE: ${CVE_ENRICHMENT_QDRANT_VECTOR_SIZE:-64}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ../../controller:/app/controller:delegated
+      - ../../workers/binary/preprocess:/app/workers/binary/preprocess:delegated
+      - ../../workers/enrichment/cve:/app:delegated
+      qdrant:
+        condition: service_healthy
+
 volumes:
   frontend_node_modules:
   frontend_next_cache:
+  principal_secrets:

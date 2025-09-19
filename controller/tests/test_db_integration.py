@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Optional
 
 import pytest
@@ -11,7 +12,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from controller.db.models import AuditLog, Base, Finding, Scan, Target
+from controller.db.models import (
+    AuditLog,
+    Base,
+    Finding,
+    FindingEnrichment,
+    Scan,
+    Target,
+)
 
 
 @pytest.fixture()
@@ -38,6 +46,16 @@ def _expected_finding_hash(evidence: dict, metadata: Optional[dict] = None) -> s
         "metadata": metadata or {},
         "evidence": evidence,
     }
+    normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _expected_audit_hash(snapshot: dict) -> str:
+    normalized = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _expected_json_hash(payload) -> str:
     normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
@@ -149,5 +167,77 @@ def test_audit_log_evidence_is_immutable(session: Session) -> None:
 
     with pytest.raises(ValueError):
         log.evidence_snapshot = {"status": "updated"}
+        session.flush()
+    session.rollback()
+
+
+def test_finding_enrichment_hashes_and_immutability(session: Session) -> None:
+    target = Target(name="Scope", scope="scope.example", is_authorized=True)
+    session.add(target)
+    session.flush()
+
+    scan = Scan(
+        target_id=target.id,
+        scanner="nuclei",
+        parameters={},
+        initiated_by="controller",
+        status="completed",
+    )
+    session.add(scan)
+    session.flush()
+
+    finding = Finding(
+        scan_id=scan.id,
+        title="Example",
+        severity="medium",
+        cve_id="CVE-2024-1111",
+        description="Example",
+        evidence={"path": "/"},
+        evidence_hash="",
+    )
+    session.add(finding)
+    session.flush()
+
+    advisories = [
+        {
+            "source": "nvd",
+            "identifier": "CVE-2024-1111",
+            "references": ["https://example.com"],
+            "raw": {"id": "CVE-2024-1111"},
+        }
+    ]
+    errors = {"circl": "timeout"}
+    provenance = {
+        "worker_subject": "worker:enrichment",
+        "received_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    enrichment = FindingEnrichment(
+        finding_id=finding.id,
+        job_id="job-orm-1",
+        generated_at=datetime.now(timezone.utc),
+        advisories=advisories,
+        advisories_hash="",
+        errors=errors,
+        errors_hash="",
+        provenance=provenance,
+        provenance_hash="",
+        payload_hash="",
+    )
+    session.add(enrichment)
+    session.commit()
+
+    assert enrichment.advisories_hash == _expected_json_hash(advisories)
+    assert enrichment.errors_hash == _expected_json_hash(errors)
+    assert enrichment.provenance_hash == _expected_json_hash(provenance)
+    composite = {
+        "advisories": enrichment.advisories_hash,
+        "errors": enrichment.errors_hash,
+        "provenance": enrichment.provenance_hash,
+    }
+    assert enrichment.payload_hash == _expected_json_hash(composite)
+
+    with pytest.raises(ValueError):
+        enrichment.errors = {}
         session.flush()
     session.rollback()

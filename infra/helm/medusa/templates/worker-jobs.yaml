@@ -1,0 +1,164 @@
+{{- range $name, $worker := .Values.workers }}
+{{- if $worker.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-worker-%s" (include "medusa.fullname" $) $name }}
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: {{ default (printf "%s-worker" $name) $worker.component }}
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+  annotations:
+    medusa.security/description: "Long-running worker job responsible for {{ $name }} tasks. Ensure RBAC scopes are limited."
+spec:
+  parallelism: {{ default 1 $worker.parallelism }}
+  completions: {{ default 1 $worker.completions }}
+  backoffLimit: {{ default 6 $worker.backoffLimit }}
+  {{- if $worker.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ $worker.ttlSecondsAfterFinished }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "medusa.name" $ }}
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+        app.kubernetes.io/component: {{ default (printf "%s-worker" $name) $worker.component }}
+        {{- range $k, $v := $worker.podLabels }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+      annotations:
+        {{- range $k, $v := $worker.podAnnotations }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: {{ $name }}
+          image: "{{ $worker.image.repository }}:{{ default $.Chart.AppVersion $worker.image.tag }}"
+          imagePullPolicy: {{ $worker.image.pullPolicy }}
+          {{- if $worker.command }}
+          command:
+            {{- toYaml $worker.command | nindent 12 }}
+          {{- end }}
+          {{- if $worker.args }}
+          args:
+            {{- toYaml $worker.args | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml $worker.securityContext | nindent 12 }}
+          {{- if or $worker.env.secretRefs (or $worker.env.values $worker.env.extra) }}
+          env:
+            {{- with $worker.env.secretRefs }}
+            {{- range $envName, $secretKey := . }}
+            - name: {{ $envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ $secretKey }}
+            {{- end }}
+            {{- end }}
+            {{- with $worker.env.values }}
+            {{- range $envName, $value := . }}
+            - name: {{ $envName }}
+              value: {{ tpl $value $ | quote }}
+            {{- end }}
+                  key: MEDUSA_REDIS_URL
+            {{- if eq $name "nuclei" }}
+            - name: NUCLEI_QUEUE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: MEDUSA_NUCLEI_QUEUE_CHANNEL
+            - name: NUCLEI_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: NUCLEI_CALLBACK_TOKEN
+            - name: NUCLEI_ARTIFACT_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: NUCLEI_ARTIFACT_BUCKET
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: S3_SECRET_KEY
+            - name: S3_ENDPOINT_URL
+              value: {{ printf "http://%s-minio:%d" (include "medusa.fullname" $) $.Values.minio.service.apiPort }}
+            {{- else if eq $name "cveEnrichment" }}
+            {{- $qdrantURL := default "" $worker.env.qdrant.urlOverride -}}
+            {{- if and (not $qdrantURL) (eq $.Values.secrets.strategy "inline") -}}
+              {{- $qdrantURL = tpl (default "" (index $.Values.secrets.inline "CVE_ENRICHMENT_QDRANT_URL")) $ -}}
+            {{- end -}}
+            {{- if not $qdrantURL -}}
+              {{- $qdrantURL = printf "http://%s-qdrant:%d" (include "medusa.fullname" $) $.Values.qdrant.service.httpPort -}}
+            {{- end -}}
+            - name: CVE_ENRICHMENT_QUEUE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "CVE_ENRICHMENT_QUEUE_KEY" $worker.env.queueSecretKey }}
+            - name: CVE_ENRICHMENT_RESULT_QUEUE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "CVE_ENRICHMENT_RESULT_QUEUE_KEY" $worker.env.resultQueueSecretKey }}
+            - name: CVE_ENRICHMENT_ERROR_QUEUE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "CVE_ENRICHMENT_ERROR_QUEUE_KEY" $worker.env.errorQueueSecretKey }}
+            - name: CVE_ENRICHMENT_MAX_ATTEMPTS
+              value: {{ default 3 $worker.env.maxAttempts | int | quote }}
+            - name: CVE_ENRICHMENT_RETRY_BACKOFF_SECONDS
+              value: {{ default 2 $worker.env.retryBackoffSeconds | quote }}
+            - name: CVE_ENRICHMENT_QUEUE_POLL_TIMEOUT
+              value: {{ default 5 $worker.env.pollTimeout | int | quote }}
+            - name: CVE_ENRICHMENT_HTTP_TIMEOUT
+              value: {{ default 30 $worker.env.httpTimeout | int | quote }}
+            - name: CVE_ENRICHMENT_QDRANT_URL
+              value: {{ $qdrantURL | quote }}
+            - name: CVE_ENRICHMENT_QDRANT_COLLECTION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "CVE_ENRICHMENT_QDRANT_COLLECTION" $worker.env.qdrant.collectionSecretKey }}
+            - name: CVE_ENRICHMENT_QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "CVE_ENRICHMENT_QDRANT_API_KEY" $worker.env.qdrant.apiKeySecretKey }}
+            - name: CVE_ENRICHMENT_QDRANT_TIMEOUT
+              value: {{ default 5 $worker.env.qdrant.timeoutSeconds | quote }}
+            - name: CVE_ENRICHMENT_QDRANT_VECTOR_SIZE
+              value: {{ default 64 $worker.env.qdrant.vectorSize | int | quote }}
+            - name: MEDUSA_ENRICHMENT_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_ENRICHMENT_CALLBACK_TOKEN" $worker.env.callbackTokenSecretKey }}
+            {{- end }}
+            {{- range $worker.env.extra }}
+            - {{- toYaml . | nindent 14 }}
+            {{- end }}
+          {{- end }}
+          {{- if $worker.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml $worker.extraVolumeMounts | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $worker.resources | nindent 12 }}
+      {{- if $worker.extraVolumes }}
+      volumes:
+        {{- toYaml $worker.extraVolumes | nindent 8 }}
+      {{- end }}
+---
+{{- end }}
+{{- end }}

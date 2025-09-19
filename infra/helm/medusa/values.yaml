@@ -1,0 +1,539 @@
+# Default values for the Medusa Helm chart.
+# These defaults intentionally assume a hardened production deployment.
+# Development-friendly overrides live in values-dev.yaml.
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+rbac:
+  create: true
+
+podSecurityStandards:
+  enabled: true
+  enforce: baseline
+  audit: restricted
+  warn: baseline
+  namespaceLabelsOnly: false
+
+secrets:
+  strategy: inline # one of [inline, externalSecret, sealedSecret]
+  name: medusa-secrets
+  inline:
+    MEDUSA_DATABASE_URL: "postgresql+psycopg2://medusa:medusa@postgresql:5432/medusa"
+    MEDUSA_REDIS_URL: "redis://redis-master:6379/0"
+    MEDUSA_NUCLEI_QUEUE_CHANNEL: "queues:nuclei:jobs"
+    MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: "queues:binary:preprocess"
+    MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: "queues:binary:static-analysis"
+    MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: "queues:binary:fuzzing"
+    MEDUSA_NUCLEI_CALLBACK_TOKEN: "change-me"
+    MEDUSA_ENRICHMENT_CALLBACK_TOKEN: "change-me"
+    MEDUSA_JWT_SECRET: "change-me"
+    MINIO_ROOT_USER: "medusaadmin"
+    MINIO_ROOT_PASSWORD: "medusaadmin123"
+    MINIO_SITE_REGION: "us-east-1"
+    MEDUSA_ANALYST_API_KEY: ""
+    NUCLEI_CALLBACK_TOKEN: "change-me"
+    NUCLEI_ARTIFACT_BUCKET: ""
+    S3_ACCESS_KEY: "medusaadmin"
+    S3_SECRET_KEY: "medusaadmin123"
+    S3_ACCESS_KEY_ID: "medusaadmin"
+    S3_SECRET_ACCESS_KEY: "medusaadmin123"
+    BINARY_PREPROCESS_DEAD_LETTER_KEY: "queues:binary:preprocess:dead"
+    BINARY_METADATA_BUCKET: "binary-metadata"
+    BINARY_METADATA_PREFIX: "preprocess/metadata/"
+    BINARY_FUZZING_DEAD_LETTER_KEY: "queues:binary:fuzzing:dead"
+    BINARY_FUZZING_BUCKET: ""
+    BINARY_FUZZING_PREFIX: "analysis/fuzzing/"
+    MEDUSA_POSTGRES_PASSWORD: "change-me"
+    MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: "queues:enrichment:cve"
+    MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: "change-me"
+    MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: "change-me"
+    CVE_ENRICHMENT_QUEUE_KEY: "queues:enrichment:cve"
+    CVE_ENRICHMENT_RESULT_QUEUE_KEY: "queues:enrichment:cve:results"
+    CVE_ENRICHMENT_ERROR_QUEUE_KEY: "queues:enrichment:cve:errors"
+    CVE_ENRICHMENT_QDRANT_URL: "{{ printf \"http://%s-qdrant:%d\" (include \"medusa.fullname\" .) .Values.qdrant.service.httpPort }}"
+    CVE_ENRICHMENT_QDRANT_COLLECTION: "medusa-advisories"
+    CVE_ENRICHMENT_QDRANT_API_KEY: ""
+  externalSecret:
+    secretStoreKind: ClusterSecretStore
+    secretStoreName: medusa-cluster-secrets
+    refreshInterval: 1h
+    data: []
+  sealedSecret:
+    encryptedData: {}
+    annotations: {}
+
+controller:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: ghcr.io/medusa/controller
+    tag: ""
+    pullPolicy: IfNotPresent
+  component: controller
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ""
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+  securityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  podSecurityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+  env:
+    extra: []
+  envFrom: []
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 6
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 30
+    periodSeconds: 20
+    failureThreshold: 6
+  service:
+    type: ClusterIP
+    port: 8000
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: medusa.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+postgresql:
+  enabled: true
+  image:
+    repository: postgres
+    tag: 15-alpine
+    pullPolicy: IfNotPresent
+  component: postgresql
+  primary:
+    persistence:
+      enabled: true
+      storageClass: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 10Gi
+  service:
+    port: 5432
+  securityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  env:
+    POSTGRES_DB: medusa
+    POSTGRES_USER: medusa
+    POSTGRES_PASSWORD_SECRET_KEY: MEDUSA_POSTGRES_PASSWORD
+    extra: []
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: 7.2-alpine
+    pullPolicy: IfNotPresent
+  component: redis
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
+  service:
+    port: 6379
+  securityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+minio:
+  enabled: true
+  image:
+    repository: quay.io/minio/minio
+    tag: RELEASE.2024-05-27T16-10-24Z
+    pullPolicy: IfNotPresent
+  component: minio
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+  service:
+    apiPort: 9000
+    consolePort: 9001
+    annotations: {}
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  env:
+    extra: []
+  consoleIngress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: minio.medusa.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+qdrant:
+  enabled: true
+  image:
+    repository: qdrant/qdrant
+    tag: v1.7.3
+    pullPolicy: IfNotPresent
+  component: qdrant
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+  service:
+    httpPort: 6333
+    grpcPort: 6334
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+workers:
+  nuclei:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-nuclei
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: nuclei-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        NUCLEI_QUEUE_KEY: MEDUSA_NUCLEI_QUEUE_CHANNEL
+        NUCLEI_CALLBACK_TOKEN: NUCLEI_CALLBACK_TOKEN
+        NUCLEI_ARTIFACT_BUCKET: NUCLEI_ARTIFACT_BUCKET
+        S3_ACCESS_KEY: S3_ACCESS_KEY
+        S3_SECRET_KEY: S3_SECRET_KEY
+      values:
+        S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+
+  binaryPreprocess:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-binary-preprocess
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: binary-preprocess-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        DATABASE_URL: MEDUSA_DATABASE_URL
+        BINARY_PREPROCESS_QUEUE_KEY: MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL
+        BINARY_PREPROCESS_DEAD_LETTER_KEY: BINARY_PREPROCESS_DEAD_LETTER_KEY
+        BINARY_METADATA_BUCKET: BINARY_METADATA_BUCKET
+        BINARY_METADATA_PREFIX: BINARY_METADATA_PREFIX
+        S3_ACCESS_KEY_ID: S3_ACCESS_KEY_ID
+        S3_SECRET_ACCESS_KEY: S3_SECRET_ACCESS_KEY
+      values:
+        S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
+        AWS_DEFAULT_REGION: "us-east-1"
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    extraVolumeMounts: []
+    extraVolumes: []
+
+  binaryFuzzing:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-binary-fuzzing
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: binary-fuzzing-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        BINARY_FUZZING_QUEUE_KEY: MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL
+        BINARY_FUZZING_DEAD_LETTER_KEY: BINARY_FUZZING_DEAD_LETTER_KEY
+        BINARY_FUZZING_BUCKET: BINARY_FUZZING_BUCKET
+        BINARY_FUZZING_PREFIX: BINARY_FUZZING_PREFIX
+        BINARY_FUZZING_CALLBACK_TOKEN: MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN
+        S3_ACCESS_KEY_ID: S3_ACCESS_KEY_ID
+        S3_SECRET_ACCESS_KEY: S3_SECRET_ACCESS_KEY
+      values:
+        S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
+        AWS_DEFAULT_REGION: "us-east-1"
+        BINARY_FUZZING_POLL_TIMEOUT: "5"
+        BINARY_FUZZING_MAX_ATTEMPTS: "3"
+        BINARY_FUZZING_RUNTIME: "docker"
+        BINARY_FUZZING_RUNTIME_FLAGS: ""
+        BINARY_FUZZING_AFL_IMAGE: "docker.io/medusa/afl:latest"
+        BINARY_FUZZING_LIBFUZZER_IMAGE: "docker.io/medusa/libfuzzer:latest"
+        BINARY_FUZZING_AFL_COMMAND: "/opt/medusa/run_afl"
+        BINARY_FUZZING_LIBFUZZER_COMMAND: "/opt/medusa/run_libfuzzer"
+        BINARY_FUZZING_ENABLE_AFL: "1"
+        BINARY_FUZZING_ENABLE_LIBFUZZER: "1"
+        BINARY_FUZZING_MAX_DURATION: "900"
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    extraVolumeMounts: []
+    extraVolumes: []
+  cveEnrichment:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-cve-enrichment
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: cve-enrichment-worker
+    command: []
+    args: []
+    env:
+      maxAttempts: 3
+      retryBackoffSeconds: 2
+      pollTimeout: 5
+      httpTimeout: 30
+      callbackTokenSecretKey: MEDUSA_ENRICHMENT_CALLBACK_TOKEN
+      queueSecretKey: CVE_ENRICHMENT_QUEUE_KEY
+      resultQueueSecretKey: CVE_ENRICHMENT_RESULT_QUEUE_KEY
+      errorQueueSecretKey: CVE_ENRICHMENT_ERROR_QUEUE_KEY
+      qdrant:
+        urlOverride: ""
+        urlSecretKey: CVE_ENRICHMENT_QDRANT_URL
+        collectionSecretKey: CVE_ENRICHMENT_QDRANT_COLLECTION
+        apiKeySecretKey: CVE_ENRICHMENT_QDRANT_API_KEY
+        timeoutSeconds: 5
+        vectorSize: 64
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+
+networkPolicies:
+  enabled: true
+  controller:
+    allowedNamespaces: []
+  ingress:
+    enabled: true
+  egress:
+    enabled: true
+
+metrics:
+  prometheus:
+    enabled: false
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+  grafana:
+    enabled: false
+    dashboards:
+      enabled: true
+      folder: Medusa
+      annotations: {}
+    datasources:
+      enabled: true
+      url: ""
+      annotations: {}
+
+grafana:
+  adminUser: admin
+  adminPassword: "changeme"
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+      provider:
+        name: medusa-dashboards
+        orgId: 1
+        folder: Medusa
+        type: file
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      searchNamespace: ALL
+
+kubeconform:
+  strict: true
+  additionalArgs: []

@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 *.so
 .env
+.env.local
 .venv
 .envrc
 poetry.lock

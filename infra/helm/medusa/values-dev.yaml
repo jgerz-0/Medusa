@@ -1,0 +1,189 @@
+# Development overrides that mirror infra/docker/docker-compose.yml.
+# These values intentionally trade resiliency for fast local iteration.
+
+controller:
+  replicaCount: 1
+  image:
+    repository: medusa/controller
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8000
+  persistence:
+    enabled: false
+
+postgresql:
+  primary:
+    persistence:
+      enabled: false
+  env:
+    POSTGRES_DB: medusa
+    POSTGRES_USER: medusa
+    POSTGRES_PASSWORD_SECRET_KEY: MEDUSA_POSTGRES_PASSWORD
+
+redis:
+  persistence:
+    enabled: false
+
+minio:
+  persistence:
+    enabled: false
+
+qdrant:
+  persistence:
+    enabled: false
+
+workers:
+  nuclei:
+    image:
+      repository: medusa/worker-nuclei
+      tag: latest
+    env:
+      extra:
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_REDIS_URL
+        - name: NUCLEI_QUEUE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_NUCLEI_QUEUE_CHANNEL
+        - name: NUCLEI_DEAD_LETTER_KEY
+          value: queues:nuclei:dead
+        - name: NUCLEI_CALLBACK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: NUCLEI_CALLBACK_TOKEN
+        - name: NUCLEI_CALLBACK_VERIFY_TLS
+          value: "false"
+        - name: NUCLEI_CALLBACK_TIMEOUT
+          value: "30"
+        - name: NUCLEI_POLL_TIMEOUT
+          value: "2"
+        - name: NUCLEI_MAX_RETRIES
+          value: "3"
+        - name: S3_ENDPOINT_URL
+          value: http://medusa-medusa-minio:9000
+        - name: S3_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_ACCESS_KEY
+        - name: S3_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_SECRET_KEY
+        - name: NUCLEI_ARTIFACT_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: NUCLEI_ARTIFACT_BUCKET
+
+  binaryFuzzing:
+    image:
+      repository: medusa/worker-binary-fuzzing
+      tag: latest
+    env:
+      extra:
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_REDIS_URL
+        - name: BINARY_FUZZING_QUEUE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL
+        - name: BINARY_FUZZING_DEAD_LETTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: BINARY_FUZZING_DEAD_LETTER_KEY
+        - name: BINARY_FUZZING_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: BINARY_FUZZING_BUCKET
+        - name: BINARY_FUZZING_PREFIX
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: BINARY_FUZZING_PREFIX
+        - name: BINARY_FUZZING_CALLBACK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN
+        - name: S3_ENDPOINT_URL
+          value: http://medusa-medusa-minio:9000
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_ACCESS_KEY_ID
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_SECRET_ACCESS_KEY
+        - name: AWS_DEFAULT_REGION
+          value: us-east-1
+        - name: BINARY_FUZZING_POLL_TIMEOUT
+          value: "5"
+        - name: BINARY_FUZZING_MAX_ATTEMPTS
+          value: "3"
+        - name: BINARY_FUZZING_RUNTIME
+          value: docker
+        - name: BINARY_FUZZING_RUNTIME_FLAGS
+          value: ""
+        - name: BINARY_FUZZING_AFL_IMAGE
+          value: docker.io/medusa/afl:latest
+        - name: BINARY_FUZZING_LIBFUZZER_IMAGE
+          value: docker.io/medusa/libfuzzer:latest
+        - name: BINARY_FUZZING_AFL_COMMAND
+          value: /opt/medusa/run_afl
+        - name: BINARY_FUZZING_LIBFUZZER_COMMAND
+          value: /opt/medusa/run_libfuzzer
+        - name: BINARY_FUZZING_ENABLE_AFL
+          value: "1"
+        - name: BINARY_FUZZING_ENABLE_LIBFUZZER
+          value: "1"
+        - name: BINARY_FUZZING_MAX_DURATION
+          value: "900"
+
+secrets:
+  strategy: inline
+  inline:
+    MEDUSA_DATABASE_URL: postgresql+psycopg2://medusa:medusa@postgresql:5432/medusa
+    MEDUSA_REDIS_URL: redis://redis:6379/0
+    MEDUSA_NUCLEI_QUEUE_CHANNEL: queues:nuclei:jobs
+    MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: queues:binary:preprocess
+    MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: queues:binary:static-analysis
+    MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: queues:binary:fuzzing
+    MEDUSA_NUCLEI_CALLBACK_TOKEN: local-dev-nuclei-callback
+    MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: local-dev-binary-static-callback
+    MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: local-dev-binary-fuzzing-callback
+    MEDUSA_JWT_SECRET: change-this-in-production
+    MINIO_ROOT_USER: medusaadmin
+    MINIO_ROOT_PASSWORD: medusaadmin123
+    MINIO_SITE_REGION: us-east-1
+    MEDUSA_ANALYST_API_KEY: ""
+    NUCLEI_CALLBACK_TOKEN: local-dev-nuclei-callback
+    NUCLEI_ARTIFACT_BUCKET: ""
+    S3_ACCESS_KEY: medusaadmin
+    S3_SECRET_KEY: medusaadmin123
+    S3_ACCESS_KEY_ID: medusaadmin
+    S3_SECRET_ACCESS_KEY: medusaadmin123
+    MEDUSA_POSTGRES_PASSWORD: medusa
+    BINARY_PREPROCESS_DEAD_LETTER_KEY: queues:binary:preprocess:dead
+    BINARY_METADATA_BUCKET: binary-metadata
+    BINARY_METADATA_PREFIX: preprocess/metadata/
+    BINARY_FUZZING_DEAD_LETTER_KEY: queues:binary:fuzzing:dead
+    BINARY_FUZZING_BUCKET: ""
+    BINARY_FUZZING_PREFIX: analysis/fuzzing/

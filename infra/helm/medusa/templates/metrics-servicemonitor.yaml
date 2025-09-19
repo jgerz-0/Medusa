@@ -1,0 +1,30 @@
+{{- if and .Values.metrics.prometheus.enabled .Values.metrics.prometheus.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "medusa.fullname" . }}-controller
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    medusa.security/description: "Scrape Medusa controller metrics via the Prometheus Operator."
+    {{- range $k, $v := .Values.metrics.prometheus.serviceMonitor.labels }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "medusa.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ default "30s" .Values.metrics.prometheus.serviceMonitor.interval }}
+      scrapeTimeout: {{ default "10s" .Values.metrics.prometheus.serviceMonitor.scrapeTimeout }}
+      honorLabels: false
+{{- end }}

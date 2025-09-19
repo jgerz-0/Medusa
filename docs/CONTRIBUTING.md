@@ -116,6 +116,24 @@ pnpm run typecheck
 - Deterministic scanner results remain the source of truth; AI enrichment is additive only.
 - Follow least privilege when modifying Kubernetes manifests or Terraform modules.
 
+## RBAC quick reference
+
+- **Administrators (`admin`)** – may issue/revoke credentials, review the audit log, manage
+  target scope, and enqueue scans or enrichment jobs. Admin API keys carry the full
+  `DEFAULT_ADMIN_ROLES` set.
+- **Analysts (`analyst`)** – limited to operating scans, viewing findings, and enqueueing
+  enrichment. Analysts cannot view `/principals` or mutate credentials.
+- **Service roles** – purpose-specific scopes such as `scan:enqueue` or
+  `enrich:enqueue`. Grant only the minimum roles required for automation.
+
+Authorization responses are deterministic:
+
+- API keys are hashed with `_hash_secret` on ingress and matched against
+  `principal_credentials.key_hash`.
+- Revoked or unauthorized attempts are denied through the `access_denied` audit event,
+  capturing the required roles, granted roles, and a rotation fingerprint for each key.
+- Every denial writes to `audit_log`, enabling SOC teams to trace credential misuse.
+
 ## Credential rotation procedures
 
 Controller credentials are short-lived secrets; rotate them whenever an operator leaves the
@@ -142,8 +160,12 @@ engagement, a secret is exposed, or during scheduled quarterly maintenance.
    curl -X POST -H "X-API-Key: <admin-key>" \
         https://controller.internal/principals/<credential-id>/revoke
    ```
-5. Verify the old key is rejected (`401 Unauthorized`) and capture the audit trail entry in
-   `audit_events`.
+5. Validate rotation telemetry:
+   - Retry an authenticated call with the revoked key; it must return `401` with `"API key revoked"`.
+   - Query `/audit-log` as an admin and confirm an `access_denied` record exists with
+     `reason="credential_revoked"` and a `rotation.key_fingerprint` matching the truncated
+     hash returned during issuance.
+   - Ensure no clear-text secrets appear in audit payloads; only hashed fingerprints are stored.
 
 ### JWT subjects
 
