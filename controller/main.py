@@ -10,11 +10,10 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
-from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
-from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -33,14 +32,7 @@ from redis import Redis
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
-from controller.db.models import (
-    AuditLog,
-    Finding,
-    FindingEnrichment,
-    PrincipalCredential,
-    Scan,
-    Target,
-)
+from controller.db.models import AuditLog, Finding, PrincipalCredential, Scan, Target
 from controller.db.session import SessionLocal
 from workers.enrichment.cve.schemas import CVEEnrichmentResult
 
@@ -103,12 +95,16 @@ class Settings(BaseSettings):
     nuclei_queue_channel: str = Field(
         "queues:nuclei:jobs", description="Redis list channel for nuclei scan jobs."
     )
+    jwt_secret: str = Field(
+        ..., description="JWT secret used to validate bearer tokens."
+    )
+    api_keys: List[str] = Field(
+        default_factory=list,
+        description="Static API keys for service accounts granted admin roles by default.",
+    )
     cve_enrichment_queue_channel: str = Field(
         "queues:enrichment:cve",
         description="Redis list channel for CVE enrichment jobs.",
-    )
-    jwt_secret: str = Field(
-        ..., description="JWT secret used to validate bearer tokens."
     )
     nuclei_callback_token: str = Field(
         ..., description="Shared secret token required for nuclei worker callbacks."
@@ -126,7 +122,6 @@ def get_settings() -> Settings:
 
     return Settings()
 
-
 security_scheme = HTTPBearer(auto_error=False)
 
 
@@ -137,16 +132,13 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {}
     return payload
 
-
-def _hash_secret(secret: str) -> str:
-    """Return a SHA-256 hash of the provided secret."""
-
-    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
-
-
 Network = Union[IPv4Network, IPv6Network]
 
+security_scheme = HTTPBearer(auto_error=False)
 
+def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ensure JSON payloads are deterministic dictionaries."""
+    
 def _normalize_hostname(value: str) -> str:
     """Return a lowercase hostname without trailing dots or wildcard prefixes."""
 
@@ -155,6 +147,14 @@ def _normalize_hostname(value: str) -> str:
         normalized = normalized[2:]
     return normalized
 
+    if payload is None:
+        return {}
+    return payload
+
+def _hash_secret(secret: str) -> str:
+    """Return a SHA-256 hash of the provided secret."""
+
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 def _scope_to_network(scope: str) -> Optional[Network]:
     """Attempt to parse the target scope as an IP network."""
@@ -255,6 +255,7 @@ class TargetResponse(BaseModel):
 class TargetCollectionResponse(BaseModel):
     data: List[TargetResponse]
 
+      
 class ScanRequest(BaseModel):
     target_id: str
     scanner: str = Field(
@@ -359,6 +360,7 @@ class FindingEnrichmentSummary(BaseModel):
     provenance: Dict[str, Any] = Field(default_factory=dict)
     provenance_hash: str
     payload_hash: str
+      
 class FindingResponse(BaseModel):
     id: str
     scan_id: str
@@ -373,8 +375,6 @@ class FindingResponse(BaseModel):
     evidence: Optional[str]
     remediation: Optional[str]
     enrichments: List[FindingEnrichmentSummary] = Field(default_factory=list)
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class FindingCollectionResponse(BaseModel):
@@ -530,7 +530,6 @@ def get_db_session() -> Iterator[Session]:
 def get_queue_client(settings: Settings = Depends(get_settings)) -> QueueClient:
     return RedisQueueClient(settings.redis_url)
 
-
 def _authenticate_callback_worker(
     request: Request,
     *,
@@ -558,17 +557,12 @@ def authenticate(
     bearer_token = credentials.credentials if credentials else None
 
     candidate_api_key = api_key_header or bearer_token
-    if candidate_api_key:
-        api_key_hash = _hash_secret(candidate_api_key)
-
-        active_credential = (
-            db.query(PrincipalCredential)
-            .filter(
-                PrincipalCredential.auth_method == "api_key",
-                PrincipalCredential.key_hash == api_key_hash,
-                PrincipalCredential.revoked_at.is_(None),
-            )
-            .first()
+    if candidate_api_key and candidate_api_key in settings.api_keys:
+        subject_hash = _hash_secret(candidate_api_key)
+        return Principal(
+            subject=f"apikey:{subject_hash}",
+            auth_method="api_key",
+            roles=list(DEFAULT_ADMIN_ROLES),
         )
         if active_credential:
             roles = list(active_credential.roles or [])
@@ -664,6 +658,9 @@ def authenticate_worker(
 
     token = request.headers.get("X-Callback-Token")
     if not token or token != settings.nuclei_callback_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid callback token"
+          
         worker_principal = Principal(
             subject="worker:nuclei",
             auth_method="shared_secret",
@@ -688,6 +685,13 @@ def authenticate_enrichment_worker(
 ) -> Principal:
     """Authenticate enrichment worker callbacks using a dedicated shared secret."""
 
+def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
+    if principal.has_role(ROLE_ADMIN):
+        return
+    if not principal.has_any_role(required_roles):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient role for this operation",
     return _authenticate_callback_worker(
         request,
         expected_token=settings.enrichment_callback_token,
@@ -1060,13 +1064,7 @@ def create_target(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetResponse:
-    enforce_roles(
-        principal,
-        [ROLE_TARGETS_WRITE],
-        db,
-        resource_type="endpoint",
-        resource_id="/targets",
-    )
+    enforce_roles(principal, [ROLE_TARGETS_WRITE])
     existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
         raise HTTPException(
@@ -1099,13 +1097,7 @@ def list_targets(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetCollectionResponse:
-    enforce_roles(
-        principal,
-        [ROLE_TARGETS_READ],
-        db,
-        resource_type="endpoint",
-        resource_id="/targets",
-    )
+    enforce_roles(principal, [ROLE_TARGETS_READ])
     targets = db.query(Target).order_by(Target.created_at.desc()).all()
 
     record_audit_event(
@@ -1130,13 +1122,7 @@ def enqueue_scan(
     queue: QueueClient = Depends(get_queue_client),
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
-    enforce_roles(
-        principal,
-        [ROLE_SCAN_ENQUEUE],
-        db,
-        resource_type="endpoint",
-        resource_id="/scan",
-    )
+    enforce_roles(principal, [ROLE_SCAN_ENQUEUE])
 
     target = db.get(Target, request.target_id)
     if target is None:
@@ -1221,7 +1207,6 @@ def enqueue_scan(
 
     return serialize_scan(scan)
 
-
 @app.post("/enrich", response_model=EnrichmentResponse, status_code=status.HTTP_202_ACCEPTED)
 def enqueue_enrichment(
     request: EnrichmentRequest,
@@ -1281,7 +1266,6 @@ def enqueue_enrichment(
         sources=list(request.sources),
     )
 
-
 app.add_api_route(
     "/scans",
     enqueue_scan,
@@ -1298,13 +1282,7 @@ def list_scans(
 ) -> ScanCollectionResponse:
     """Return the most recent scans for the authenticated principal."""
 
-    enforce_roles(
-        principal,
-        [ROLE_SCANS_READ],
-        db,
-        resource_type="endpoint",
-        resource_id="/scans",
-    )
+    enforce_roles(principal, [ROLE_SCANS_READ])
     query = db.query(Scan).options(
         selectinload(Scan.target), selectinload(Scan.findings)
     )
@@ -1515,16 +1493,8 @@ def list_findings(
 ) -> FindingCollectionResponse:
     """Return the latest findings for the requested scope."""
 
-    enforce_roles(
-        principal,
-        [ROLE_FINDINGS_READ],
-        db,
-        resource_type="endpoint",
-        resource_id="/findings",
-    )
-  
-    query = db.query(Finding).options(selectinload(Finding.enrichments))
-
+    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    query = db.query(Finding)
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
     elif target_id is not None:
@@ -1555,21 +1525,8 @@ def get_finding(
 ) -> FindingItemResponse:
     """Fetch a single finding for detailed analysis views."""
 
-    enforce_roles(
-        principal,
-        [ROLE_FINDINGS_READ],
-        db,
-        resource_type="endpoint",
-        resource_id=f"/findings/{finding_id}",
-    )
-  
-    finding = (
-        db.query(Finding)
-        .options(selectinload(Finding.enrichments))
-        .filter(Finding.id == finding_id)
-        .first()
-    )
-    
+    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    finding = db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"

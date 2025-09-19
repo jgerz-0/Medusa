@@ -60,6 +60,11 @@ def _expected_json_hash(payload) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _expected_audit_hash(snapshot: dict) -> str:
+    normalized = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def test_target_scan_finding_crud(session: Session) -> None:
     target = Target(name="Authorized Demo", scope="demo.medusa", is_authorized=True)
     session.add(target)

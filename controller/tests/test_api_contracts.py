@@ -8,16 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import jwt
-
-from controller.db.models import (
-    AuditLog,
-    Base,
-    Finding,
-    FindingEnrichment,
-    PrincipalCredential,
-    Scan,
-    Target,
-)
+from controller.db.models import AuditLog, Base, Finding, PrincipalCredential, Scan, Target
 from controller.main import (
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
@@ -102,7 +93,6 @@ def api_client() -> (
 
 def auth_headers() -> dict[str, str]:
     return {"X-API-Key": "test-key"}
-
 
 def enrichment_headers() -> dict[str, str]:
     return {"X-Callback-Token": "enrichment-secret"}
