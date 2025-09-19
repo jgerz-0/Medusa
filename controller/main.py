@@ -367,13 +367,52 @@ def authenticate(
     bearer_token = credentials.credentials if credentials else None
 
     candidate_api_key = api_key_header or bearer_token
-    if candidate_api_key and candidate_api_key in settings.api_keys:
-        subject_hash = _hash_secret(candidate_api_key)
-        return Principal(
-            subject=f"apikey:{subject_hash}",
-            auth_method="api_key",
-            roles=list(DEFAULT_ADMIN_ROLES),
+    if candidate_api_key:
+        api_key_hash = _hash_secret(candidate_api_key)
+
+        active_credential = (
+            db.query(PrincipalCredential)
+            .filter(
+                PrincipalCredential.auth_method == "api_key",
+                PrincipalCredential.key_hash == api_key_hash,
+                PrincipalCredential.revoked_at.is_(None),
+            )
+            .first()
         )
+        if active_credential:
+            roles = list(active_credential.roles or [])
+            return Principal(
+                subject=active_credential.subject,
+                auth_method="api_key",
+                roles=roles,
+            )
+
+        revoked_credential = (
+            db.query(PrincipalCredential)
+            .filter(
+                PrincipalCredential.auth_method == "api_key",
+                PrincipalCredential.key_hash == api_key_hash,
+                PrincipalCredential.revoked_at.isnot(None),
+            )
+            .first()
+        )
+        if revoked_credential:
+            LOGGER.warning(
+                "Rejected revoked API key",
+                extra={"subject": revoked_credential.subject},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="API key revoked",
+            )
+
+        if candidate_api_key in settings.api_keys:
+            subject_hash = api_key_hash
+            return Principal(
+                subject=f"apikey:{subject_hash}",
+                auth_method="api_key",
+                roles=list(DEFAULT_ADMIN_ROLES),
+            )
 
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(

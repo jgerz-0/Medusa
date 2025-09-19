@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Generator, Tuple
 
 import pytest
@@ -11,8 +11,11 @@ import jwt
 
 from controller.db.models import AuditLog, Base, Finding, PrincipalCredential, Scan, Target
 from controller.main import (
+    DEFAULT_ADMIN_ROLES,
+    DEFAULT_ANALYST_ROLES,
     QueueClient,
     Settings,
+    _hash_secret,
     app,
     get_db_session,
     get_queue_client,
@@ -52,6 +55,16 @@ def api_client() -> (
     SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
 
     queue = InMemoryQueue()
+
+    with SessionFactory() as session:
+        bootstrap_credential = PrincipalCredential(
+            subject="bootstrap-admin",
+            auth_method="api_key",
+            key_hash=_hash_secret("test-key"),
+            roles=list(DEFAULT_ADMIN_ROLES),
+        )
+        session.add(bootstrap_credential)
+        session.commit()
 
     def override_settings() -> Settings:
         return settings
@@ -344,3 +357,36 @@ def test_principal_creation_validates_and_expands_roles(
             "targets:write",
         ]
     )
+
+
+def test_api_key_revocation_enforced_and_audited(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    response = client.get("/targets", headers=auth_headers())
+    assert response.status_code == 200
+
+    with session_factory() as session:
+        audit_entries = session.query(AuditLog).all()
+        assert any(entry.action == "list_targets" for entry in audit_entries)
+        initial_audit_count = len(audit_entries)
+
+        revoked_credential = PrincipalCredential(
+            subject="revoked-service",
+            auth_method="api_key",
+            key_hash=_hash_secret("revoked-key"),
+            roles=list(DEFAULT_ANALYST_ROLES),
+            revoked_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(revoked_credential)
+        session.commit()
+
+    revoked_response = client.get(
+        "/targets", headers={"X-API-Key": "revoked-key"}
+    )
+    assert revoked_response.status_code == 403
+
+    with session_factory() as session:
+        audit_actions = [entry.action for entry in session.query(AuditLog).all()]
+    assert audit_actions.count("list_targets") == initial_audit_count
