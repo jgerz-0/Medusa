@@ -25,8 +25,117 @@ from controller.main import (
     Settings,
     _hash_secret,
     app,
+    get_db_session,
+    get_notification_service,
+    get_queue_client,
+    get_settings,
 )
+from controller.notifications import CriticalFindingNotification, NotificationService
 from controller.tests.conftest import InMemoryQueue
+
+
+class InMemoryQueue(QueueClient):
+    def __init__(self) -> None:
+        self.messages: list[Tuple[str, dict]] = []
+
+    def enqueue(self, channel: str, payload: dict) -> None:  # type: ignore[override]
+        self.messages.append((channel, payload))
+
+
+class DummyNotificationService(NotificationService):
+    def __init__(self) -> None:
+        super().__init__(
+            slack_webhook=None,
+            email_sender=None,
+            email_recipients=[],
+            smtp_host=None,
+            smtp_port=None,
+            smtp_username=None,
+            smtp_password=None,
+            smtp_use_tls=False,
+        )
+
+    def notify_critical_finding(  # type: ignore[override]
+        self, payload: CriticalFindingNotification
+    ) -> None:
+        return
+
+
+@pytest.fixture()
+def api_client() -> (
+    Generator[Tuple[TestClient, InMemoryQueue, sessionmaker, Settings], None, None]
+):
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    settings = Settings(
+        database_url="sqlite+pysqlite:///:memory:",
+        redis_url="redis://localhost:6379/0",
+        nuclei_queue_channel="nuclei:test",
+        zap_queue_channel="zap:test",
+        sqlmap_queue_channel="sqlmap:test",
+        validator_queue_channel="validator:test",
+        jwt_secret="unit-test-secret",
+        nuclei_callback_token="callback-secret",
+        zap_callback_token="zap-callback",
+        sqlmap_callback_token="sqlmap-callback",
+        validator_callback_token="validator-callback",
+        enrichment_callback_token="enrichment-secret",
+        binary_static_analysis_queue_channel="binary-static:test",
+        binary_static_analysis_callback_token="binary-static-secret",
+        binary_fuzzing_queue_channel="binary-fuzzing:test",
+        binary_fuzzing_callback_token="binary-fuzzing-secret",
+    )
+
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    queue = InMemoryQueue()
+    notification_service = DummyNotificationService()
+
+    with SessionFactory() as session:
+        bootstrap_credential = PrincipalCredential(
+            subject="bootstrap-admin",
+            auth_method="api_key",
+            key_hash=_hash_secret("test-key"),
+            roles=list(DEFAULT_ADMIN_ROLES),
+        )
+        session.add(bootstrap_credential)
+        session.commit()
+
+    def override_settings() -> Settings:
+        return settings
+
+    def override_session() -> Generator[Session, None, None]:
+        session = SessionFactory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def override_queue() -> InMemoryQueue:
+        return queue
+
+    def override_notification() -> DummyNotificationService:
+        return notification_service
+
+    app.dependency_overrides[get_settings] = override_settings
+    app.dependency_overrides[get_db_session] = override_session
+    app.dependency_overrides[get_queue_client] = override_queue
+    app.dependency_overrides[get_notification_service] = override_notification
+
+    with TestClient(app) as client:
+        yield client, queue, SessionFactory, settings
+
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+)
 
 
 def auth_headers() -> dict[str, str]:
@@ -918,7 +1027,7 @@ def test_finding_contracts(
     assert finding_item["id"] == finding_id
     assert finding_item["scan_id"] == scan_id
     assert finding_item["severity"] == "high"
-    assert finding_item["status"] == "open"
+    assert finding_item["status"] == "pending_validation"
     assert finding_item["template_id"] == "CVE-2024-0001"
     assert finding_item["evidence"]
     assert finding_item["enrichments"] == []

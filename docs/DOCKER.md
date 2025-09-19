@@ -9,7 +9,7 @@ This guide covers the Phase 1 local Docker Compose environment. It stands up eve
 - 20 GB free disk space for container images, Postgres, MinIO, and Qdrant data directories
 
 ## Compose Manifests
-- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, SQLMap, binary preprocess, and binary fuzzing workers, plus the Next.js frontend.
+- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, SQLMap, validator, binary preprocess, and binary fuzzing workers, plus the Next.js frontend.
 - `infra/docker/controller.Dockerfile` – Poetry-based image for the controller with Uvicorn hot reload enabled.
 - `infra/docker/frontend.Dockerfile` – Node 20 + pnpm image for the dashboard.
 - `infra/docker/.env.example` – sane defaults for development credentials and exposed ports.
@@ -39,6 +39,7 @@ following secrets are set before starting the stack:
 - `MEDUSA_NUCLEI_CALLBACK_TOKEN`
 - `MEDUSA_ZAP_CALLBACK_TOKEN`
 - `MEDUSA_SQLMAP_CALLBACK_TOKEN`
+- `MEDUSA_VALIDATOR_CALLBACK_TOKEN`
 - `MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN`
 - `MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN`
 - `BINARY_PREPROCESS_QUEUE_KEY`
@@ -49,6 +50,8 @@ following secrets are set before starting the stack:
 - `BINARY_FUZZING_DEAD_LETTER_KEY`
 - `BINARY_FUZZING_BUCKET` (optional, defaults to the source artifact bucket)
 - `BINARY_FUZZING_PREFIX`
+- `VALIDATOR_QUEUE_KEY`
+- `VALIDATOR_DEAD_LETTER_KEY`
 - `S3_ACCESS_KEY_ID`
 - `S3_SECRET_ACCESS_KEY`
 - `MEDUSA_ENRICHMENT_CALLBACK_TOKEN`

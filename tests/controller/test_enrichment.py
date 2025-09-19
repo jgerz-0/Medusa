@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from datetime import datetime
+
 import pytest
 
 from controller.db.models import Finding, Scan, Target
@@ -7,7 +9,7 @@ from controller.db.models import Finding, Scan, Target
 
 @pytest.mark.usefixtures("client")
 def test_enqueue_enrichment_job(client):
-    test_client, settings, SessionLocal, queue = client
+    test_client, settings, SessionLocal, queue, _notification_service = client
     with SessionLocal() as session:
         target = Target(name="demo", scope="demo.example", is_authorized=True)
         session.add(target)
@@ -59,7 +61,7 @@ def test_enqueue_enrichment_job(client):
 
 
 def test_enqueue_enrichment_missing_finding(client):
-    test_client, settings, SessionLocal, queue = client
+    test_client, settings, SessionLocal, queue, _notification_service = client
 
     response = test_client.post(
         "/enrich",
@@ -71,7 +73,7 @@ def test_enqueue_enrichment_missing_finding(client):
 
 
 def test_enqueue_enrichment_rejects_unknown_source(client):
-    test_client, settings, SessionLocal, queue = client
+    test_client, settings, SessionLocal, queue, _notification_service = client
 
     # ensure queue remains untouched when validation fails
     response = test_client.post(

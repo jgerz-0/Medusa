@@ -59,6 +59,7 @@ def test_worker_config_defaults_align_with_controller(monkeypatch):
         nuclei_callback_token="nuclei-secret",
         zap_callback_token="zap-secret",
         sqlmap_callback_token="sqlmap-secret",
+        validator_callback_token="validator-secret",
         enrichment_callback_token="enrichment-secret",
         binary_static_analysis_callback_token="static-secret",
         binary_fuzzing_callback_token="fuzzing-secret",
