@@ -28,13 +28,16 @@ docker compose up --build -d
 
 # verify each container reports healthy
 docker compose ps
+
+# capture the generated admin and analyst API keys for local tooling
+docker compose exec controller cat /var/lib/medusa/principal_credentials.env
 ```
 
 Set the optional `COMPOSE_BIN` environment variable if you prefer an alternate
 Compose implementation (for example `podman compose`). The smoke test script
 uses the same variable to avoid hard-coding the binary path.
 
-The compose file automatically mounts code from `controller/`, `workers/web/nuclei/`, and `frontend/` into the containers so edits on the host trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts.
+The compose file automatically mounts code from `controller/`, `workers/web/nuclei/`, and `frontend/` into the containers so edits on the host trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts. Principal API keys are written to `/var/lib/medusa/principal_credentials.env` inside the controller container and shared with the frontend so human analysts can authenticate without hard-coded secrets.
 
 ## Smoke Test
 Run the end-to-end smoke test once the services report `healthy`:
