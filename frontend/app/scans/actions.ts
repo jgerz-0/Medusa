@@ -15,6 +15,8 @@ const ALLOWED_ZAP_POLICIES = ['baseline', 'full'] as const;
 const ALLOWED_ZAP_MODES = ['baseline', 'full'] as const;
 const ALLOWED_SQLMAP_LEVELS = [1, 2, 3, 4, 5] as const;
 const ALLOWED_SQLMAP_RISKS = [0, 1, 2, 3] as const;
+const ALLOWED_SQLMAP_LEVEL_SET = new Set<number>(ALLOWED_SQLMAP_LEVELS);
+const ALLOWED_SQLMAP_RISK_SET = new Set<number>(ALLOWED_SQLMAP_RISKS);
 
 export interface ScheduleScanInput {
   targetId: string;
@@ -157,18 +159,18 @@ export async function scheduleScanAction(
       });
     }
 
-    const levelCandidate = Number(rawParameters.level);
-    if (!Number.isInteger(levelCandidate) || !ALLOWED_SQLMAP_LEVELS.includes(levelCandidate as number)) {
+    const level = Number(rawParameters.level);
+    if (!Number.isInteger(level) || !ALLOWED_SQLMAP_LEVEL_SET.has(level)) {
       issues.push({ field: 'level', message: 'SQLMap level must be between 1 and 5.' });
     } else {
-      sanitizedParameters.level = levelCandidate;
+      sanitizedParameters.level = level;
     }
 
-    const riskCandidate = Number(rawParameters.risk);
-    if (!Number.isInteger(riskCandidate) || !ALLOWED_SQLMAP_RISKS.includes(riskCandidate as number)) {
+    const risk = Number(rawParameters.risk);
+    if (!Number.isInteger(risk) || !ALLOWED_SQLMAP_RISK_SET.has(risk)) {
       issues.push({ field: 'risk', message: 'SQLMap risk must be between 0 and 3.' });
     } else {
-      sanitizedParameters.risk = riskCandidate;
+      sanitizedParameters.risk = risk;
     }
 
     if (rawParameters.request_delay !== undefined) {

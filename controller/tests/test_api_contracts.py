@@ -267,7 +267,7 @@ def test_preprocess_enqueue_flow(
     assert job["object_bucket"] == "binary-uploads"
     assert job["metadata"]["target_scope"] == "firmware.example.com"
 
-    with _session_factory() as session:
+    with session_factory() as session:
         audit_entry = (
             session.query(AuditLog)
             .filter(AuditLog.action == "enqueue_binary_preprocess")
@@ -1561,6 +1561,7 @@ def test_principal_creation_validates_and_expands_roles(
             "binary:fuzzing",
             "targets:read",
             "enrich:enqueue",
+            "report:export",
         ]
     )
 
@@ -1588,6 +1589,8 @@ def test_principal_creation_validates_and_expands_roles(
             "targets:read",
             "targets:write",
             "enrich:enqueue",
+            "report:export",
+            "ticket:create",
         ]
     )
 
@@ -1621,3 +1624,99 @@ def test_api_key_revocation_enforced_and_audited(
     with session_factory() as session:
         audit_actions = [entry.action for entry in session.query(AuditLog).all()]
     assert audit_actions.count("list_targets") == initial_audit_count
+
+def test_finding_workflow_and_reporting(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    finding_id = _create_finding_record(session_factory)
+
+    assign_response = client.post(
+        f"/findings/{finding_id}/assign",
+        json={"assignee": "analyst.one"},
+        headers=auth_headers(),
+    )
+    assert assign_response.status_code == 200, assign_response.text
+    assign_payload = assign_response.json()
+    assert assign_payload["data"]["assigned_to"] == "analyst.one"
+    assert assign_payload["data"]["status"] == "acknowledged"
+
+    status_response = client.post(
+        f"/findings/{finding_id}/status",
+        json={"status": "resolved"},
+        headers=auth_headers(),
+    )
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json()["data"]["status"] == "resolved"
+
+    tags_response = client.post(
+        f"/findings/{finding_id}/tags",
+        json={"tags": ["workflow:triage", "scope:demo"]},
+        headers=auth_headers(),
+    )
+    assert tags_response.status_code == 200, tags_response.text
+    tags_payload = tags_response.json()["data"]["tags"]
+    assert "workflow:triage" in tags_payload
+
+    comment_response = client.post(
+        f"/findings/{finding_id}/comments",
+        json={"message": "Investigated root cause."},
+        headers=auth_headers(),
+    )
+    assert comment_response.status_code == 201, comment_response.text
+
+    comments_list = client.get(
+        f"/findings/{finding_id}/comments", headers=auth_headers()
+    )
+    assert comments_list.status_code == 200
+    assert comments_list.json()["data"][0]["message"].startswith("Investigated")
+
+    timeline_response = client.get(
+        f"/findings/{finding_id}/timeline", headers=auth_headers()
+    )
+    assert timeline_response.status_code == 200
+    timeline_events = timeline_response.json()["data"]
+    assert len(timeline_events) >= 1
+
+    jira_response = client.post(
+        "/tickets/jira",
+        json={
+            "finding_id": finding_id,
+            "project_key": "SEC",
+            "issue_type": "Bug",
+            "summary": "Investigate synthetic finding",
+            "description": "Ensure deterministic workflow",
+        },
+        headers=auth_headers(),
+    )
+    assert jira_response.status_code == 201, jira_response.text
+    jira_payload = jira_response.json()
+    assert jira_payload["integration"] == "jira"
+
+    export_response = client.post(
+        "/reports/export",
+        json={"finding_ids": [finding_id], "format": "html"},
+        headers=auth_headers(),
+    )
+    assert export_response.status_code == 200, export_response.text
+    report_payload = export_response.json()
+    assert report_payload["format"] == "html"
+    assert report_payload["content"]
+
+    filtered = client.get(
+        "/findings",
+        params={"tag": "workflow:triage"},
+        headers=auth_headers(),
+    )
+    assert filtered.status_code == 200
+    assert any(item["id"] == finding_id for item in filtered.json()["data"])
+
+    timeline = client.get(
+        "/findings/timeline",
+        params={"tag": "workflow:triage"},
+        headers=auth_headers(),
+    )
+    assert timeline.status_code == 200
+    timeline_payload = timeline.json()["data"]
+    assert isinstance(timeline_payload, list)
