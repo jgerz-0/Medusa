@@ -214,6 +214,92 @@ def test_target_create_and_scan_flow(
     assert collection_payload["data"][0]["id"] == scan_payload["id"]
 
 
+def test_scan_requested_hosts_scope_enforcement(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(name="Authorized", scope="demo.medusa", is_authorized=True)
+        session.add(target)
+        session.commit()
+        target_id = target.id
+
+    response = client.post(
+        "/scan",
+        json={
+            "target_id": target_id,
+            "scanner": "nuclei",
+            "parameters": {
+                "requested_hosts": [
+                    "api.demo.medusa",
+                    "API.DEMO.MEDUSA",
+                    "db.demo.medusa.",
+                    "malicious.example.com",
+                ]
+            },
+        },
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+
+    sanitized_hosts = ["api.demo.medusa", "db.demo.medusa"]
+    assert queue.messages, "expected sanitized scan to enqueue"
+    _, job_payload = queue.messages[-1]
+    assert job_payload["parameters"]["requested_hosts"] == sanitized_hosts
+
+    with session_factory() as session:
+        scan = session.query(Scan).filter(Scan.id == payload["id"]).one()
+        assert scan.parameters["requested_hosts"] == sanitized_hosts
+
+        audit_entry = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.scan_id == scan.id,
+                AuditLog.action == "enqueue_scan",
+            )
+            .one()
+        )
+        snapshot = audit_entry.evidence_snapshot
+        assert snapshot["requested_hosts"] == sanitized_hosts
+        assert snapshot["rejected_hosts"] == ["malicious.example.com"]
+
+
+def test_scan_rejects_out_of_scope_hosts(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(name="Authorized", scope="demo.medusa", is_authorized=True)
+        session.add(target)
+        session.commit()
+        target_id = target.id
+
+    response = client.post(
+        "/scan",
+        json={
+            "target_id": target_id,
+            "scanner": "nuclei",
+            "parameters": {"requested_hosts": ["malicious.example.com"]},
+        },
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.json()["detail"]
+        == "No requested hosts remain within the authorized target scope"
+    )
+    assert not queue.messages
+
+    with session_factory() as session:
+        assert session.query(Scan).count() == 0
+        assert session.query(AuditLog).count() == 0
+
+
 def test_principal_rotation_flow(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:

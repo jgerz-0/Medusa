@@ -10,7 +10,8 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, Union
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
@@ -141,6 +142,87 @@ def _hash_secret(secret: str) -> str:
     """Return a SHA-256 hash of the provided secret."""
 
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+Network = Union[IPv4Network, IPv6Network]
+
+
+def _normalize_hostname(value: str) -> str:
+    """Return a lowercase hostname without trailing dots or wildcard prefixes."""
+
+    normalized = value.strip().lower().rstrip(".")
+    if normalized.startswith("*."):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _scope_to_network(scope: str) -> Optional[Network]:
+    """Attempt to parse the target scope as an IP network."""
+
+    try:
+        return ip_network(scope, strict=False)
+    except ValueError:
+        return None
+
+
+def _coerce_requested_hosts(value: Any) -> List[str]:
+    """Normalize arbitrary iterables into a list of host strings."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray, dict)):
+        return [str(item) for item in value]
+    raise TypeError("requested_hosts must be an iterable of host strings")
+
+
+def _filter_hosts_for_scope(scope: str, requested_hosts: Iterable[str]) -> Tuple[List[str], List[str]]:
+    """Return hosts within scope alongside those rejected."""
+
+    network = _scope_to_network(scope)
+    normalized_scope = _normalize_hostname(scope) if network is None else ""
+
+    allowed: List[str] = []
+    rejected: List[str] = []
+    allowed_seen: set[str] = set()
+    rejected_seen: set[str] = set()
+
+    for raw in requested_hosts:
+        candidate = _normalize_hostname(str(raw))
+        if not candidate:
+            continue
+
+        if network is not None:
+            try:
+                ip_value = ip_address(candidate)
+            except ValueError:
+                if candidate not in rejected_seen:
+                    rejected.append(candidate)
+                    rejected_seen.add(candidate)
+                continue
+
+            canonical = str(ip_value)
+            if ip_value in network:
+                if canonical not in allowed_seen:
+                    allowed.append(canonical)
+                    allowed_seen.add(canonical)
+            else:
+                if canonical not in rejected_seen:
+                    rejected.append(canonical)
+                    rejected_seen.add(canonical)
+            continue
+
+        if candidate == normalized_scope or candidate.endswith(f".{normalized_scope}"):
+            if candidate not in allowed_seen:
+                allowed.append(candidate)
+                allowed_seen.add(candidate)
+        else:
+            if candidate not in rejected_seen:
+                rejected.append(candidate)
+                rejected_seen.add(candidate)
+
+    return allowed, rejected
 
 
 class TargetCreateRequest(BaseModel):
@@ -785,7 +867,13 @@ def list_audit_log(
 ) -> AuditLogCollectionResponse:
     """Return audit log entries for administrative review."""
 
-    enforce_roles(principal, [ROLE_ADMIN], db)
+    enforce_roles(
+        principal,
+        [ROLE_ADMIN],
+        db,
+        resource_type="endpoint",
+        resource_id="/audit-log",
+    )
 
     query = db.query(AuditLog)
     applied_filters: Dict[str, Any] = {}
@@ -1062,10 +1150,34 @@ def enqueue_scan(
             detail="Target is currently outside the authorized scope",
         )
 
+    sanitized_parameters = deepcopy(request.parameters)
+    rejected_hosts: List[str] = []
+    if "requested_hosts" in sanitized_parameters:
+        try:
+            requested_hosts = _coerce_requested_hosts(
+                sanitized_parameters["requested_hosts"]
+            )
+        except TypeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="parameters.requested_hosts must be an array of host strings",
+            ) from exc
+
+        allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
+            target.scope, requested_hosts
+        )
+        sanitized_parameters["requested_hosts"] = allowed_hosts
+
+        if requested_hosts and not allowed_hosts and rejected_hosts:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No requested hosts remain within the authorized target scope",
+            )
+
     scan = Scan(
         target_id=target.id,
         scanner=request.scanner,
-        parameters=request.parameters,
+        parameters=sanitized_parameters,
         initiated_by=principal.subject,
     )
     db.add(scan)
@@ -1089,7 +1201,22 @@ def enqueue_scan(
         resource_type="scan",
         resource_id=scan.id,
         scan_id=scan.id,
-        metadata={"target_id": target.id, "scanner": scan.scanner},
+        metadata={
+            "target_id": target.id,
+            "scanner": scan.scanner,
+            **(
+                {
+                    "requested_hosts": sanitized_parameters.get("requested_hosts", []),
+                    **(
+                        {"rejected_hosts": rejected_hosts}
+                        if rejected_hosts
+                        else {}
+                    ),
+                }
+                if "requested_hosts" in sanitized_parameters
+                else {}
+            ),
+        },
     )
 
     return serialize_scan(scan)
@@ -1388,7 +1515,14 @@ def list_findings(
 ) -> FindingCollectionResponse:
     """Return the latest findings for the requested scope."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ], db)
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/findings",
+    )
+  
     query = db.query(Finding).options(selectinload(Finding.enrichments))
 
     if scan_id is not None:
@@ -1421,7 +1555,14 @@ def get_finding(
 ) -> FindingItemResponse:
     """Fetch a single finding for detailed analysis views."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ], db)
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}",
+    )
+  
     finding = (
         db.query(Finding)
         .options(selectinload(Finding.enrichments))
