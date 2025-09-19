@@ -101,11 +101,22 @@ helm upgrade --install medusa infra/helm/medusa \
   --namespace medusa \
   -f infra/helm/medusa/values-dev.yaml \
   --set metrics.prometheus.enabled=true \
+  --set metrics.prometheus.serviceMonitor.enabled=true \
   --set metrics.grafana.enabled=true \
-  --set metrics.grafana.adminPassword="change-me"
+  --set grafana.adminPassword="change-me"
 ```
 
-Prometheus scrapes the controller pod on port `8000` by default; expose a `/metrics` endpoint in the controller deployment to make full use of it.
+Prometheus scrapes the controller service on `/metrics` using the optional
+`ServiceMonitor`. Disable the `serviceMonitor` flag if your cluster does not
+ship the Prometheus Operator CRDs. The controller exports latency and
+throughput metrics (`medusa_controller_http_requests_total`,
+`medusa_controller_http_request_duration_seconds`) alongside domain counters
+for audit events, job scheduling, and worker callbacks. Grafana automatically
+mounts the provided “Medusa Controller Observability” dashboard via the chart’s
+ConfigMap; set `metrics.grafana.dashboards.folder` to control the folder name
+and rotate the `grafana.adminPassword` value before exposing the UI. A default
+Grafana datasource points at `http://<release-name>-prometheus-server`; set
+`metrics.grafana.datasources.url` when you front a managed Prometheus endpoint.
 
 ## Validating manifests locally
 

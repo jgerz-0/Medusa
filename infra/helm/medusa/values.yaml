@@ -500,9 +500,39 @@ networkPolicies:
 metrics:
   prometheus:
     enabled: false
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
   grafana:
     enabled: false
-    adminPassword: ""
+    dashboards:
+      enabled: true
+      folder: Medusa
+      annotations: {}
+    datasources:
+      enabled: true
+      url: ""
+      annotations: {}
+
+grafana:
+  adminUser: admin
+  adminPassword: "changeme"
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+      provider:
+        name: medusa-dashboards
+        orgId: 1
+        folder: Medusa
+        type: file
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      searchNamespace: ALL
 
 kubeconform:
   strict: true
