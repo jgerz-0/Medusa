@@ -1,0 +1,90 @@
+{{- range $name, $worker := .Values.workers }}
+{{- if $worker.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-worker-%s" (include "medusa.fullname" $) $name }}
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: {{ default (printf "%s-worker" $name) $worker.component }}
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+  annotations:
+    medusa.security/description: "Long-running worker job responsible for {{ $name }} tasks. Ensure RBAC scopes are limited."
+spec:
+  parallelism: {{ default 1 $worker.parallelism }}
+  completions: {{ default 1 $worker.completions }}
+  backoffLimit: {{ default 6 $worker.backoffLimit }}
+  {{- if $worker.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ $worker.ttlSecondsAfterFinished }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "medusa.name" $ }}
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+        app.kubernetes.io/component: {{ default (printf "%s-worker" $name) $worker.component }}
+        {{- range $k, $v := $worker.podLabels }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+      annotations:
+        {{- range $k, $v := $worker.podAnnotations }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: {{ $name }}
+          image: "{{ $worker.image.repository }}:{{ default $.Chart.AppVersion $worker.image.tag }}"
+          imagePullPolicy: {{ $worker.image.pullPolicy }}
+          {{- if $worker.command }}
+          command:
+            {{- toYaml $worker.command | nindent 12 }}
+          {{- end }}
+          {{- if $worker.args }}
+          args:
+            {{- toYaml $worker.args | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml $worker.securityContext | nindent 12 }}
+          env:
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: MEDUSA_REDIS_URL
+            - name: NUCLEI_QUEUE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: MEDUSA_NUCLEI_QUEUE_CHANNEL
+            - name: NUCLEI_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: NUCLEI_CALLBACK_TOKEN
+            - name: NUCLEI_ARTIFACT_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: NUCLEI_ARTIFACT_BUCKET
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: S3_SECRET_KEY
+            - name: S3_ENDPOINT_URL
+              value: {{ printf "http://%s-minio:%d" (include "medusa.fullname" $) $.Values.minio.service.apiPort }}
+            {{- range $worker.env.extra }}
+            - {{- toYaml . | nindent 14 }}
+            {{- end }}
+          resources:
+            {{- toYaml $worker.resources | nindent 12 }}
+---
+{{- end }}
+{{- end }}

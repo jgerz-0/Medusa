@@ -1,0 +1,38 @@
+{{- if and .Values.controller.enabled .Values.controller.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "medusa.fullname" . }}-controller
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    {{- range $k, $v := .Values.controller.ingress.annotations }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+spec:
+  {{- if .Values.controller.ingress.className }}
+  ingressClassName: {{ .Values.controller.ingress.className }}
+  {{- end }}
+  rules:
+    {{- range .Values.controller.ingress.hosts }}
+    - host: {{ .host }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ printf "%s-controller" (include "medusa.fullname" $) }}
+                port:
+                  number: {{ $.Values.controller.service.port }}
+          {{- end }}
+    {{- end }}
+  {{- if .Values.controller.ingress.tls }}
+  tls:
+    {{- toYaml .Values.controller.ingress.tls | nindent 4 }}
+  {{- end }}
+{{- end -}}

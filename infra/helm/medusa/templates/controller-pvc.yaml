@@ -1,0 +1,20 @@
+{{- if and .Values.controller.enabled .Values.controller.persistence.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "medusa.fullname" . }}-controller
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  accessModes:
+    {{- toYaml .Values.controller.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.controller.persistence.size }}
+  {{- if .Values.controller.persistence.storageClass }}
+  storageClassName: {{ .Values.controller.persistence.storageClass }}
+  {{- end }}
+{{- end -}}

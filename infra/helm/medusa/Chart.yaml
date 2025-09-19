@@ -1,0 +1,28 @@
+apiVersion: v2
+name: medusa
+description: Helm chart for the Medusa automated penetration testing platform
+kubeVersion: ">=1.26.0-0"
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - security
+  - penetration-testing
+  - automation
+home: https://github.com/medusa/medusa
+sources:
+  - https://github.com/medusa/medusa
+maintainers:
+  - name: Medusa Security Engineering Team
+    email: security@medusa.local
+annotations:
+  artifacthub.io/prerelease: "true"
+dependencies:
+  - name: prometheus
+    version: 25.21.0
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: metrics.prometheus.enabled
+  - name: grafana
+    version: 7.3.11
+    repository: https://grafana.github.io/helm-charts
+    condition: metrics.grafana.enabled

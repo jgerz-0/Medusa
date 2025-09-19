@@ -9,7 +9,7 @@ This guide covers the Phase 1 local Docker Compose environment. It stands up eve
 - 20 GB free disk space for container images, Postgres, MinIO, and Qdrant data directories
 
 ## Compose Manifests
-- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei worker, and the Next.js frontend.
+- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, and SQLMap workers, plus the Next.js frontend.
 - `infra/docker/controller.Dockerfile` – Poetry-based image for the controller with Uvicorn hot reload enabled.
 - `infra/docker/frontend.Dockerfile` – Node 20 + pnpm image for the dashboard.
 - `infra/docker/.env.example` – sane defaults for development credentials and exposed ports.
@@ -33,11 +33,22 @@ docker compose ps
 docker compose exec controller cat /var/lib/medusa/principal_credentials.env
 ```
 
+The `.env` file keeps the controller and workers aligned. Ensure the
+following secrets are set before starting the stack:
+
+- `MEDUSA_NUCLEI_CALLBACK_TOKEN`
+- `MEDUSA_ZAP_CALLBACK_TOKEN`
+- `MEDUSA_SQLMAP_CALLBACK_TOKEN`
+
+Each worker reads the corresponding token via `NUCLEI_CALLBACK_TOKEN`,
+`ZAP_CALLBACK_TOKEN`, or `SQLMAP_CALLBACK_TOKEN` so callbacks are rejected if a
+container is misconfigured.
+
 Set the optional `COMPOSE_BIN` environment variable if you prefer an alternate
 Compose implementation (for example `podman compose`). The smoke test script
 uses the same variable to avoid hard-coding the binary path.
 
-The compose file automatically mounts code from `controller/`, `workers/web/nuclei/`, and `frontend/` into the containers so edits on the host trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts. Principal API keys are written to `/var/lib/medusa/principal_credentials.env` inside the controller container and shared with the frontend so human analysts can authenticate without hard-coded secrets.
+The compose file automatically mounts code from `controller/`, `workers/web/nuclei/`, `workers/web/zap/`, `workers/web/sqlmap/`, and `frontend/` into the containers so edits on the host trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts. Principal API keys are written to `/var/lib/medusa/principal_credentials.env` inside the controller container and shared with the frontend so human analysts can authenticate without hard-coded secrets.
 
 ## Smoke Test
 Run the end-to-end smoke test once the services report `healthy`:
@@ -59,6 +70,37 @@ The script performs the following actions:
 A successful run prints `Worker callback confirmed` and exits `0`. If the callback fails (for example, the worker cannot reach the controller or the callback token is misconfigured) the script exits non-zero with context so you can inspect `docker compose logs nuclei-worker controller`.
 
 The MinIO console is available at `http://localhost:9001` with credentials from `.env`. Qdrant's HTTP API listens on `http://localhost:6333` for enrichment debugging.
+
+### CVE vector store configuration
+
+The enrichment worker now persists advisory embeddings to Qdrant in parallel with Redis result
+publication. Populate the following environment variables in `infra/docker/.env` before starting
+Compose so the worker authenticates to the local Qdrant instance:
+
+| Variable | Purpose |
+| --- | --- |
+| `CVE_ENRICHMENT_QDRANT_URL` | Base URL for the Qdrant HTTP API (e.g., `http://qdrant:6333`). |
+| `CVE_ENRICHMENT_QDRANT_COLLECTION` | Target collection name for advisory vectors. |
+| `CVE_ENRICHMENT_QDRANT_API_KEY` | Optional API key if Qdrant authentication is enabled. Leave blank for local development. |
+| `CVE_ENRICHMENT_QDRANT_TIMEOUT` | Request timeout in seconds for upsert operations. |
+| `CVE_ENRICHMENT_QDRANT_VECTOR_SIZE` | Deterministic embedding dimension emitted by the worker. |
+
+After the stack is running, create the collection (once) using Qdrant's API:
+
+```bash
+curl -X PUT \
+  "http://localhost:6333/collections/medusa-advisories" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "vectors": {
+          "size": 64,
+          "distance": "Cosine"
+        }
+      }'
+```
+
+Use the `size` value that matches `CVE_ENRICHMENT_QDRANT_VECTOR_SIZE`. The worker logs structured
+errors if a vector insert fails so operators can remediate without losing Redis callbacks.
 
 ### Dashboard login
 

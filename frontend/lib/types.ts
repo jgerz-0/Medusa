@@ -39,6 +39,7 @@ export interface Finding {
   evidence?: string | null;
   remediation?: string | null;
   enrichments: FindingEnrichment[];
+  metadata: Record<string, unknown>;
 }
 
 export interface CVEAdvisory {

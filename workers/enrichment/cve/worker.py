@@ -31,6 +31,7 @@ try:  # pragma: no cover - redis optional for unit tests
 except ImportError:  # pragma: no cover
     redis = None  # type: ignore[assignment]
 
+from .qdrant import QdrantClient, QdrantConfig, build_advisory_points
 from .schemas import CVEAdvisory, CVEEnrichmentJob, CVEEnrichmentResult, CVESource
 from .sources import AdvisorySourceError, fetch_circl_advisory, fetch_nvd_advisory
 
@@ -45,9 +46,7 @@ class WorkerConfig:
         default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0")
     )
     queue_key: str = field(
-        default_factory=lambda: os.getenv(
-            "CVE_ENRICHMENT_QUEUE_KEY", "queues:enrichment:cve"
-        )
+        default_factory=lambda: os.getenv("CVE_ENRICHMENT_QUEUE_KEY", "queues:enrichment:cve")
     )
     result_queue_key: str = field(
         default_factory=lambda: os.getenv(
@@ -63,9 +62,7 @@ class WorkerConfig:
         default_factory=lambda: int(os.getenv("CVE_ENRICHMENT_MAX_ATTEMPTS", "3"))
     )
     retry_backoff_seconds: float = field(
-        default_factory=lambda: float(
-            os.getenv("CVE_ENRICHMENT_RETRY_BACKOFF_SECONDS", "2.0")
-        )
+        default_factory=lambda: float(os.getenv("CVE_ENRICHMENT_RETRY_BACKOFF_SECONDS", "2.0"))
     )
     poll_timeout: int = field(
         default_factory=lambda: int(os.getenv("CVE_ENRICHMENT_QUEUE_POLL_TIMEOUT", "5"))
@@ -76,12 +73,41 @@ class WorkerConfig:
     user_agent: Optional[str] = field(
         default_factory=lambda: os.getenv("CVE_ENRICHMENT_USER_AGENT")
     )
+    qdrant_url: Optional[str] = field(
+        default_factory=lambda: os.getenv("CVE_ENRICHMENT_QDRANT_URL")
+    )
+    qdrant_api_key: Optional[str] = field(
+        default_factory=lambda: os.getenv("CVE_ENRICHMENT_QDRANT_API_KEY")
+    )
+    qdrant_collection: Optional[str] = field(
+        default_factory=lambda: os.getenv("CVE_ENRICHMENT_QDRANT_COLLECTION")
+    )
+    qdrant_timeout: float = field(
+        default_factory=lambda: float(os.getenv("CVE_ENRICHMENT_QDRANT_TIMEOUT", "5.0"))
+    )
+    qdrant_vector_size: int = field(
+        default_factory=lambda: int(os.getenv("CVE_ENRICHMENT_QDRANT_VECTOR_SIZE", "64"))
+    )
 
     @classmethod
     def load(cls) -> "WorkerConfig":
         config = cls()
         LOG.debug("Loaded worker configuration", extra={"config": config})
         return config
+
+    @property
+    def qdrant_enabled(self) -> bool:
+        return bool(self.qdrant_url and self.qdrant_collection)
+
+    def build_qdrant_config(self) -> Optional[QdrantConfig]:
+        if not self.qdrant_enabled:
+            return None
+        return QdrantConfig(
+            url=self.qdrant_url or "",
+            collection=self.qdrant_collection or "",
+            api_key=self.qdrant_api_key,
+            timeout=self.qdrant_timeout,
+        )
 
 
 SOURCE_FETCHERS: Mapping[CVESource, Callable[..., Dict[str, object]]] = {
@@ -103,14 +129,10 @@ class QueuedJob:
 class RedisJobQueue:
     """BLPOP-backed queue integration for CVE enrichment jobs."""
 
-    def __init__(
-        self, config: WorkerConfig, *, connection: Optional[Any] = None
-    ) -> None:
+    def __init__(self, config: WorkerConfig, *, connection: Optional[Any] = None) -> None:
         if connection is None:
             if redis is None:  # pragma: no cover - runtime dependency validation
-                raise RuntimeError(
-                    "redis-py must be installed to use the CVE enrichment worker"
-                )
+                raise RuntimeError("redis-py must be installed to use the CVE enrichment worker")
             connection = redis.Redis.from_url(config.redis_url, decode_responses=True)
         self._client = connection
         self._config = config
@@ -119,9 +141,7 @@ class RedisJobQueue:
         self._error_queue_key = config.error_queue_key
 
     def fetch(self) -> Optional[QueuedJob]:
-        response = self._client.blpop(
-            self._queue_key, timeout=self._config.poll_timeout
-        )
+        response = self._client.blpop(self._queue_key, timeout=self._config.poll_timeout)
         if not response:
             return None
         _, payload = response
@@ -132,9 +152,7 @@ class RedisJobQueue:
             self._publish_malformed(payload, exc)
             return None
 
-    def publish_success(
-        self, queued_job: QueuedJob, result: CVEEnrichmentResult
-    ) -> None:
+    def publish_success(self, queued_job: QueuedJob, result: CVEEnrichmentResult) -> None:
         payload = {
             "status": "completed",
             "job": _serialize_job(queued_job.job),
@@ -216,9 +234,7 @@ class RedisJobQueue:
         else:
             job_payload = data
         job = CVEEnrichmentJob.parse_obj(job_payload)
-        return QueuedJob(
-            job=job, attempts=attempts, raw_payload=payload, metadata=metadata
-        )
+        return QueuedJob(job=job, attempts=attempts, raw_payload=payload, metadata=metadata)
 
     def _publish_malformed(self, payload: str, exc: Exception) -> None:
         error_payload = {
@@ -369,6 +385,7 @@ def process_queue_once(
     *,
     queue: RedisJobQueue,
     session: Optional[Session],
+    qdrant_client: Optional[QdrantClient] = None,
 ) -> bool:
     queued_job = queue.fetch()
     if queued_job is None:
@@ -376,9 +393,7 @@ def process_queue_once(
     try:
         result = collect_advisories(queued_job.job, config=config, session=session)
     except Exception as exc:
-        LOG.exception(
-            "Failed to collect advisories", extra={"job_id": queued_job.job.job_id}
-        )
+        LOG.exception("Failed to collect advisories", extra={"job_id": queued_job.job.job_id})
         try:
             queue.handle_failure(queued_job, exc)
         except Exception as handler_exc:  # pragma: no cover - defensive logging
@@ -387,6 +402,24 @@ def process_queue_once(
                 extra={"job_id": queued_job.job.job_id, "error": str(handler_exc)},
             )
         return True
+    if qdrant_client:
+        try:
+            points = build_advisory_points(
+                queued_job.job,
+                result.advisories,
+                dimensions=max(config.qdrant_vector_size, 1),
+            )
+            if points:
+                qdrant_client.upsert(points)
+        except Exception as exc:
+            LOG.error(
+                "Failed to upsert advisories into Qdrant",
+                extra={
+                    "job_id": queued_job.job.job_id,
+                    "finding_id": queued_job.job.finding_id,
+                    "error": str(exc),
+                },
+            )
     try:
         queue.publish_success(queued_job, result)
     except Exception as exc:
@@ -410,13 +443,27 @@ def run_worker_loop(
     queue: Optional[RedisJobQueue] = None,
     session: Optional[Session] = None,
     stop_event: Optional[threading.Event] = None,
+    qdrant_client: Optional[QdrantClient] = None,
 ) -> None:
     created_session = False
+    created_qdrant_client = False
     if queue is None:
         queue = RedisJobQueue(config)
     if session is None:
         session = _create_http_session()
         created_session = session is not None
+    if qdrant_client is None:
+        qdrant_config = config.build_qdrant_config()
+        if qdrant_config is not None:
+            try:
+                qdrant_client = QdrantClient(qdrant_config)
+                created_qdrant_client = True
+            except Exception as exc:
+                LOG.error(
+                    "Failed to initialize Qdrant client",
+                    extra={"collection": qdrant_config.collection, "error": str(exc)},
+                )
+                qdrant_client = None
     stop_event = stop_event or threading.Event()
 
     def _signal_handler(signum, _frame) -> None:  # pragma: no cover - signal handling
@@ -433,7 +480,12 @@ def run_worker_loop(
     try:
         while not stop_event.is_set():
             try:
-                processed = process_queue_once(config, queue=queue, session=session)
+                processed = process_queue_once(
+                    config,
+                    queue=queue,
+                    session=session,
+                    qdrant_client=qdrant_client,
+                )
             except Exception as exc:  # pragma: no cover - defensive logging
                 LOG.exception("Unhandled worker error: %s", exc)
                 backoff = max(config.retry_backoff_seconds, 1.0)
@@ -444,6 +496,8 @@ def run_worker_loop(
     finally:
         if created_session and session and hasattr(session, "close"):
             session.close()
+        if created_qdrant_client and qdrant_client is not None:
+            qdrant_client.close()
         LOG.info("Worker shutdown complete")
 
 
@@ -462,11 +516,41 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             extra={"job_id": job.job_id, "finding_id": job.finding_id},
         )
         session = _create_http_session()
+        qdrant_client: Optional[QdrantClient] = None
+        qdrant_config = config.build_qdrant_config()
+        if qdrant_config is not None:
+            try:
+                qdrant_client = QdrantClient(qdrant_config)
+            except Exception as exc:
+                LOG.error(
+                    "Failed to initialize Qdrant client",
+                    extra={"collection": qdrant_config.collection, "error": str(exc)},
+                )
         try:
             result = collect_advisories(job, config=config, session=session)
+            if qdrant_client is not None:
+                try:
+                    points = build_advisory_points(
+                        job,
+                        result.advisories,
+                        dimensions=max(config.qdrant_vector_size, 1),
+                    )
+                    if points:
+                        qdrant_client.upsert(points)
+                except Exception as exc:
+                    LOG.error(
+                        "Failed to upsert advisories into Qdrant",
+                        extra={
+                            "job_id": job.job_id,
+                            "finding_id": job.finding_id,
+                            "error": str(exc),
+                        },
+                    )
         finally:
             if session and hasattr(session, "close"):
                 session.close()
+            if qdrant_client is not None:
+                qdrant_client.close()
         serialized = result.json(by_alias=True, exclude_none=True)
         print(serialized)
         return 0

@@ -31,7 +31,7 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
   - Containerized wrappers around scanners (nuclei, ZAP, SQLMap, AFL, angr).
   - Normalize output into the shared JSON Finding schema.
   - Upload heavy artifacts (pcaps, binaries, logs) to MinIO.
-  - **CVE Enrichment Worker** – fetches deterministic advisories from NVD and CIRCL and emits structured metadata for findings.
+  - **CVE Enrichment Worker** – fetches deterministic advisories from NVD and CIRCL, emits structured metadata for findings, and writes normalized advisory embeddings to Qdrant for semantic enrichment without blocking Redis callbacks.
 - **Agents**
   - **Recon Agent** – Discovers assets from authorized inventory feeds.
   - **Preprocess Agent** – Classifies binaries, extracts metadata, enforces triage rules.
@@ -55,14 +55,22 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
 ### Phase 2 Enrichment Extension
 1. Analyst (or automation) calls `/enrich` with a finding identifier and optional advisory sources.
 2. The controller enqueues a CVE enrichment job on `queues:enrichment:cve` and records an audit event.
-3. The CVE worker fetches NVD + CIRCL advisories with pinned user-agent headers, normalizes the payload, and prepares metadata for controller ingestion.
-4. The enriched metadata attaches to the original finding without mutating stored evidence, enabling deterministic provenance for remediation guidance.
+3. The CVE worker fetches NVD + CIRCL advisories with pinned user-agent headers, normalizes the payload, and prepares metadata for controller ingestion. Deterministic embeddings are generated from the same payload and persisted to Qdrant for later semantic lookups.
+4. The enriched metadata attaches to the original finding without mutating stored evidence, enabling deterministic provenance for remediation guidance while keeping advisory embeddings auditable.
 
 ## Security Controls
 - All inter-service communication authenticated with mTLS (planned) or signed JWTs (Phase 1).
 - Network policies restrict scanner pods to egress only to approved target CIDRs.
 - Secrets sourced from Vault/External Secrets in Kubernetes; `.env.example` governs local development.
 - Audit log appended on every scan lifecycle event (created, queued, running, completed, rejected).
+- Role-based access control enforces least privilege. Admins manage credentials and audit logs;
+  analysts operate scans, view findings, and enqueue enrichment but cannot touch `/principals`.
+- API keys are never stored in clear text. The controller hashes incoming keys with `_hash_secret`
+  and persists only the hash and a truncated `key_fingerprint` for rotation tracking.
+- Every rejected authentication or authorization attempt emits an `access_denied` audit entry with
+  the attempted resource, required roles, and rotation fingerprint to aid incident response.
+- Revocation returns `401` with `"API key revoked"` and the same fingerprint metadata, ensuring
+  operators can correlate secrets without revealing them.
 
 ## Extensibility Principles
 - New agents register their JSON schema in `docs/interfaces/` and implement handshake contracts with the controller.
