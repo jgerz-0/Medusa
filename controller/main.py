@@ -7,6 +7,7 @@ import json
 import logging
 import secrets
 import uuid
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -239,6 +240,14 @@ class Settings(BaseSettings):
     cve_enrichment_queue_channel: str = Field(
         "queues:enrichment:cve",
         description="Redis list channel for CVE enrichment jobs.",
+    )
+    cve_enrichment_qdrant_url: Optional[str] = Field(
+        default=None,
+        description="Base URL for the Qdrant vector collection used by enrichment workers.",
+    )
+    cve_enrichment_qdrant_collection: Optional[str] = Field(
+        default=None,
+        description="Collection name that stores advisory embeddings.",
     )
     nuclei_callback_token: str = Field(
         ..., description="Shared secret token required for nuclei worker callbacks."
@@ -724,21 +733,25 @@ def _authenticate_api_key(
     api_key_hash = _hash_secret(candidate_api_key)
     fingerprint = _fingerprint_from_hash(api_key_hash)
 
-    active_credential = (
-        db.query(PrincipalCredential)
-        .filter(
-            PrincipalCredential.auth_method == "api_key",
-            PrincipalCredential.key_hash == api_key_hash,
-            PrincipalCredential.revoked_at.is_(None),
-        )
-        .first()
-    )
-    if active_credential:
-        roles = list(active_credential.roles or [])
-        return Principal(
-            subject=active_credential.subject,
-            auth_method="api_key",
-            roles=roles,
+    candidate_api_key = api_key_header or bearer_token
+    if candidate_api_key:
+        if candidate_api_key in settings.api_keys:
+            subject_hash = _hash_secret(candidate_api_key)
+            return Principal(
+                subject=f"apikey:{subject_hash}",
+                auth_method="api_key",
+                roles=list(DEFAULT_ADMIN_ROLES),
+            )
+
+        api_key_hash = _hash_secret(candidate_api_key)
+        active_credential = (
+            db.query(PrincipalCredential)
+            .filter(
+                PrincipalCredential.auth_method == "api_key",
+                PrincipalCredential.key_hash == api_key_hash,
+                PrincipalCredential.revoked_at.is_(None),
+            )
+            .first()
         )
 
     revoked_credential = (
@@ -1362,8 +1375,7 @@ def create_target(
         principal,
         [ROLE_TARGETS_WRITE],
         db,
-        resource_type="endpoint",
-        resource_id="/targets",
+        resource_type="target",
     )
     existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
@@ -1401,8 +1413,7 @@ def list_targets(
         principal,
         [ROLE_TARGETS_READ],
         db,
-        resource_type="endpoint",
-        resource_id="/targets",
+        resource_type="target",
     )
     targets = db.query(Target).order_by(Target.created_at.desc()).all()
 
@@ -1433,8 +1444,8 @@ def enqueue_scan(
         principal,
         [ROLE_SCAN_ENQUEUE],
         db,
-        resource_type="endpoint",
-        resource_id="/scan",
+        resource_type="scan",
+        resource_id=str(scan_request.target_id),
     )
 
     target = db.get(Target, scan_request.target_id)
@@ -1630,8 +1641,7 @@ def list_scans(
         principal,
         [ROLE_SCANS_READ],
         db,
-        resource_type="endpoint",
-        resource_id="/scans",
+        resource_type="scan",
     )
     query = db.query(Scan).options(
         selectinload(Scan.target), selectinload(Scan.findings)
@@ -1847,8 +1857,7 @@ def list_findings(
         principal,
         [ROLE_FINDINGS_READ],
         db,
-        resource_type="endpoint",
-        resource_id="/findings",
+        resource_type="finding",
     )
     query = db.query(Finding)
     if scan_id is not None:
@@ -1885,8 +1894,8 @@ def get_finding(
         principal,
         [ROLE_FINDINGS_READ],
         db,
-        resource_type="endpoint",
-        resource_id=f"/findings/{finding_id}",
+        resource_type="finding",
+        resource_id=finding_id,
     )
     finding = db.get(Finding, finding_id)
     if finding is None:
