@@ -288,11 +288,11 @@ def _finding_enrichment_prevent_mutation(
     if changed:
         raise ValueError("Finding enrichment payloads are immutable once recorded.")
 
-
 class PrincipalCredential(Base):
     """Authentication material for API keys and JWT principals."""
 
     __tablename__ = "principal_credentials"
+
     __table_args__ = (
         # Ensure only one active credential per subject while retaining
         # historical, revoked rows for forensic review.
@@ -304,9 +304,9 @@ class PrincipalCredential(Base):
             postgresql_where=text("revoked_at IS NULL"),
         ),
     )
-
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     auth_method: Mapped[str] = mapped_column(String(32), nullable=False)
     key_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)

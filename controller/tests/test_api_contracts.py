@@ -9,16 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import jwt
-
-from controller.db.models import (
-    AuditLog,
-    Base,
-    Finding,
-    FindingEnrichment,
-    PrincipalCredential,
-    Scan,
-    Target,
-)
+from controller.db.models import AuditLog, Base, Finding, PrincipalCredential, Scan, Target
 from controller.main import (
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
@@ -105,9 +96,63 @@ def api_client() -> (
 def auth_headers() -> dict[str, str]:
     return {"X-API-Key": "test-key"}
 
-
 def enrichment_headers() -> dict[str, str]:
     return {"X-Callback-Token": "enrichment-secret"}
+
+
+def _create_finding_record(session_factory: sessionmaker) -> str:
+    """Persist a minimal target/scan/finding for RBAC regression tests."""
+
+    with session_factory() as session:
+        target = Target(name="RBAC Target", scope="rbac.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="nuclei",
+            initiated_by="rbac-tester",
+            status="completed",
+            parameters={"profile": "regression"},
+        )
+        session.add(scan)
+        session.flush()
+
+        finding = Finding(
+            scan_id=scan.id,
+            title="Synthetic SQL Injection",
+            severity="high",
+            cve_id="CVE-2099-0001",
+            description="Regression finding for RBAC coverage.",
+            metadata_json={"vector": "GET /?id=1"},
+            evidence={"proof": "error-based"},
+            evidence_hash="",
+        )
+        session.add(finding)
+        session.commit()
+
+        return str(finding.id)
+
+
+def _provision_principal(
+    client: TestClient, subject: str, roles: list[str]
+) -> Tuple[str, dict[str, str]]:
+    """Create a new API key credential and return the secret and auth header."""
+
+    response = client.post(
+        "/principals",
+        json={
+            "subject": subject,
+            "auth_method": "api_key",
+            "roles": roles,
+            "description": "rbac-regression",
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    secret = payload["secret"]
+    return secret, {"X-API-Key": secret}
 
 
 def test_target_create_and_scan_flow(
@@ -178,6 +223,92 @@ def test_target_create_and_scan_flow(
     assert "data" in collection_payload
     assert len(collection_payload["data"]) == 1
     assert collection_payload["data"][0]["id"] == scan_payload["id"]
+
+
+def test_scan_requested_hosts_scope_enforcement(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(name="Authorized", scope="demo.medusa", is_authorized=True)
+        session.add(target)
+        session.commit()
+        target_id = target.id
+
+    response = client.post(
+        "/scan",
+        json={
+            "target_id": target_id,
+            "scanner": "nuclei",
+            "parameters": {
+                "requested_hosts": [
+                    "api.demo.medusa",
+                    "API.DEMO.MEDUSA",
+                    "db.demo.medusa.",
+                    "malicious.example.com",
+                ]
+            },
+        },
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+
+    sanitized_hosts = ["api.demo.medusa", "db.demo.medusa"]
+    assert queue.messages, "expected sanitized scan to enqueue"
+    _, job_payload = queue.messages[-1]
+    assert job_payload["parameters"]["requested_hosts"] == sanitized_hosts
+
+    with session_factory() as session:
+        scan = session.query(Scan).filter(Scan.id == payload["id"]).one()
+        assert scan.parameters["requested_hosts"] == sanitized_hosts
+
+        audit_entry = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.scan_id == scan.id,
+                AuditLog.action == "enqueue_scan",
+            )
+            .one()
+        )
+        snapshot = audit_entry.evidence_snapshot
+        assert snapshot["requested_hosts"] == sanitized_hosts
+        assert snapshot["rejected_hosts"] == ["malicious.example.com"]
+
+
+def test_scan_rejects_out_of_scope_hosts(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(name="Authorized", scope="demo.medusa", is_authorized=True)
+        session.add(target)
+        session.commit()
+        target_id = target.id
+
+    response = client.post(
+        "/scan",
+        json={
+            "target_id": target_id,
+            "scanner": "nuclei",
+            "parameters": {"requested_hosts": ["malicious.example.com"]},
+        },
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.json()["detail"]
+        == "No requested hosts remain within the authorized target scope"
+    )
+    assert not queue.messages
+
+    with session_factory() as session:
+        assert session.query(Scan).count() == 0
+        assert session.query(AuditLog).count() == 0
 
 
 def test_principal_rotation_flow(
@@ -299,6 +430,62 @@ def test_finding_contracts(
     detail_payload = detail_response.json()
     assert detail_payload["data"]["id"] == finding_id
     assert detail_payload["data"]["enrichments"] == []
+
+
+def test_audit_log_rbac_regression(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, _session_factory, _settings = api_client
+
+    _secret, limited_headers = _provision_principal(
+        client, subject="audit-rbac", roles=["scan:enqueue"]
+    )
+
+    forbidden = client.get("/audit-log", headers=limited_headers)
+    assert forbidden.status_code == 403
+
+    allowed = client.get("/audit-log", headers=auth_headers())
+    assert allowed.status_code == 200, allowed.text
+    payload = allowed.json()
+    assert "data" in payload
+
+
+def test_findings_list_rbac_regression(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    finding_id = _create_finding_record(session_factory)
+
+    _secret, limited_headers = _provision_principal(
+        client, subject="findings-rbac", roles=["scan:enqueue"]
+    )
+
+    forbidden = client.get("/findings", headers=limited_headers)
+    assert forbidden.status_code == 403
+
+    response = client.get("/findings", headers=auth_headers())
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert any(item["id"] == finding_id for item in payload.get("data", []))
+
+
+def test_findings_detail_rbac_regression(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    finding_id = _create_finding_record(session_factory)
+
+    _secret, limited_headers = _provision_principal(
+        client, subject="finding-detail-rbac", roles=["scan:enqueue"]
+    )
+
+    forbidden = client.get(f"/findings/{finding_id}", headers=limited_headers)
+    assert forbidden.status_code == 403
+
+    response = client.get(f"/findings/{finding_id}", headers=auth_headers())
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["data"]["id"] == finding_id
 
 
 def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:

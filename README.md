@@ -19,7 +19,7 @@ Phase 1 establishes the local development baseline that every later milestone bu
 | Docker Compose stack | Local environment booting Postgres, Redis, MinIO, Qdrant, the controller, nuclei worker, and frontend. | ✅ Complete – `infra/docker/docker-compose.yml` + `.env` defaults stand up the full stack with hot-reload mounts. |
 | Redis + nuclei worker | Local Docker Compose wiring to execute proof-of-concept web scans. | ✅ Complete – worker container subscribes to shared queue defaults and reports back through authenticated callbacks. |
 | Postgres schema | Minimum tables for scans, targets, findings, and audit log. | ✅ Complete – SQLAlchemy models now align with Alembic migrations (including finding metadata hashing and principal credentials). |
-| Minimal Next.js UI | Read-only list of scans and findings surfaced from Postgres. | ✅ Complete – `/scans` lists controller activity, `/findings` summarizes normalized issues, and analysts can queue nuclei jobs via the manual trigger. |
+| Minimal Next.js UI | Read-only list of scans and findings surfaced from Postgres. | ⏳ Pending – current Next.js app is a landing page without data bindings. |
 
 Progress on these items should be tracked through issues mapped to the roadmap phases in `ROADMAP.md`.
 
