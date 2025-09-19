@@ -3,25 +3,47 @@ from datetime import datetime
 from unittest import mock
 
 import pytest
-from controller.main import NucleiCallbackRequest
-from controller.main import CallbackFinding
+from controller.main import CallbackFinding, NUCLEI_TEMPLATE_PROFILES, NucleiCallbackRequest
 from controller.main import Settings
 from workers.web.nuclei import worker
 
 
 @pytest.fixture
-def sample_job():
-    payload = json.dumps(
-        {
-            "job_id": "job-123",
-            "scan_id": 42,
-            "target": "https://example.com",
-            "templates": ["cves/2023/CVE-2023-9999.yaml"],
-            "callback_url": "https://controller.local/callback",
-            "tags": ["web"],
-            "metadata": {"scope": "production"},
-        }
-    )
+def canonical_job_payload() -> dict:
+    submitted_at = "2024-01-01T00:00:00+00:00"
+    templates = list(NUCLEI_TEMPLATE_PROFILES["full"])
+    return {
+        "job_id": "job-123",
+        "scan_id": "scan-uuid-42",
+        "target": "https://example.com",
+        "target_id": "target-abc",
+        "target_name": "Example Service",
+        "scanner": "nuclei",
+        "templates": templates,
+        "template_profile": "full",
+        "parameters": {"profile": "full"},
+        "callback_url": "https://controller.local/internal/nuclei/callback",
+        "attempts": 0,
+        "tags": ["profile:full"],
+        "initiated_by": "analyst@example.com",
+        "submitted_at": submitted_at,
+        "metadata": {
+            "scan_id": "scan-uuid-42",
+            "target_id": "target-abc",
+            "target_scope": "https://example.com",
+            "target_name": "Example Service",
+            "initiated_by": "analyst@example.com",
+            "submitted_at": submitted_at,
+            "template_profile": "full",
+            "controller_callback_url": "https://controller.local/internal/nuclei/callback",
+            "parameters": {"profile": "full"},
+        },
+    }
+
+
+@pytest.fixture
+def sample_job(canonical_job_payload: dict):
+    payload = json.dumps(canonical_job_payload)
     return worker.NucleiJob.from_json(payload)
 
 
@@ -43,22 +65,34 @@ def test_worker_config_defaults_align_with_controller(monkeypatch):
 
 
 def test_nuclei_job_from_json_normalizes_scan_id(sample_job):
-    assert sample_job.scan_id == "42"
+    assert sample_job.scan_id == "scan-uuid-42"
     assert isinstance(sample_job.scan_id, str)
+    assert sample_job.template_profile == "full"
+    assert sample_job.parameters["profile"] == "full"
+    assert sample_job.tags == ["profile:full"]
+    assert sample_job.templates == list(NUCLEI_TEMPLATE_PROFILES["full"])
 
 
-def test_nuclei_job_from_json_supports_metadata_scan_id():
-    payload = json.dumps(
-        {
-            "job_id": "job-456",
-            "target": "https://service.example.com",
-            "templates": ["http/default-logins"],
-            "callback_url": "https://controller.local/callback",
-            "metadata": {"scan_id": "scan-777"},
-        }
-    )
-    job = worker.NucleiJob.from_json(payload)
-    assert job.scan_id == "scan-777"
+def test_nuclei_job_from_json_accepts_integer_scan_id(
+    canonical_job_payload: dict,
+):
+    payload = dict(canonical_job_payload)
+    payload["scan_id"] = 123
+    payload["metadata"] = dict(payload.get("metadata", {}))
+    payload["metadata"]["scan_id"] = 123
+    job = worker.NucleiJob.from_json(json.dumps(payload))
+    assert job.scan_id == "123"
+
+
+def test_nuclei_job_from_json_supports_metadata_scan_id(
+    canonical_job_payload: dict,
+):
+    payload = dict(canonical_job_payload)
+    payload.pop("scan_id", None)
+    payload["metadata"] = dict(payload.get("metadata", {}))
+    payload_json = json.dumps(payload)
+    job = worker.NucleiJob.from_json(payload_json)
+    assert job.scan_id == canonical_job_payload["metadata"]["scan_id"]
 
 
 def test_normalize_findings(sample_job):
@@ -182,6 +216,14 @@ def test_process_job_posts_callback(sample_job):
     metadata = payload["worker_metadata"]
     assert metadata["artifacts"]["stdout"].endswith("stdout.log")
     assert metadata["job_id"] == sample_job.job_id
+    assert metadata["template_profile"] == sample_job.template_profile
+    assert metadata["parameters"]["profile"] == "full"
+    assert metadata["target_id"] == sample_job.target_id
+    assert metadata["target_name"] == sample_job.target_name
+    assert metadata["scanner"] == sample_job.scanner
+    assert metadata["controller_callback_url"] == sample_job.callback_url
+    assert metadata["templates"] == sample_job.templates
+    assert metadata["tags"] == sample_job.tags
     artifact_locations = payload.get("artifact_locations")
     assert artifact_locations is not None
     assert artifact_locations["stdout"].endswith("stdout.log")
@@ -241,6 +283,9 @@ def test_notify_failure_emits_error(sample_job):
     assert payload["status"] == "failed"
     assert payload["error"] == "controller unavailable"
     assert payload["scan_id"] == sample_job.scan_id
+    failure_metadata = payload["worker_metadata"]
+    assert failure_metadata["template_profile"] == sample_job.template_profile
+    assert failure_metadata["parameters"]["profile"] == "full"
 
 
 def test_worker_loop_retries_on_callback_failure(monkeypatch, sample_job):

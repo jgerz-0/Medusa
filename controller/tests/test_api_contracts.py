@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import uuid
 from typing import Generator, Tuple
 
 import pytest
@@ -12,6 +13,7 @@ from controller.db.models import AuditLog, Base, Finding, PrincipalCredential, S
 from controller.main import (
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
+    NUCLEI_TEMPLATE_PROFILES,
     QueueClient,
     Settings,
     _hash_secret,
@@ -192,9 +194,28 @@ def test_target_create_and_scan_flow(
     assert queue.messages, "enqueue should push a job to the queue"
     channel, job = queue.messages[-1]
     assert channel == "nuclei:test"
+    assert uuid.UUID(job["job_id"]).version == 4
+    assert job["scan_id"] == scan_payload["id"]
+    assert job["target"] == target_payload["scope"]
     assert job["target_id"] == target_payload["id"]
+    assert job["target_name"] == target_payload["name"]
     assert job["scanner"] == "nuclei"
+    assert job["template_profile"] == "full"
+    assert job["templates"] == list(NUCLEI_TEMPLATE_PROFILES["full"])
+    assert job["tags"] == ["profile:full"]
     assert job["parameters"] == {"profile": "full"}
+    assert job["attempts"] == 0
+    assert job["initiated_by"] == scan_payload["initiated_by"]
+    assert job["callback_url"].endswith("/internal/nuclei/callback")
+    submitted_at = job["submitted_at"]
+    datetime.fromisoformat(submitted_at)
+    metadata = job["metadata"]
+    assert metadata["scan_id"] == job["scan_id"]
+    assert metadata["target_scope"] == job["target"]
+    assert metadata["target_id"] == job["target_id"]
+    assert metadata["template_profile"] == job["template_profile"]
+    assert metadata["controller_callback_url"] == job["callback_url"]
+    assert metadata["parameters"] == job["parameters"]
 
     scans_collection = client.get("/scans", headers=auth_headers())
     assert scans_collection.status_code == 200
