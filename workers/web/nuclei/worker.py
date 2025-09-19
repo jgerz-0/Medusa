@@ -83,8 +83,12 @@ class WorkerConfig:
     """Runtime configuration pulled from environment variables."""
 
     redis_url: str = field(default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-    queue_key: str = field(default_factory=lambda: os.getenv("NUCLEI_QUEUE_KEY", "queue:web:nuclei"))
-    dead_letter_key: str = field(default_factory=lambda: os.getenv("NUCLEI_DEAD_LETTER_KEY", "queue:web:nuclei:dead"))
+    queue_key: str = field(
+        default_factory=lambda: os.getenv("NUCLEI_QUEUE_KEY", "queues:nuclei:jobs")
+    )
+    dead_letter_key: str = field(
+        default_factory=lambda: os.getenv("NUCLEI_DEAD_LETTER_KEY", "queues:nuclei:dead")
+    )
     max_retries: int = field(default_factory=lambda: int(os.getenv("NUCLEI_MAX_RETRIES", "3")))
     poll_timeout: int = field(default_factory=lambda: int(os.getenv("NUCLEI_POLL_TIMEOUT", "5")))
     nuclei_binary: str = field(default_factory=lambda: os.getenv("NUCLEI_BINARY", "nuclei"))
