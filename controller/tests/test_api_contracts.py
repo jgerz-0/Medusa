@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Generator, Tuple
 
 import pytest
@@ -157,6 +157,71 @@ def test_target_create_and_scan_flow(
     assert "data" in collection_payload
     assert len(collection_payload["data"]) == 1
     assert collection_payload["data"][0]["id"] == scan_payload["id"]
+
+
+def test_principal_rotation_flow(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    subject = "rotate-svc"
+
+    create_response = client.post(
+        "/principals",
+        json={
+            "subject": subject,
+            "auth_method": "api_key",
+            "roles": ["analyst"],
+            "description": "rotation-test",
+        },
+        headers=auth_headers(),
+    )
+    assert create_response.status_code == 201, create_response.text
+    first_payload = create_response.json()
+    first_secret = first_payload["secret"]
+    assert isinstance(first_secret, str) and first_secret
+    first_id = first_payload["id"]
+    assert first_payload["revoked_at"] is None
+
+    revoke_response = client.post(
+        f"/principals/{first_id}/revoke", headers=auth_headers()
+    )
+    assert revoke_response.status_code == 200, revoke_response.text
+    revoked_payload = revoke_response.json()
+    assert revoked_payload["revoked_at"] is not None
+
+    rotate_response = client.post(
+        "/principals",
+        json={
+            "subject": subject,
+            "auth_method": "api_key",
+            "roles": ["analyst"],
+            "description": "rotation-test",
+        },
+        headers=auth_headers(),
+    )
+    assert rotate_response.status_code == 201, rotate_response.text
+    second_payload = rotate_response.json()
+    second_secret = second_payload["secret"]
+    assert isinstance(second_secret, str) and second_secret
+    assert second_secret != first_secret
+    assert second_payload["id"] != first_id
+    assert second_payload["revoked_at"] is None
+
+    with session_factory() as session:
+        records = (
+            session.query(PrincipalCredential)
+            .filter(PrincipalCredential.subject == subject)
+            .order_by(PrincipalCredential.id.asc())
+            .all()
+        )
+
+        assert len(records) == 2
+        active = [record for record in records if record.revoked_at is None]
+        revoked = [record for record in records if record.revoked_at is not None]
+        assert len(active) == 1
+        assert len(revoked) == 1
+        assert active[0].key_hash == _hash_secret(second_secret)
+        assert revoked[0].key_hash == _hash_secret(first_secret)
 
 
 def test_finding_contracts(
@@ -351,6 +416,92 @@ def test_enrichment_callback_records_errors(
         assert any(entry.action == "get_finding" for entry in audit_entries)
 
 
+def test_rbac_denial_is_audited(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    analyst_key = "analyst-denied"
+    with session_factory() as session:
+        session.add(
+            PrincipalCredential(
+                subject="analyst-denied",
+                auth_method="api_key",
+                key_hash=_hash_secret(analyst_key),
+                roles=list(DEFAULT_ANALYST_ROLES),
+            )
+        )
+        session.commit()
+
+    with session_factory() as session:
+        before = session.query(AuditLog).count()
+
+    response = client.get("/principals", headers={"X-API-Key": analyst_key})
+    assert response.status_code == 403
+
+    with session_factory() as session:
+        after = session.query(AuditLog).count()
+        assert after == before + 1
+        entry = (
+            session.query(AuditLog)
+            .filter(AuditLog.actor == "analyst-denied")
+            .order_by(AuditLog.created_at.desc())
+            .first()
+        )
+
+    assert entry is not None
+    assert entry.action == "access_denied"
+    snapshot = entry.evidence_snapshot
+    assert snapshot["reason"] == "missing_required_roles"
+    assert snapshot["required_roles"] == ["admin"]
+    assert snapshot["missing_roles"] == ["admin"]
+    assert snapshot["granted_roles"] == sorted(set(DEFAULT_ANALYST_ROLES))
+    assert snapshot["auth_method"] == "api_key"
+
+
+def test_revoked_api_key_denial_is_audited(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    revoked_key = "revoked-key"
+    now = datetime.now(tz=timezone.utc)
+    with session_factory() as session:
+        credential = PrincipalCredential(
+            subject="revoked-user",
+            auth_method="api_key",
+            key_hash=_hash_secret(revoked_key),
+            roles=list(DEFAULT_ANALYST_ROLES),
+            revoked_at=now,
+        )
+        session.add(credential)
+        session.commit()
+
+    with session_factory() as session:
+        before = session.query(AuditLog).count()
+
+    response = client.get("/targets", headers={"X-API-Key": revoked_key})
+    assert response.status_code == 403
+
+    with session_factory() as session:
+        after = session.query(AuditLog).count()
+        assert after == before + 1
+        entry = (
+            session.query(AuditLog)
+            .filter(AuditLog.actor == "revoked-user")
+            .order_by(AuditLog.created_at.desc())
+            .first()
+        )
+
+    assert entry is not None
+    assert entry.action == "access_denied"
+    snapshot = entry.evidence_snapshot
+    assert snapshot["reason"] == "credential_revoked"
+    assert snapshot["required_roles"] == []
+    assert snapshot["granted_roles"] == sorted(set(DEFAULT_ANALYST_ROLES))
+    assert snapshot["auth_method"] == "api_key"
+    assert snapshot["credential_status"] == "revoked"
+
 def test_targets_listing_requires_read_role(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
@@ -442,6 +593,139 @@ def test_scans_listing_enforces_role_requirements(
     )
     assert analyst_response.status_code == 200
 
+
+def test_audit_log_listing_filters_and_audits(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    now = datetime.now(tz=timezone.utc)
+
+    with session_factory() as session:
+        target = Target(name="Audit Target", scope="audit.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="nuclei",
+            parameters={"profile": "full"},
+            initiated_by="bootstrap-admin",
+        )
+        session.add(scan)
+        session.flush()
+
+        entries = [
+            AuditLog(
+                actor="bootstrap-admin",
+                action="create_target",
+                message="seed entry",
+                evidence_snapshot={"resource_type": "target", "resource_id": target.id},
+                evidence_hash="",
+                created_at=now - timedelta(minutes=5),
+            ),
+            AuditLog(
+                actor="auditor@example.com",
+                action="list_findings",
+                message="read findings",
+                scan_id=scan.id,
+                evidence_snapshot={
+                    "resource_type": "finding",
+                    "scan_id": scan.id,
+                    "note": "seed",
+                },
+                evidence_hash="",
+                created_at=now - timedelta(minutes=3),
+            ),
+            AuditLog(
+                actor="bootstrap-admin",
+                action="delete_target",
+                message="cleanup",
+                evidence_snapshot={"resource_type": "target", "resource_id": "old-id"},
+                evidence_hash="",
+                created_at=now - timedelta(minutes=1),
+            ),
+        ]
+        session.add_all(entries)
+        session.commit()
+        scan_id = scan.id
+
+    response = client.get("/audit-log", headers=auth_headers())
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["meta"] == {"total": 3, "limit": 50, "offset": 0}
+    returned_timestamps = [
+        datetime.fromisoformat(item["created_at"])
+        for item in payload["data"]
+    ]
+    assert returned_timestamps == sorted(returned_timestamps, reverse=True)
+    assert payload["data"][0]["action"] == "delete_target"
+    assert payload["data"][0]["actor"] == "bootstrap-admin"
+
+    actor_response = client.get(
+        "/audit-log",
+        params={"actor": "auditor@example.com"},
+        headers=auth_headers(),
+    )
+    assert actor_response.status_code == 200
+    actor_payload = actor_response.json()
+    assert actor_payload["meta"]["total"] == 1
+    assert all(
+        entry["actor"] == "auditor@example.com" for entry in actor_payload["data"]
+    )
+
+    action_response = client.get(
+        "/audit-log",
+        params={"action": "delete_target"},
+        headers=auth_headers(),
+    )
+    assert action_response.status_code == 200
+    action_payload = action_response.json()
+    assert action_payload["meta"]["total"] == 1
+    assert action_payload["data"][0]["action"] == "delete_target"
+
+    scan_response = client.get(
+        "/audit-log",
+        params={"scan_id": scan_id},
+        headers=auth_headers(),
+    )
+    assert scan_response.status_code == 200
+    scan_payload = scan_response.json()
+    assert scan_payload["meta"]["total"] == 1
+    assert all(entry["scan_id"] == scan_id for entry in scan_payload["data"])
+
+    with session_factory() as session:
+        recorded_actions = [entry.action for entry in session.query(AuditLog).all()]
+    assert "list_audit_log" in recorded_actions
+
+
+def test_audit_log_requires_admin_role(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, _session_factory, settings = api_client
+
+    analyst_response = client.post(
+        "/principals",
+        json={
+            "subject": "audit-analyst@example.com",
+            "auth_method": "jwt",
+            "roles": ["analyst"],
+        },
+        headers=auth_headers(),
+    )
+    assert analyst_response.status_code == 201
+
+    analyst_token = jwt.encode(
+        {"sub": "audit-analyst@example.com"},
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
+
+    response = client.get(
+        "/audit-log", headers={"Authorization": f"Bearer {analyst_token}"}
+    )
+    assert response.status_code == 403
 
 def test_principal_creation_validates_and_expands_roles(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],

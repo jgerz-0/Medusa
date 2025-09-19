@@ -13,7 +13,7 @@ from functools import lru_cache
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -201,6 +201,31 @@ class ScanResponse(BaseModel):
 
 class ScanCollectionResponse(BaseModel):
     data: List[ScanResponse]
+
+
+class AuditLogResponse(BaseModel):
+    id: str
+    actor: str
+    action: str
+    message: Optional[str]
+    scan_id: Optional[str]
+    finding_id: Optional[str]
+    evidence_snapshot: Dict[str, Any]
+    evidence_hash: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaginationMetadata(BaseModel):
+    total: int
+    limit: int
+    offset: int
+
+
+class AuditLogCollectionResponse(BaseModel):
+    data: List[AuditLogResponse]
+    meta: PaginationMetadata
 
 
 SUPPORTED_ENRICHMENT_SOURCES = {"nvd", "circl"}
@@ -485,9 +510,23 @@ def authenticate(
                 "Rejected revoked API key",
                 extra={"subject": revoked_credential.subject},
             )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+            revoked_principal = Principal(
+                subject=revoked_credential.subject,
+                auth_method="api_key",
+                roles=list(revoked_credential.roles or []),
+            )
+            log_access_denied(
+                db,
+                principal=revoked_principal,
+                required_roles=[],
+                resource_type="principal_credential",
+                resource_id=str(revoked_credential.id),
+                reason="credential_revoked",
                 detail="API key revoked",
+                extra_metadata={
+                    "credential_id": str(revoked_credential.id),
+                    "credential_status": "revoked",
+                },
             )
 
     if credentials is None or credentials.scheme.lower() != "bearer":
@@ -531,6 +570,7 @@ def authenticate(
 def authenticate_worker(
     request: Request,
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
 ) -> Principal:
     """Authenticate nuclei worker callbacks using a shared secret header."""
 
@@ -539,6 +579,25 @@ def authenticate_worker(
         expected_token=settings.nuclei_callback_token,
         subject="worker:nuclei",
     )
+
+    token = request.headers.get("X-Callback-Token")
+    if not token or token != settings.nuclei_callback_token:
+        worker_principal = Principal(
+            subject="worker:nuclei",
+            auth_method="shared_secret",
+            roles=[],
+        )
+        log_access_denied(
+            db,
+            principal=worker_principal,
+            required_roles=[],
+            resource_type="worker_callback",
+            resource_id="nuclei",
+            reason="invalid_callback_token",
+            detail="Invalid callback token",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata={"token_provided": bool(token)},
+        )
 
 
 def authenticate_enrichment_worker(
@@ -554,13 +613,68 @@ def authenticate_enrichment_worker(
     )
 
 
-def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
+def log_access_denied(
+    session: Session,
+    *,
+    principal: Principal,
+    required_roles: Iterable[str],
+    resource_type: str = "endpoint",
+    resource_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    detail: str = "Insufficient role for this operation",
+    status_code: int = status.HTTP_403_FORBIDDEN,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record an audit trail for denied access before raising an error."""
+
+    required_list = sorted({role for role in required_roles if role})
+    granted_list = sorted({role for role in principal.roles})
+    granted_set = set(granted_list)
+    missing_roles = [role for role in required_list if role not in granted_set]
+
+    metadata: Dict[str, Any] = {
+        "required_roles": required_list,
+        "granted_roles": granted_list,
+        "auth_method": principal.auth_method,
+    }
+    if missing_roles:
+        metadata["missing_roles"] = missing_roles
+    if reason:
+        metadata["reason"] = reason
+    if extra_metadata:
+        metadata.update(extra_metadata)
+
+    record_audit_event(
+        session,
+        actor=principal,
+        action="access_denied",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        metadata=metadata,
+    )
+
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+def enforce_roles(
+    principal: Principal,
+    required_roles: Iterable[str],
+    session: Session,
+    *,
+    resource_type: str = "endpoint",
+    resource_id: Optional[str] = None,
+) -> None:
+    normalized_roles = list(dict.fromkeys(required_roles))
     if principal.has_role(ROLE_ADMIN):
         return
-    if not principal.has_any_role(required_roles):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient role for this operation",
+    if not principal.has_any_role(normalized_roles):
+        log_access_denied(
+            session,
+            principal=principal,
+            required_roles=normalized_roles,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            reason="missing_required_roles",
         )
 
 
@@ -630,7 +744,13 @@ def list_principals(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> PrincipalCredentialCollectionResponse:
-    enforce_roles(principal, ["admin"])
+    enforce_roles(
+        principal,
+        ["admin"],
+        db,
+        resource_type="endpoint",
+        resource_id="/principals",
+    )
     records = (
         db.query(PrincipalCredential)
         .order_by(PrincipalCredential.created_at.desc())
@@ -653,6 +773,69 @@ def list_principals(
     return PrincipalCredentialCollectionResponse(data=response_items)
 
 
+@app.get("/audit-log", response_model=AuditLogCollectionResponse)
+def list_audit_log(
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    scan_id: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> AuditLogCollectionResponse:
+    """Return audit log entries for administrative review."""
+
+    enforce_roles(principal, [ROLE_ADMIN])
+
+    query = db.query(AuditLog)
+    applied_filters: Dict[str, Any] = {}
+
+    if actor:
+        query = query.filter(AuditLog.actor == actor)
+        applied_filters["actor"] = actor
+    if action:
+        query = query.filter(AuditLog.action == action)
+        applied_filters["action"] = action
+    if scan_id:
+        query = query.filter(AuditLog.scan_id == scan_id)
+        applied_filters["scan_id"] = scan_id
+
+    total = query.count()
+    records = (
+        query.order_by(AuditLog.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    response_items = [
+        AuditLogResponse.model_validate(record, from_attributes=True)
+        for record in records
+    ]
+
+    metadata: Dict[str, Any] = {
+        "limit": limit,
+        "offset": offset,
+        "returned": len(response_items),
+    }
+    if applied_filters:
+        metadata["filters"] = applied_filters
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="list_audit_log",
+        resource_type="audit_log",
+        resource_id=None,
+        metadata=metadata,
+    )
+
+    return AuditLogCollectionResponse(
+        data=response_items,
+        meta=PaginationMetadata(total=total, limit=limit, offset=offset),
+    )
+
+
 @app.post(
     "/principals",
     response_model=PrincipalCredentialCreatedResponse,
@@ -663,11 +846,18 @@ def create_principal_credential(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> PrincipalCredentialCreatedResponse:
-    enforce_roles(principal, ["admin"])
+    enforce_roles(
+        principal,
+        ["admin"],
+        db,
+        resource_type="endpoint",
+        resource_id="/principals",
+    )
 
     existing = (
         db.query(PrincipalCredential)
         .filter(PrincipalCredential.subject == request.subject)
+        .filter(PrincipalCredential.revoked_at.is_(None))
         .first()
     )
     if existing:
@@ -736,7 +926,13 @@ def revoke_principal_credential(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> PrincipalCredentialResponse:
-    enforce_roles(principal, ["admin"])
+    enforce_roles(
+        principal,
+        ["admin"],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/principals/{credential_id}/revoke",
+    )
 
     credential = db.get(PrincipalCredential, credential_id)
     if credential is None:
@@ -776,7 +972,13 @@ def create_target(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetResponse:
-    enforce_roles(principal, [ROLE_TARGETS_WRITE])
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_WRITE],
+        db,
+        resource_type="endpoint",
+        resource_id="/targets",
+    )
     existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
         raise HTTPException(
@@ -809,7 +1011,13 @@ def list_targets(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetCollectionResponse:
-    enforce_roles(principal, [ROLE_TARGETS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/targets",
+    )
     targets = db.query(Target).order_by(Target.created_at.desc()).all()
 
     record_audit_event(
@@ -834,7 +1042,13 @@ def enqueue_scan(
     queue: QueueClient = Depends(get_queue_client),
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
-    enforce_roles(principal, [ROLE_SCAN_ENQUEUE])
+    enforce_roles(
+        principal,
+        [ROLE_SCAN_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/scan",
+    )
 
     target = db.get(Target, request.target_id)
     if target is None:
@@ -891,7 +1105,13 @@ def enqueue_enrichment(
 ) -> EnrichmentResponse:
     """Queue a CVE enrichment job for the specified finding."""
 
-    enforce_roles(principal, [ROLE_ENRICHMENT_ENQUEUE])
+    enforce_roles(
+        principal,
+        [ROLE_ENRICHMENT_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/enrich",
+    )
 
     finding = db.get(Finding, request.finding_id)
     if finding is None:
@@ -951,7 +1171,13 @@ def list_scans(
 ) -> ScanCollectionResponse:
     """Return the most recent scans for the authenticated principal."""
 
-    enforce_roles(principal, [ROLE_SCANS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_SCANS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/scans",
+    )
     query = db.query(Scan).options(
         selectinload(Scan.target), selectinload(Scan.findings)
     )
@@ -1164,6 +1390,7 @@ def list_findings(
 
     enforce_roles(principal, [ROLE_FINDINGS_READ])
     query = db.query(Finding).options(selectinload(Finding.enrichments))
+
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
     elif target_id is not None:
@@ -1201,6 +1428,7 @@ def get_finding(
         .filter(Finding.id == finding_id)
         .first()
     )
+    
     if finding is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"

@@ -139,6 +139,51 @@ intelligence versus feeds that timed out.
 - The enrichment queue channel is separate from scan queues to allow isolated
   scaling policies in Kubernetes and clearer audit events in the controller.
 
+## Queue Integration & Deployment Guidance
+
+The enrichment worker now runs as a long-lived process that blocks on Redis
+(`BLPOP`) until jobs arrive. Deployments should set the following environment
+variables (defaults shown) to align queue names across controller and worker
+pods:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `REDIS_URL` | `redis://localhost:6379/0` | Connection string for the shared Redis instance. |
+| `CVE_ENRICHMENT_QUEUE_KEY` | `queues:enrichment:cve` | Job queue consumed via `BLPOP`. |
+| `CVE_ENRICHMENT_RESULT_QUEUE_KEY` | `queues:enrichment:cve:results` | Channel where completed/failed results are pushed. |
+| `CVE_ENRICHMENT_ERROR_QUEUE_KEY` | `queues:enrichment:cve:errors` | Dead-letter queue for payloads that exceed retry thresholds or fail deserialization. |
+| `CVE_ENRICHMENT_MAX_ATTEMPTS` | `3` | Maximum attempts (including the first run) before a job is dead-lettered. |
+| `CVE_ENRICHMENT_RETRY_BACKOFF_SECONDS` | `2.0` | Linear backoff applied between retries (`attempt * backoff`). |
+| `CVE_ENRICHMENT_QUEUE_POLL_TIMEOUT` | `5` | Seconds to wait on `BLPOP` before checking for shutdown signals. |
+
+### Runtime Behaviour
+
+- `poetry run cve-enrichment-worker` now blocks until terminated with
+  `SIGINT`/`SIGTERM`. Signal handlers flush the HTTP session and exit cleanly so
+  Kubernetes can roll deployments without orphaning requests.
+- Each processed job emits a structured status payload on the result queue:
+  - `status="completed"` contains the serialized `CVEEnrichmentResult` plus job
+    metadata.
+  - `status="retrying"` records transient failures and mirrors the retry
+    attempt counter so the controller can surface progress to operators.
+  - `status="failed"` is emitted when retries are exhausted; the same payload is
+    duplicated onto the dead-letter queue for later inspection.
+- Malformed JSON payloads are not retried; the raw payload and parsing error are
+  written to the dead-letter queue for forensic review.
+
+### Deployment Checklist
+
+- Co-locate the worker with Redis in Kubernetes using dedicated RBAC-scoped
+  ServiceAccounts; grant only `BLPOP`/`RPUSH` capabilities needed for the queue
+  keys above.
+- Scale worker replicas horizontally by increasing pod count—each instance will
+  compete on `BLPOP`, guaranteeing at-most-once job acquisition.
+- Monitor the `queues:enrichment:cve:errors` key for growth; it is the
+  authoritative indicator that jobs require analyst intervention.
+- For local smoke tests, you can still run a single job with
+  `poetry run cve-enrichment-worker --job-file job.json`. The worker bypasses
+  Redis in this mode and prints the serialized result to STDOUT.
+
 ## Related Implementation
 
 - Worker implementation: `workers/enrichment/cve/worker.py`
