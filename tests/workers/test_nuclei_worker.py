@@ -102,10 +102,16 @@ def test_process_job_posts_callback(sample_job):
     assert payload["scan_id"] == str(sample_job.scan_id)
     assert payload["findings"][0]["severity"] == "high"
     assert payload["error"] is None
-    assert isinstance(payload["completed_at"], datetime)
+    completed_at = payload["completed_at"]
+    assert isinstance(completed_at, str)
+    parsed_completed_at = datetime.fromisoformat(completed_at)
+    assert parsed_completed_at.tzinfo is not None
     metadata = payload["worker_metadata"]
     assert metadata["artifacts"]["stdout"].endswith("stdout.log")
     assert metadata["job_id"] == sample_job.job_id
+    artifact_locations = payload.get("artifact_locations")
+    assert artifact_locations is not None
+    assert artifact_locations["stdout"].endswith("stdout.log")
 
     headers = kwargs["headers"]
     assert headers["X-Callback-Token"] == "shared-secret"

@@ -528,7 +528,7 @@ def process_job(
         raise RetryableJobError(f"nuclei exited with code {scan.exit_code}")
 
     findings = normalize_findings(scan.records, job)
-    artifacts = upload_artifacts(scan, job, config, s3_client)
+    artifact_locations = upload_artifacts(scan, job, config, s3_client)
     worker_metadata: Dict[str, Any] = {
         "job_id": job.job_id,
         "target": job.target,
@@ -539,8 +539,8 @@ def process_job(
     extra_metadata = {k: v for k, v in job.metadata.items() if k != "scan_id"} if job.metadata else {}
     if extra_metadata:
         worker_metadata["job_metadata"] = extra_metadata
-    if artifacts:
-        worker_metadata["artifacts"] = artifacts
+    if artifact_locations:
+        worker_metadata["artifacts"] = artifact_locations
 
     worker_metadata.update(job.metadata)
     payload = {
@@ -549,8 +549,10 @@ def process_job(
         "findings": findings,
         "worker_metadata": worker_metadata,
         "error": None,
-        "completed_at": datetime.now(tz=timezone.utc),
+        "completed_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+    if artifact_locations:
+        payload["artifact_locations"] = artifact_locations
     post_callback(job, config, payload, session=session)
     LOG.info("Job %s completed successfully", job.job_id)
 
