@@ -43,6 +43,10 @@ describe('ScansTable', () => {
 
     expect(screen.getByText('https://app-1.medusa.local')).toBeInTheDocument();
     expect(screen.getByText('https://api-1.medusa.local')).toBeInTheDocument();
+    expect(screen.getByText('Scanner')).toBeInTheDocument();
+
+    const scannerCells = screen.getAllByText('nuclei');
+    expect(scannerCells).toHaveLength(2);
 
     const table = screen.getByRole('table');
     const rows = within(table).getAllByRole('row');
