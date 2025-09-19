@@ -6,6 +6,8 @@ from sqlalchemy.pool import StaticPool
 
 from controller.db.models import Base, PrincipalCredential
 from controller.main import (
+    DEFAULT_ADMIN_ROLES,
+    DEFAULT_ANALYST_ROLES,
     QueueClient,
     Settings,
     _hash_secret,
@@ -34,7 +36,6 @@ def client():
         nuclei_queue_channel="test-nuclei",
         cve_enrichment_queue_channel="test-enrichment",
         jwt_secret="unit-test-secret",
-        api_keys=["legacy-key"],
         nuclei_callback_token="callback-secret",
     )
 
@@ -54,14 +55,14 @@ def client():
                     subject="svc-admin",
                     auth_method="api_key",
                     key_hash=_hash_secret("test-key"),
-                    roles=["admin", "scan:enqueue", "targets:write"],
+                    roles=list(DEFAULT_ADMIN_ROLES),
                     description="Controller admin",
                 ),
                 PrincipalCredential(
                     subject="svc-analyst",
                     auth_method="api_key",
                     key_hash=_hash_secret("analyst-key"),
-                    roles=["analyst", "findings:read"],
+                    roles=list(DEFAULT_ANALYST_ROLES),
                     description="Read-only analyst",
                 ),
                 PrincipalCredential(

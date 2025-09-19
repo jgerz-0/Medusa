@@ -30,14 +30,14 @@ The controller authenticates requests using the following precedence rules:
    principal inherits the stored role set.
 2. If the hash only matches revoked credentials, the controller immediately
    returns `403 Forbidden`. Revoked keys never fall back to other mechanisms.
-3. If no database record matches, the controller checks any statically
-   configured bootstrap keys in `Settings.api_keys`.
-4. Finally, bearer tokens are validated as JWTs and mapped to `jwt`
+3. Finally, bearer tokens are validated as JWTs and mapped to `jwt`
    credentials stored in the same table.
 
-This lookup order ensures that operators can revoke keys without redeploying
-the controller while still supporting static bootstrap credentials for
-disaster recovery scenarios.
+All API key authentication therefore depends on presence in the
+`principal_credentials` table. Operators should seed baseline service
+principals using `controller.scripts.seed_principals` and manage the records
+through migrations or automation pipelines so keys can be revoked centrally
+without redeploying the controller.
 
 ## Roles
 

@@ -41,7 +41,6 @@ def api_client() -> (
         redis_url="redis://localhost:6379/0",
         nuclei_queue_channel="nuclei:test",
         jwt_secret="unit-test-secret",
-        api_keys=["test-key"],
         nuclei_callback_token="callback-secret",
     )
 
