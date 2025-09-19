@@ -71,11 +71,31 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.name }}
                   key: MEDUSA_NUCLEI_QUEUE_CHANNEL
+            - name: MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL
             - name: MEDUSA_NUCLEI_CALLBACK_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.name }}
                   key: MEDUSA_NUCLEI_CALLBACK_TOKEN
+            - name: MEDUSA_ENRICHMENT_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_ENRICHMENT_CALLBACK_TOKEN
+            - name: MEDUSA_CVE_ENRICHMENT_QDRANT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: CVE_ENRICHMENT_QDRANT_URL
+            - name: MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: CVE_ENRICHMENT_QDRANT_COLLECTION
             - name: MEDUSA_JWT_SECRET
               valueFrom:
                 secretKeyRef:
