@@ -221,3 +221,165 @@ variable "managed_node_groups" {
   )
   default = {}
 }
+
+variable "rds_database_name" {
+  description = "Primary database name provisioned for the Medusa controller."
+  type        = string
+  default     = "medusadb"
+}
+
+variable "rds_instance_identifier" {
+  description = "Optional explicit identifier for the controller database instance."
+  type        = string
+  default     = null
+}
+
+variable "rds_instance_class" {
+  description = "Instance class assigned to the controller database."
+  type        = string
+  default     = "db.t3.medium"
+}
+
+variable "rds_engine" {
+  description = "Database engine backing the controller datastore."
+  type        = string
+  default     = "postgres"
+}
+
+variable "rds_engine_version" {
+  description = "Engine version pinned for deterministic behaviour."
+  type        = string
+  default     = "15.4"
+}
+
+variable "rds_port" {
+  description = "Network port exposed by the controller database."
+  type        = number
+  default     = 5432
+}
+
+variable "rds_allocated_storage" {
+  description = "Initial storage (GiB) allocated to the controller database."
+  type        = number
+  default     = 50
+}
+
+variable "rds_max_allocated_storage" {
+  description = "Maximum storage (GiB) permitted for autoscaling."
+  type        = number
+  default     = 200
+}
+
+variable "rds_master_username" {
+  description = "Master username used by the controller for database access."
+  type        = string
+  default     = "medusa_admin"
+}
+
+variable "rds_master_secret_name" {
+  description = "Optional override for the master credentials secret name."
+  type        = string
+  default     = null
+}
+
+variable "rds_master_secret_description" {
+  description = "Optional description for the master credentials secret."
+  type        = string
+  default     = null
+}
+
+variable "rds_kms_key_arn" {
+  description = "Customer managed KMS key encrypting the controller database."
+  type        = string
+  default     = null
+}
+
+variable "rds_master_secret_kms_key_arn" {
+  description = "KMS key encrypting the controller database master credentials secret."
+  type        = string
+  default     = null
+}
+
+variable "rds_backup_retention_period" {
+  description = "Number of days to retain automated database backups."
+  type        = number
+  default     = 7
+}
+
+variable "rds_preferred_backup_window" {
+  description = "Optional UTC window for automated backups."
+  type        = string
+  default     = null
+}
+
+variable "rds_preferred_maintenance_window" {
+  description = "Optional UTC window for database maintenance."
+  type        = string
+  default     = null
+}
+
+variable "rds_multi_az" {
+  description = "Enable Multi-AZ deployment for the controller database."
+  type        = bool
+  default     = false
+}
+
+variable "rds_deletion_protection" {
+  description = "Protect the controller database from accidental deletion."
+  type        = bool
+  default     = true
+}
+
+variable "rds_skip_final_snapshot" {
+  description = "Skip the final snapshot when destroying the controller database."
+  type        = bool
+  default     = false
+}
+
+variable "rds_apply_immediately" {
+  description = "Apply database modifications immediately rather than waiting for the maintenance window."
+  type        = bool
+  default     = false
+}
+
+variable "rds_monitoring_interval" {
+  description = "Enhanced monitoring interval in seconds for the database (0 disables)."
+  type        = number
+  default     = 0
+}
+
+variable "rds_iam_authentication_enabled" {
+  description = "Enable IAM authentication for the controller database."
+  type        = bool
+  default     = false
+}
+
+variable "rds_performance_insights_enabled" {
+  description = "Toggle Performance Insights for the controller database."
+  type        = bool
+  default     = true
+}
+
+variable "rds_performance_insights_kms_key_arn" {
+  description = "KMS key securing Performance Insights data for the database."
+  type        = string
+  default     = null
+}
+
+variable "rds_master_secret_rotation_enabled" {
+  description = "Enable automatic rotation of the controller master credentials secret."
+  type        = bool
+  default     = false
+}
+
+variable "rds_master_secret_rotation_lambda_arn" {
+  description = "Rotation Lambda handling credential updates when rotation is enabled."
+  type        = string
+  default     = null
+}
+
+variable "rds_master_secret_rotation_automatically_after_days" {
+  description = "Rotation cadence in days for the controller master credentials secret."
+  type        = number
+  default     = 30
+}
