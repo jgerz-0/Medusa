@@ -43,6 +43,8 @@ def client():
         sqlmap_callback_token="sqlmap-secret",
         enrichment_callback_token="enrichment-secret",
         binary_static_analysis_callback_token="static-secret",
+        binary_fuzzing_queue_channel="test-binary-fuzzing",
+        binary_fuzzing_callback_token="fuzzing-secret",
     )
 
     engine = create_engine(

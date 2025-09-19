@@ -32,6 +32,7 @@ def test_zap_worker_config_defaults(monkeypatch):
         sqlmap_callback_token="sqlmap-token",
         enrichment_callback_token="enrichment-token",
         binary_static_analysis_callback_token="static-secret",
+        binary_fuzzing_callback_token="fuzzing-secret",
     )
     assert config.queue_key == settings.zap_queue_channel
     assert config.dead_letter_key == "queues:zap:dead"

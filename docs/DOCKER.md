@@ -9,7 +9,7 @@ This guide covers the Phase 1 local Docker Compose environment. It stands up eve
 - 20 GB free disk space for container images, Postgres, MinIO, and Qdrant data directories
 
 ## Compose Manifests
-- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, SQLMap, and binary preprocess workers, plus the Next.js frontend.
+- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, SQLMap, binary preprocess, and binary fuzzing workers, plus the Next.js frontend.
 - `infra/docker/controller.Dockerfile` – Poetry-based image for the controller with Uvicorn hot reload enabled.
 - `infra/docker/frontend.Dockerfile` – Node 20 + pnpm image for the dashboard.
 - `infra/docker/.env.example` – sane defaults for development credentials and exposed ports.
@@ -39,10 +39,16 @@ following secrets are set before starting the stack:
 - `MEDUSA_NUCLEI_CALLBACK_TOKEN`
 - `MEDUSA_ZAP_CALLBACK_TOKEN`
 - `MEDUSA_SQLMAP_CALLBACK_TOKEN`
+- `MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN`
+- `MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN`
 - `BINARY_PREPROCESS_QUEUE_KEY`
 - `BINARY_PREPROCESS_DEAD_LETTER_KEY`
 - `BINARY_METADATA_BUCKET`
 - `BINARY_METADATA_PREFIX`
+- `BINARY_FUZZING_QUEUE_KEY`
+- `BINARY_FUZZING_DEAD_LETTER_KEY`
+- `BINARY_FUZZING_BUCKET` (optional, defaults to the source artifact bucket)
+- `BINARY_FUZZING_PREFIX`
 - `S3_ACCESS_KEY_ID`
 - `S3_SECRET_ACCESS_KEY`
 - `MEDUSA_ENRICHMENT_CALLBACK_TOKEN`
@@ -71,17 +77,44 @@ Provision the buckets once after starting MinIO:
 docker compose exec minio mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
 docker compose exec minio mc mb -p local/binary-uploads
 docker compose exec minio mc mb -p local/binary-metadata
+# Optional: dedicate a bucket for fuzzing artifacts if you do not want to reuse the source bucket
+# docker compose exec minio mc mb -p local/binary-fuzzing
 ```
 
 The preprocess worker enforces the prefix and fails closed if the metadata
 bucket is missing so operators do not accidentally leak artifacts to
 unauthorized paths.
 
+### Binary fuzzing harnesses
+
+The `binary-fuzzing-worker` container shells out to the host Docker Engine to
+launch hardened AFL and libFuzzer images. Compose mounts `/var/run/docker.sock`
+read-only into the worker; keep Docker patched and restrict access to the group
+owning the socket. Populate the following environment variables in `.env` to
+point at your harness images and adjust runtime behavior:
+
+- `BINARY_FUZZING_AFL_IMAGE` and `BINARY_FUZZING_LIBFUZZER_IMAGE` – container
+  images that wrap your fuzzing harnesses.
+- `BINARY_FUZZING_AFL_COMMAND` and `BINARY_FUZZING_LIBFUZZER_COMMAND` – entry
+  points invoked inside the containers.
+- `BINARY_FUZZING_BUCKET` / `BINARY_FUZZING_PREFIX` – optional override for the
+  artifact location in MinIO. Leave blank to reuse the sample's source bucket.
+- `BINARY_FUZZING_RUNTIME_FLAGS` – additional allow-listed flags passed to the
+  Docker CLI if you need cgroup or CPU quotas.
+
 Set the optional `COMPOSE_BIN` environment variable if you prefer an alternate
 Compose implementation (for example `podman compose`). The smoke test script
 uses the same variable to avoid hard-coding the binary path.
 
-The compose file automatically mounts code from `controller/`, `workers/web/nuclei/`, `workers/web/zap/`, `workers/web/sqlmap/`, and `frontend/` into the containers so edits on the host trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts. Principal API keys are written to `/var/lib/medusa/principal_credentials.env` inside the controller container and shared with the frontend so human analysts can authenticate without hard-coded secrets.
+The compose file automatically mounts code from `controller/`,
+`workers/web/nuclei/`, `workers/web/zap/`, `workers/web/sqlmap/`,
+`workers/binary/preprocess/`, `workers/binary/fuzzing/`, and `frontend/` into
+the containers so edits on the host trigger FastAPI reloads, worker
+hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant
+data persist under `infra/docker/data/` and survive container restarts.
+Principal API keys are written to `/var/lib/medusa/principal_credentials.env`
+inside the controller container and shared with the frontend so human analysts
+can authenticate without hard-coded secrets.
 
 ## Smoke Test
 Run the end-to-end smoke test once the services report `healthy`:

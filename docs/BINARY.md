@@ -120,6 +120,56 @@ onto Redis. Workers call back to
 `/internal/binary/static-analysis/callback` using the shared secret supplied in
 `MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN`.
 
+### Fuzzing Worker
+
+Phase three introduces the fuzzing worker located under
+`workers/binary/fuzzing`. The worker consumes jobs from
+`queues:binary:fuzzing`, executes hardened AFL and libFuzzer harnesses, and
+streams crash evidence back to the controller. The harnesses are executed inside
+pre-built container images so no untrusted arguments are injected at runtime.
+
+- Jobs are queued via `POST /binary/fuzzing`. Operators must reference an
+  existing normalized sample and can optionally supply a maximum fuzzing
+  duration. The controller records an audit event, creates a
+  `scanner="binary_fuzzing"` scan row, and enqueues onto Redis.
+- Each fuzzer runs inside an isolated container with the sample mounted
+  read-only at `/workspace/<artifact>`. Environment variables provide the sample
+  path, scan identifier, and tool name to the harness.
+- Harness stdout is expected to emit structured JSON. Crash metadata is
+  normalized into `binary_fuzzing_findings` while raw stdout/stderr are persisted
+  to MinIO using the `analysis/fuzzing/<sample-id>/<tool>-<uuid>.json` naming
+  convention.
+- The worker posts results to `/internal/binary/fuzzing/callback` with the
+  shared secret stored in `MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN`.
+
+#### Fuzzing Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `BINARY_FUZZING_QUEUE_KEY` | Redis list key for fuzzing jobs (default `queues:binary:fuzzing`). |
+| `BINARY_FUZZING_DEAD_LETTER_KEY` | Redis key for failed fuzzing jobs. |
+| `BINARY_FUZZING_RUNTIME` | Container runtime binary (`docker` or `podman`). |
+| `BINARY_FUZZING_RUNTIME_FLAGS` | Space-separated runtime flags validated against the allow-list. |
+| `BINARY_FUZZING_AFL_IMAGE` / `BINARY_FUZZING_LIBFUZZER_IMAGE` | Container images containing the hardened harnesses. |
+| `BINARY_FUZZING_AFL_COMMAND` / `BINARY_FUZZING_LIBFUZZER_COMMAND` | Entry commands executed inside the containers. |
+| `BINARY_FUZZING_ENABLE_AFL` / `BINARY_FUZZING_ENABLE_LIBFUZZER` | Toggle individual fuzzers (default enabled). |
+| `BINARY_FUZZING_MAX_DURATION` | Default maximum runtime per fuzzer in seconds (default 900). |
+| `BINARY_FUZZING_BUCKET` | Bucket for persisted fuzzing artifacts (defaults to the sample bucket). |
+| `BINARY_FUZZING_PREFIX` | Prefix inside the artifact bucket (default `analysis/fuzzing/`). |
+| `MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN` | Shared secret required for fuzzing worker callbacks. |
+
+Run the fuzzing worker locally:
+
+```bash
+poetry run python -m workers.binary.fuzzing.worker
+```
+
+Execute a single job for debugging:
+
+```bash
+poetry run python -m workers.binary.fuzzing.worker --once job.json
+```
+
 ### Environment Variables
 
 | Variable | Purpose |
@@ -192,13 +242,15 @@ Two new pytest suites ensure deterministic behavior:
 
 - `workers/binary/preprocess/tests/` verifies queue processing, policy
   enforcement, and metadata persistence.
+- `workers/binary/fuzzing/tests/` exercises container orchestration, artifact
+  persistence, and callback payload normalization.
 - `controller/tests/test_api_contracts.py` exercises the `/preprocess` enqueue
   contract, validating scope mismatch auditing and Redis dispatch.
 
 Run the tests with:
 
 ```bash
-poetry run pytest workers/binary/preprocess/tests controller/tests/test_api_contracts.py
+poetry run pytest workers/binary/preprocess/tests workers/binary/fuzzing/tests controller/tests/test_api_contracts.py
 ```
 
 ## Analyst Checklist

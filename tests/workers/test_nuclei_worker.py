@@ -61,6 +61,7 @@ def test_worker_config_defaults_align_with_controller(monkeypatch):
         sqlmap_callback_token="sqlmap-secret",
         enrichment_callback_token="enrichment-secret",
         binary_static_analysis_callback_token="static-secret",
+        binary_fuzzing_callback_token="fuzzing-secret",
     )
 
     assert config.queue_key == settings.nuclei_queue_channel

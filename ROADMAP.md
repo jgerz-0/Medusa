@@ -28,8 +28,8 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 ## Phase 3 – Binary Support (Weeks 5–6)
 - ✅ Preprocess agent (file type detection, triage rules, scope enforcement).
 - ✅ Static analyzers (checksec, bandit) with JSON adapters.
-- Fuzzing harness using AFL/libFuzzer container jobs with artifact collection in MinIO.
-- Binary findings schema aligned with web findings for unified reporting.
+- ✅ Fuzzing harness using AFL/libFuzzer container jobs with artifact collection in MinIO.
+- ✅ Binary findings schema aligned with web findings for unified reporting.
 
 ## Phase 4 – Multi-Scanner + Validator (Weeks 7–8)
 - ✅ Integrate ZAP and SQLMap workers with scope guardrails (see [workers/web/zap/README.md](workers/web/zap/README.md) and [workers/web/sqlmap/README.md](workers/web/sqlmap/README.md)).

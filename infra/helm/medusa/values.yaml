@@ -30,6 +30,8 @@ secrets:
     MEDUSA_REDIS_URL: "redis://redis-master:6379/0"
     MEDUSA_NUCLEI_QUEUE_CHANNEL: "queues:nuclei:jobs"
     MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: "queues:binary:preprocess"
+    MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: "queues:binary:static-analysis"
+    MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: "queues:binary:fuzzing"
     MEDUSA_NUCLEI_CALLBACK_TOKEN: "change-me"
     MEDUSA_ENRICHMENT_CALLBACK_TOKEN: "change-me"
     MEDUSA_JWT_SECRET: "change-me"
@@ -46,8 +48,13 @@ secrets:
     BINARY_PREPROCESS_DEAD_LETTER_KEY: "queues:binary:preprocess:dead"
     BINARY_METADATA_BUCKET: "binary-metadata"
     BINARY_METADATA_PREFIX: "preprocess/metadata/"
+    BINARY_FUZZING_DEAD_LETTER_KEY: "queues:binary:fuzzing:dead"
+    BINARY_FUZZING_BUCKET: ""
+    BINARY_FUZZING_PREFIX: "analysis/fuzzing/"
     MEDUSA_POSTGRES_PASSWORD: "change-me"
     MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: "queues:enrichment:cve"
+    MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: "change-me"
+    MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: "change-me"
     CVE_ENRICHMENT_QUEUE_KEY: "queues:enrichment:cve"
     CVE_ENRICHMENT_RESULT_QUEUE_KEY: "queues:enrichment:cve:results"
     CVE_ENRICHMENT_ERROR_QUEUE_KEY: "queues:enrichment:cve:errors"
@@ -367,6 +374,69 @@ workers:
           - ALL
     podAnnotations: {}
     podLabels: {}
+    extraVolumeMounts: []
+    extraVolumes: []
+
+  binaryFuzzing:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-binary-fuzzing
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: binary-fuzzing-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        BINARY_FUZZING_QUEUE_KEY: MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL
+        BINARY_FUZZING_DEAD_LETTER_KEY: BINARY_FUZZING_DEAD_LETTER_KEY
+        BINARY_FUZZING_BUCKET: BINARY_FUZZING_BUCKET
+        BINARY_FUZZING_PREFIX: BINARY_FUZZING_PREFIX
+        BINARY_FUZZING_CALLBACK_TOKEN: MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN
+        S3_ACCESS_KEY_ID: S3_ACCESS_KEY_ID
+        S3_SECRET_ACCESS_KEY: S3_SECRET_ACCESS_KEY
+      values:
+        S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
+        AWS_DEFAULT_REGION: "us-east-1"
+        BINARY_FUZZING_POLL_TIMEOUT: "5"
+        BINARY_FUZZING_MAX_ATTEMPTS: "3"
+        BINARY_FUZZING_RUNTIME: "docker"
+        BINARY_FUZZING_RUNTIME_FLAGS: ""
+        BINARY_FUZZING_AFL_IMAGE: "docker.io/medusa/afl:latest"
+        BINARY_FUZZING_LIBFUZZER_IMAGE: "docker.io/medusa/libfuzzer:latest"
+        BINARY_FUZZING_AFL_COMMAND: "/opt/medusa/run_afl"
+        BINARY_FUZZING_LIBFUZZER_COMMAND: "/opt/medusa/run_libfuzzer"
+        BINARY_FUZZING_ENABLE_AFL: "1"
+        BINARY_FUZZING_ENABLE_LIBFUZZER: "1"
+        BINARY_FUZZING_MAX_DURATION: "900"
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    extraVolumeMounts: []
+    extraVolumes: []
   cveEnrichment:
     enabled: true
     type: job

@@ -20,6 +20,12 @@ DOCKER_BUILDKIT=1 docker build -t medusa/controller -f infra/docker/controller.D
 # Nuclei worker
 DOCKER_BUILDKIT=1 docker build -t medusa/worker-nuclei -f workers/web/nuclei/Dockerfile .
 
+# Binary preprocess worker
+DOCKER_BUILDKIT=1 docker build -t medusa/worker-binary-preprocess -f workers/binary/preprocess/Dockerfile .
+
+# Binary fuzzing worker
+DOCKER_BUILDKIT=1 docker build -t medusa/worker-binary-fuzzing -f workers/binary/fuzzing/Dockerfile .
+
 # Frontend (only required if you expose it through the cluster)
 DOCKER_BUILDKIT=1 docker build -t medusa/frontend -f infra/docker/frontend.Dockerfile .
 ```
@@ -58,7 +64,14 @@ Key defaults provided by `values-dev.yaml`:
 - Controller, Redis, Postgres, MinIO, and Qdrant run with the same credentials as Docker Compose.
 - Inline secrets seed the same JWT secret, callback tokens, and MinIO credentials.
 - Persistent volumes are disabled to favour fast iteration; data disappears when pods are deleted.
-- The nuclei worker runs as a `Job` wired to the Redis queue (`queues:nuclei:jobs`).
+- The nuclei, binary preprocess, and binary fuzzing workers run as `Job` resources wired to their respective Redis queues.
+
+The fuzzing worker requires access to a container runtime capable of launching the
+target harness images. In development clusters you can mount the host Docker
+socket by setting `workers.binaryFuzzing.extraVolumeMounts` and
+`workers.binaryFuzzing.extraVolumes` in your values file. Production deployments
+should instead point `BINARY_FUZZING_RUNTIME` at a remote runner or leverage a
+dedicated fuzzing node pool with strict RBAC.
 
 ## Verify the deployment
 

@@ -47,7 +47,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-The compose file mounts `controller/`, `workers/web/nuclei/`, and `frontend/` into their respective containers so host edits trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Persistent data lives under `infra/docker/data/`.
+The compose file mounts `controller/`, `workers/web/nuclei/`, `workers/binary/preprocess/`, `workers/binary/fuzzing/`, and `frontend/` into their respective containers so host edits trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Persistent data lives under `infra/docker/data/`.
 
 ### 3. Run migrations and validate the pipeline
 ```bash
