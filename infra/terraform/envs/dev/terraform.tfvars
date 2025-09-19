@@ -49,3 +49,14 @@ managed_node_groups = {
     }
   }
 }
+
+rds_instance_identifier      = "medusa-dev-db"
+rds_database_name            = "medusadb"
+rds_instance_class           = "db.t3.medium"
+rds_allocated_storage        = 50
+rds_max_allocated_storage    = 200
+rds_backup_retention_period  = 7
+rds_deletion_protection      = false
+rds_master_username          = "medusa_admin"
+rds_master_secret_rotation_enabled = false
+rds_master_secret_rotation_automatically_after_days = 30

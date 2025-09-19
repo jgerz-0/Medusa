@@ -94,6 +94,42 @@ module "eks" {
   tags = local.common_tags
 }
 
+module "rds" {
+  source = "./modules/rds"
+
+  database_name        = var.rds_database_name
+  instance_class       = var.rds_instance_class
+  engine               = var.rds_engine
+  engine_version       = var.rds_engine_version
+  port                 = var.rds_port
+  allocated_storage    = var.rds_allocated_storage
+  max_allocated_storage = var.rds_max_allocated_storage
+  instance_identifier  = var.rds_instance_identifier
+  vpc_id               = module.eks.vpc_id
+  subnet_ids           = module.eks.private_subnet_ids
+  allowed_security_group_ids = [module.eks.node_security_group_id]
+  master_username      = var.rds_master_username
+  kms_key_arn          = var.rds_kms_key_arn
+  master_secret_kms_key_arn = var.rds_master_secret_kms_key_arn
+  backup_retention_period = var.rds_backup_retention_period
+  preferred_backup_window = var.rds_preferred_backup_window
+  preferred_maintenance_window = var.rds_preferred_maintenance_window
+  multi_az             = var.rds_multi_az
+  deletion_protection  = var.rds_deletion_protection
+  skip_final_snapshot  = var.rds_skip_final_snapshot
+  apply_immediately    = var.rds_apply_immediately
+  monitoring_interval  = var.rds_monitoring_interval
+  iam_database_authentication_enabled = var.rds_iam_authentication_enabled
+  performance_insights_enabled        = var.rds_performance_insights_enabled
+  performance_insights_kms_key_arn    = var.rds_performance_insights_kms_key_arn
+  master_secret_name                  = var.rds_master_secret_name
+  master_secret_description           = var.rds_master_secret_description
+  master_secret_rotation_enabled      = var.rds_master_secret_rotation_enabled
+  master_secret_rotation_lambda_arn   = var.rds_master_secret_rotation_lambda_arn
+  master_secret_rotation_automatically_after_days = var.rds_master_secret_rotation_automatically_after_days
+  tags = local.common_tags
+}
+
 locals {
   eks_context = {
     cluster_endpoint = module.eks.cluster_endpoint
@@ -102,5 +138,13 @@ locals {
     node_security_group_id = module.eks.node_security_group_id
     cluster_iam_role_arn = module.eks.cluster_iam_role_arn
     node_iam_role_arns = module.eks.node_iam_role_arns
+  }
+
+  rds_context = module.rds.controller_context
+
+  rds_network = {
+    security_group_id  = module.rds.security_group_id
+    subnet_group_name  = module.rds.subnet_group_name
+    database_identifier = module.rds.database_identifier
   }
 }

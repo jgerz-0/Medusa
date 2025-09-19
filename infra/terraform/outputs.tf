@@ -37,3 +37,18 @@ output "eks_encryption_key_arn" {
   description = "KMS key ARN encrypting Kubernetes secrets for the cluster."
   value       = module.eks.encryption_key_arn
 }
+
+output "rds_context" {
+  description = "Connection metadata and credential references for the Medusa controller database."
+  value       = local.rds_context
+}
+
+output "rds_network" {
+  description = "Networking primitives securing the controller database."
+  value       = local.rds_network
+}
+
+output "rds_master_credentials_secret_arn" {
+  description = "Secrets Manager ARN storing the controller master credentials."
+  value       = module.rds.master_credentials_secret_arn
+}
