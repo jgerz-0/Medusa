@@ -47,42 +47,27 @@ spec:
           {{- end }}
           securityContext:
             {{- toYaml $worker.securityContext | nindent 12 }}
+          {{- if or $worker.env.secretRefs (or $worker.env.values $worker.env.extra) }}
           env:
-            - name: REDIS_URL
+            {{- with $worker.env.secretRefs }}
+            {{- range $envName, $secretKey := . }}
+            - name: {{ $envName }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $.Values.secrets.name }}
-                  key: MEDUSA_REDIS_URL
-            - name: NUCLEI_QUEUE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $.Values.secrets.name }}
-                  key: MEDUSA_NUCLEI_QUEUE_CHANNEL
-            - name: NUCLEI_CALLBACK_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $.Values.secrets.name }}
-                  key: NUCLEI_CALLBACK_TOKEN
-            - name: NUCLEI_ARTIFACT_BUCKET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $.Values.secrets.name }}
-                  key: NUCLEI_ARTIFACT_BUCKET
-            - name: S3_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $.Values.secrets.name }}
-                  key: S3_ACCESS_KEY
-            - name: S3_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $.Values.secrets.name }}
-                  key: S3_SECRET_KEY
-            - name: S3_ENDPOINT_URL
-              value: {{ printf "http://%s-minio:%d" (include "medusa.fullname" $) $.Values.minio.service.apiPort }}
+                  key: {{ $secretKey }}
+            {{- end }}
+            {{- end }}
+            {{- with $worker.env.values }}
+            {{- range $envName, $value := . }}
+            - name: {{ $envName }}
+              value: {{ tpl $value $ | quote }}
+            {{- end }}
+            {{- end }}
             {{- range $worker.env.extra }}
             - {{- toYaml . | nindent 14 }}
             {{- end }}
+          {{- end }}
           resources:
             {{- toYaml $worker.resources | nindent 12 }}
 ---

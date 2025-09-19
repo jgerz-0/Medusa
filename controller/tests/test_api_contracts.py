@@ -251,6 +251,19 @@ def test_preprocess_enqueue_flow(
     assert job["object_bucket"] == "binary-uploads"
     assert job["metadata"]["target_scope"] == "firmware.example.com"
 
+    with session_factory() as session:
+        audit_entry = (
+            session.query(AuditLog)
+            .filter(AuditLog.action == "enqueue_binary_preprocess")
+            .order_by(AuditLog.created_at.desc())
+            .first()
+        )
+
+        assert audit_entry is not None
+        snapshot = audit_entry.evidence_snapshot
+        assert snapshot.get("resource_id") == payload["id"]
+        assert snapshot.get("object_bucket") == "binary-uploads"
+
 
 def test_preprocess_scope_mismatch_audited(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],

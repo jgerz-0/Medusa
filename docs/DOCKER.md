@@ -9,7 +9,7 @@ This guide covers the Phase 1 local Docker Compose environment. It stands up eve
 - 20 GB free disk space for container images, Postgres, MinIO, and Qdrant data directories
 
 ## Compose Manifests
-- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, and SQLMap workers, plus the Next.js frontend.
+- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, SQLMap, and binary preprocess workers, plus the Next.js frontend.
 - `infra/docker/controller.Dockerfile` – Poetry-based image for the controller with Uvicorn hot reload enabled.
 - `infra/docker/frontend.Dockerfile` – Node 20 + pnpm image for the dashboard.
 - `infra/docker/.env.example` – sane defaults for development credentials and exposed ports.
@@ -39,10 +39,37 @@ following secrets are set before starting the stack:
 - `MEDUSA_NUCLEI_CALLBACK_TOKEN`
 - `MEDUSA_ZAP_CALLBACK_TOKEN`
 - `MEDUSA_SQLMAP_CALLBACK_TOKEN`
+- `BINARY_PREPROCESS_QUEUE_KEY`
+- `BINARY_PREPROCESS_DEAD_LETTER_KEY`
+- `BINARY_METADATA_BUCKET`
+- `BINARY_METADATA_PREFIX`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
 
 Each worker reads the corresponding token via `NUCLEI_CALLBACK_TOKEN`,
 `ZAP_CALLBACK_TOKEN`, or `SQLMAP_CALLBACK_TOKEN` so callbacks are rejected if a
 container is misconfigured.
+
+Binary preprocessing relies on two deterministic storage locations inside
+MinIO:
+
+- **Upload bucket** – analysts place raw samples in `binary-uploads/`
+  (customize via the controller request payload).
+- **Metadata bucket/prefix** – the worker writes normalized JSON records to
+  `binary-metadata/preprocess/metadata/` by default. Adjust the bucket and
+  prefix via `BINARY_METADATA_BUCKET` and `BINARY_METADATA_PREFIX`.
+
+Provision the buckets once after starting MinIO:
+
+```bash
+docker compose exec minio mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+docker compose exec minio mc mb -p local/binary-uploads
+docker compose exec minio mc mb -p local/binary-metadata
+```
+
+The preprocess worker enforces the prefix and fails closed if the metadata
+bucket is missing so operators do not accidentally leak artifacts to
+unauthorized paths.
 
 Set the optional `COMPOSE_BIN` environment variable if you prefer an alternate
 Compose implementation (for example `podman compose`). The smoke test script

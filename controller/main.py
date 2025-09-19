@@ -498,6 +498,7 @@ class Settings(BaseSettings):
     binary_preprocess_queue_channel: str = Field(
         "queues:binary:preprocess",
         description="Redis list channel for binary preprocessing jobs.",
+    )
     cve_enrichment_qdrant_url: Optional[str] = Field(
         default=None,
         description="Base URL for the Qdrant vector collection used by enrichment workers.",
@@ -2001,14 +2002,6 @@ def enqueue_scan(
     db.refresh(scan)
 
     queue.enqueue(queue_channel, job_payload)
-            **(
-                {"rejected_hosts": rejected_hosts}
-                if rejected_hosts
-                else {}
-            ),
-        },
-    }
-    queue.enqueue(settings.nuclei_queue_channel, job_payload)
 
     record_audit_event(
         db,
