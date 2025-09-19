@@ -26,9 +26,9 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 - ✅ UI highlights enriched findings and displays provenance of enrichment data based on the `/enrich` lifecycle.
 
 ## Phase 3 – Binary Support (Weeks 5–6)
-- ✅ Preprocess agent (file type detection, triage rules, scope enforcement) delivered via the `/preprocess` flow and worker stack documented in [docs/BINARY.md](docs/BINARY.md).
-- ☐ Static analyzers (checksec, bandit) with JSON adapters — pending implementation.
-- ☐ Fuzzing harness using AFL/libFuzzer container jobs with artifact collection in MinIO — pending implementation.
+- ✅ Preprocess agent (file type detection, triage rules, scope enforcement).
+- ✅ Static analyzers (checksec, bandit) with JSON adapters.
+- Fuzzing harness using AFL/libFuzzer container jobs with artifact collection in MinIO.
 - Binary findings schema aligned with web findings for unified reporting.
 
 ## Phase 4 – Multi-Scanner + Validator (Weeks 7–8)

@@ -12,6 +12,8 @@ import jwt
 from controller.db.models import (
     AuditLog,
     Base,
+    BinarySample,
+    BinaryStaticAnalysisFinding,
     Finding,
     FindingEnrichment,
     PrincipalCredential,
@@ -56,6 +58,8 @@ def api_client() -> (
         zap_callback_token="zap-callback",
         sqlmap_callback_token="sqlmap-callback",
         enrichment_callback_token="enrichment-secret",
+        binary_static_analysis_queue_channel="binary-static:test",
+        binary_static_analysis_callback_token="binary-static-secret",
     )
 
     engine = create_engine(
@@ -108,8 +112,13 @@ def api_client() -> (
 def auth_headers() -> dict[str, str]:
     return {"X-API-Key": "test-key"}
 
+
 def enrichment_headers() -> dict[str, str]:
     return {"X-Callback-Token": "enrichment-secret"}
+
+
+def binary_static_headers() -> dict[str, str]:
+    return {"X-Callback-Token": "binary-static-secret"}
 
 
 def _create_finding_record(session_factory: sessionmaker) -> str:
@@ -291,10 +300,186 @@ def test_preprocess_scope_mismatch_audited(
     assert not queue.messages
 
     with session_factory() as session:
-        audit_entries = session.query(AuditLog).filter(
-            AuditLog.action == "preprocess_scope_mismatch"
-        ).all()
+        audit_entries = (
+            session.query(AuditLog)
+            .filter(AuditLog.action == "preprocess_scope_mismatch")
+            .all()
+        )
         assert audit_entries, "scope mismatches should be audited"
+
+
+def test_static_analysis_enqueue_flow(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, queue, session_factory, settings = api_client
+
+    target_response = client.post(
+        "/targets",
+        json={"name": "Firmware", "scope": "firmware.example.com"},
+        headers=auth_headers(),
+    )
+    assert target_response.status_code == 201, target_response.text
+    target_payload = target_response.json()
+
+    with session_factory() as session:
+        preprocess_scan = Scan(
+            target_id=target_payload["id"],
+            scanner="binary_preprocess",
+            initiated_by="tester",
+            status="completed",
+            parameters={},
+        )
+        session.add(preprocess_scan)
+        session.flush()
+
+        sample = BinarySample(
+            scan_id=preprocess_scan.id,
+            target_id=target_payload["id"],
+            file_name="sample.bin",
+            sha256="ab" * 32,
+            file_size=1024,
+            mime_type="application/octet-stream",
+            magic_type="ELF 64-bit",
+            policy_status="allowed",
+            policy_reasons=[],
+            storage_bucket="binary-uploads",
+            storage_key="uploads/sample.bin",
+            metadata_json={"sha256": "ab" * 32},
+            metadata_hash="",
+            processed_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(sample)
+        session.commit()
+        sample_id = sample.id
+
+    response = client.post(
+        "/binary/static-analysis",
+        json={
+            "sample_id": sample_id,
+            "target_id": target_payload["id"],
+            "metadata": {"profile": "baseline"},
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["scanner"] == "binary_static_analysis"
+
+    assert queue.messages, "static analysis enqueue should push a job"
+    channel, job = queue.messages[-1]
+    assert channel == settings.binary_static_analysis_queue_channel
+    assert job["sample_id"] == sample_id
+    assert job["callback_url"].endswith("/internal/binary/static-analysis/callback")
+    assert job["metadata"]["target_id"] == target_payload["id"]
+
+
+def test_binary_static_analysis_callback_persists_findings(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(
+            name="Firmware", scope="firmware.example.com", is_authorized=True
+        )
+        session.add(target)
+        session.flush()
+
+        preprocess_scan = Scan(
+            target_id=target.id,
+            scanner="binary_preprocess",
+            initiated_by="tester",
+            status="completed",
+            parameters={},
+        )
+        session.add(preprocess_scan)
+        session.flush()
+
+        sample = BinarySample(
+            scan_id=preprocess_scan.id,
+            target_id=target.id,
+            file_name="sample.bin",
+            sha256="cd" * 32,
+            file_size=2048,
+            mime_type="application/octet-stream",
+            magic_type="ELF 64-bit",
+            policy_status="allowed",
+            policy_reasons=[],
+            storage_bucket="binary-uploads",
+            storage_key="uploads/sample.bin",
+            metadata_json={},
+            metadata_hash="",
+            processed_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(sample)
+        session.flush()
+
+        analysis_scan = Scan(
+            target_id=target.id,
+            scanner="binary_static_analysis",
+            initiated_by="tester",
+            status="running",
+            parameters={"sample_id": sample.id},
+        )
+        session.add(analysis_scan)
+        session.commit()
+
+        sample_id = sample.id
+        scan_id = analysis_scan.id
+
+    executed_at = datetime.now(tz=timezone.utc)
+    response = client.post(
+        "/internal/binary/static-analysis/callback",
+        json={
+            "job_id": "job-static-1",
+            "scan_id": scan_id,
+            "sample_id": sample_id,
+            "status": "completed",
+            "processed_at": executed_at.isoformat(),
+            "findings": [
+                {
+                    "tool": "checksec",
+                    "severity": "high",
+                    "title": "NX disabled",
+                    "description": "Executable is missing NX",
+                    "metadata": {"feature": "nx", "state": "no"},
+                    "evidence": {"raw": {"nx": "no"}},
+                    "artifact_bucket": "analysis",
+                    "artifact_key": "reports/checksec.json",
+                    "executed_at": executed_at.isoformat(),
+                }
+            ],
+            "artifacts": [
+                {
+                    "tool": "checksec",
+                    "bucket": "analysis",
+                    "key": "reports/checksec.json",
+                }
+            ],
+            "reports": [],
+            "metadata": {},
+        },
+        headers=binary_static_headers(),
+    )
+    assert response.status_code == 204, response.text
+
+    with session_factory() as session:
+        findings = (
+            session.query(BinaryStaticAnalysisFinding)
+            .filter(BinaryStaticAnalysisFinding.scan_id == scan_id)
+            .all()
+        )
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding.tool == "checksec"
+        assert finding.severity == "high"
+        assert finding.artifact_bucket == "analysis"
+        assert finding.artifact_key == "reports/checksec.json"
+
+        scan = session.get(Scan, scan_id)
+        assert scan is not None
+        assert scan.status == "completed"
+        assert scan.completed_at is not None
 
 
 def test_scan_requested_hosts_scope_enforcement(
@@ -453,9 +638,7 @@ def test_principal_rotation_flow(
         assert revoked[0].key_hash == _hash_secret(first_secret)
 
         create_events = (
-            session.query(AuditLog)
-            .filter(AuditLog.action == "create_principal")
-            .all()
+            session.query(AuditLog).filter(AuditLog.action == "create_principal").all()
         )
         fingerprints = {
             event.evidence_snapshot.get("rotation", {}).get("key_fingerprint")
@@ -465,9 +648,7 @@ def test_principal_rotation_flow(
         assert second_fingerprint in fingerprints
 
         revoke_event = (
-            session.query(AuditLog)
-            .filter(AuditLog.action == "revoke_principal")
-            .one()
+            session.query(AuditLog).filter(AuditLog.action == "revoke_principal").one()
         )
         rotation_meta = revoke_event.evidence_snapshot.get("rotation", {})
         assert rotation_meta.get("key_fingerprint") == first_fingerprint
@@ -524,7 +705,8 @@ def test_principal_management_requires_admin(
 
         assert len(access_denied_entries) == 3
         resources = [
-            entry.evidence_snapshot.get("resource_id") for entry in access_denied_entries
+            entry.evidence_snapshot.get("resource_id")
+            for entry in access_denied_entries
         ]
         assert resources.count("/principals") == 2
         assert f"/principals/{analyst_id}/revoke" in resources
@@ -591,6 +773,8 @@ def test_revoked_api_key_denied_with_audit_trail(
         assert snapshot.get("reason") == "credential_revoked"
         assert snapshot.get("key_fingerprint") == fingerprint
         assert snapshot.get("credential_status") == "revoked"
+
+
 def test_finding_contracts(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
@@ -735,7 +919,7 @@ def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:
 
 
 def test_enrichment_callback_persists_results(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, _queue, session_factory, _settings = api_client
     finding_id, _scan_id = _persist_sample_finding(session_factory)
@@ -796,7 +980,7 @@ def test_enrichment_callback_persists_results(
 
 
 def test_enrichment_callback_records_errors(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, _queue, session_factory, _settings = api_client
     finding_id, _scan_id = _persist_sample_finding(session_factory)
@@ -924,6 +1108,7 @@ def test_revoked_api_key_denial_is_audited(
     assert snapshot["granted_roles"] == sorted(set(DEFAULT_ANALYST_ROLES))
     assert snapshot["auth_method"] == "api_key"
     assert snapshot["credential_status"] == "revoked"
+
 
 def test_targets_listing_requires_read_role(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
@@ -1079,8 +1264,7 @@ def test_audit_log_listing_filters_and_audits(
 
     assert payload["meta"] == {"total": 3, "limit": 50, "offset": 0}
     returned_timestamps = [
-        datetime.fromisoformat(item["created_at"])
-        for item in payload["data"]
+        datetime.fromisoformat(item["created_at"]) for item in payload["data"]
     ]
     assert returned_timestamps == sorted(returned_timestamps, reverse=True)
     assert payload["data"][0]["action"] == "delete_target"
@@ -1150,6 +1334,7 @@ def test_audit_log_requires_admin_role(
     )
     assert response.status_code == 403
 
+
 def test_principal_creation_validates_and_expands_roles(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
@@ -1184,6 +1369,7 @@ def test_principal_creation_validates_and_expands_roles(
             "scan:enqueue",
             "scans:read",
             "binary:preprocess",
+            "binary:static-analysis",
             "targets:read",
             "enrich:enqueue",
         ]
@@ -1208,6 +1394,7 @@ def test_principal_creation_validates_and_expands_roles(
             "scan:enqueue",
             "scans:read",
             "binary:preprocess",
+            "binary:static-analysis",
             "targets:read",
             "targets:write",
             "enrich:enqueue",
@@ -1238,9 +1425,7 @@ def test_api_key_revocation_enforced_and_audited(
         session.add(revoked_credential)
         session.commit()
 
-    revoked_response = client.get(
-        "/targets", headers={"X-API-Key": "revoked-key"}
-    )
+    revoked_response = client.get("/targets", headers={"X-API-Key": "revoked-key"})
     assert revoked_response.status_code == 401
 
     with session_factory() as session:
