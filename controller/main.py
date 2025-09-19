@@ -12,7 +12,7 @@ from functools import lru_cache
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -187,6 +187,31 @@ class ScanResponse(BaseModel):
 
 class ScanCollectionResponse(BaseModel):
     data: List[ScanResponse]
+
+
+class AuditLogResponse(BaseModel):
+    id: str
+    actor: str
+    action: str
+    message: Optional[str]
+    scan_id: Optional[str]
+    finding_id: Optional[str]
+    evidence_snapshot: Dict[str, Any]
+    evidence_hash: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaginationMetadata(BaseModel):
+    total: int
+    limit: int
+    offset: int
+
+
+class AuditLogCollectionResponse(BaseModel):
+    data: List[AuditLogResponse]
+    meta: PaginationMetadata
 
 
 SUPPORTED_ENRICHMENT_SOURCES = {"nvd", "circl"}
@@ -598,6 +623,69 @@ def list_principals(
     )
 
     return PrincipalCredentialCollectionResponse(data=response_items)
+
+
+@app.get("/audit-log", response_model=AuditLogCollectionResponse)
+def list_audit_log(
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    scan_id: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> AuditLogCollectionResponse:
+    """Return audit log entries for administrative review."""
+
+    enforce_roles(principal, [ROLE_ADMIN])
+
+    query = db.query(AuditLog)
+    applied_filters: Dict[str, Any] = {}
+
+    if actor:
+        query = query.filter(AuditLog.actor == actor)
+        applied_filters["actor"] = actor
+    if action:
+        query = query.filter(AuditLog.action == action)
+        applied_filters["action"] = action
+    if scan_id:
+        query = query.filter(AuditLog.scan_id == scan_id)
+        applied_filters["scan_id"] = scan_id
+
+    total = query.count()
+    records = (
+        query.order_by(AuditLog.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    response_items = [
+        AuditLogResponse.model_validate(record, from_attributes=True)
+        for record in records
+    ]
+
+    metadata: Dict[str, Any] = {
+        "limit": limit,
+        "offset": offset,
+        "returned": len(response_items),
+    }
+    if applied_filters:
+        metadata["filters"] = applied_filters
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="list_audit_log",
+        resource_type="audit_log",
+        resource_id=None,
+        metadata=metadata,
+    )
+
+    return AuditLogCollectionResponse(
+        data=response_items,
+        meta=PaginationMetadata(total=total, limit=limit, offset=offset),
+    )
 
 
 @app.post(
