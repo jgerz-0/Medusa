@@ -83,10 +83,14 @@ services:
       MEDUSA_NUCLEI_QUEUE_CHANNEL: ${MEDUSA_NUCLEI_QUEUE_CHANNEL:-queues:nuclei:jobs}
       MEDUSA_ZAP_QUEUE_CHANNEL: ${MEDUSA_ZAP_QUEUE_CHANNEL:-queues:zap:jobs}
       MEDUSA_SQLMAP_QUEUE_CHANNEL: ${MEDUSA_SQLMAP_QUEUE_CHANNEL:-queues:sqlmap:jobs}
+      MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: ${MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL:-queues:enrichment:cve}
       MEDUSA_NUCLEI_CALLBACK_TOKEN: ${MEDUSA_NUCLEI_CALLBACK_TOKEN:-local-dev-nuclei-callback}
       MEDUSA_ZAP_CALLBACK_TOKEN: ${MEDUSA_ZAP_CALLBACK_TOKEN:-local-dev-zap-callback}
       MEDUSA_SQLMAP_CALLBACK_TOKEN: ${MEDUSA_SQLMAP_CALLBACK_TOKEN:-local-dev-sqlmap-callback}
+      MEDUSA_ENRICHMENT_CALLBACK_TOKEN: ${MEDUSA_ENRICHMENT_CALLBACK_TOKEN:-local-dev-enrichment-callback}
       MEDUSA_JWT_SECRET: ${MEDUSA_JWT_SECRET:-change-this-in-production}
+      MEDUSA_CVE_ENRICHMENT_QDRANT_URL: ${MEDUSA_CVE_ENRICHMENT_QDRANT_URL:-http://qdrant:6333}
+      MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION: ${MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION:-medusa-advisories}
     depends_on:
       postgres:
         condition: service_healthy
@@ -241,6 +245,38 @@ services:
         condition: service_healthy
     volumes:
       - ../../workers/web/sqlmap:/app:delegated
+
+  cve-enrichment-worker:
+    build:
+      context: ../..
+      dockerfile: workers/enrichment/cve/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_cve_enrichment_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      CVE_ENRICHMENT_QUEUE_KEY: ${CVE_ENRICHMENT_QUEUE_KEY:-queues:enrichment:cve}
+      CVE_ENRICHMENT_RESULT_QUEUE_KEY: ${CVE_ENRICHMENT_RESULT_QUEUE_KEY:-queues:enrichment:cve:results}
+      CVE_ENRICHMENT_ERROR_QUEUE_KEY: ${CVE_ENRICHMENT_ERROR_QUEUE_KEY:-queues:enrichment:cve:errors}
+      CVE_ENRICHMENT_MAX_ATTEMPTS: ${CVE_ENRICHMENT_MAX_ATTEMPTS:-3}
+      CVE_ENRICHMENT_RETRY_BACKOFF_SECONDS: ${CVE_ENRICHMENT_RETRY_BACKOFF_SECONDS:-2.0}
+      CVE_ENRICHMENT_QUEUE_POLL_TIMEOUT: ${CVE_ENRICHMENT_QUEUE_POLL_TIMEOUT:-5}
+      CVE_ENRICHMENT_HTTP_TIMEOUT: ${CVE_ENRICHMENT_HTTP_TIMEOUT:-30}
+      CVE_ENRICHMENT_QDRANT_URL: ${CVE_ENRICHMENT_QDRANT_URL:-http://qdrant:6333}
+      CVE_ENRICHMENT_QDRANT_COLLECTION: ${CVE_ENRICHMENT_QDRANT_COLLECTION:-medusa-advisories}
+      CVE_ENRICHMENT_QDRANT_API_KEY: ${CVE_ENRICHMENT_QDRANT_API_KEY:-}
+      CVE_ENRICHMENT_QDRANT_TIMEOUT: ${CVE_ENRICHMENT_QDRANT_TIMEOUT:-5}
+      CVE_ENRICHMENT_QDRANT_VECTOR_SIZE: ${CVE_ENRICHMENT_QDRANT_VECTOR_SIZE:-64}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ../../workers/enrichment/cve:/app:delegated
 
 volumes:
   frontend_node_modules:
