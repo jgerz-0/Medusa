@@ -14,6 +14,7 @@ from controller.db.models import (
     BinaryStaticAnalysisFinding,
     Finding,
     FindingEnrichment,
+    FindingValidation,
     PrincipalCredential,
     Scan,
     Target,
@@ -926,6 +927,10 @@ def test_finding_contracts(
     assert finding_item["category"] == "web"
     assert finding_item["tool"] == "nuclei"
     assert finding_item["sample_id"] is None
+    assert finding_item["validation_status"] == "pending"
+    assert finding_item["validated_at"] is None
+    assert finding_item["validations"] == []
+    assert isinstance(finding_item["cvss"], float)
     datetime.fromisoformat(finding_item["detected_at"])  # raises on invalid format
 
     detail_response = client.get(f"/findings/{finding_id}", headers=auth_headers())
@@ -934,6 +939,200 @@ def test_finding_contracts(
     assert detail_payload["data"]["id"] == finding_id
     assert detail_payload["data"]["enrichments"] == []
     assert detail_payload["data"]["category"] == "web"
+    assert detail_payload["data"]["validation_status"] == "pending"
+    assert detail_payload["data"]["validations"] == []
+
+
+def test_validation_enqueue_flow(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, queue, session_factory, settings = api_client
+
+    with session_factory() as session:
+        target = Target(name="Validation", scope="val.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="nuclei",
+            status="completed",
+            initiated_by="validator@test",
+            parameters={"profile": "baseline"},
+        )
+        session.add(scan)
+        session.flush()
+
+        finding = Finding(
+            scan_id=scan.id,
+            title="Critical Exposure",
+            severity="critical",
+            description="demo",
+            evidence={"url": "https://val.example/login"},
+            evidence_hash="",
+        )
+        session.add(finding)
+        session.commit()
+        finding_id = finding.id
+
+    response = client.post(
+        "/validate",
+        json={"finding_id": finding_id, "notes": "double-check"},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["status"] == "queued"
+
+    assert queue.messages, "validator job should be queued"
+    channel, job_payload = queue.messages[-1]
+    assert channel == settings.validator_queue_channel
+    assert job_payload["finding_id"] == finding_id
+    assert job_payload["metadata"]["analyst_notes"] == "double-check"
+
+    with session_factory() as session:
+        refreshed = session.get(Finding, finding_id)
+        assert refreshed is not None
+        assert refreshed.validation_status == "queued"
+
+
+def test_validation_force_allows_requeue(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(name="Requeue", scope="force.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="sqlmap",
+            status="completed",
+            initiated_by="validator@test",
+            parameters={},
+        )
+        session.add(scan)
+        session.flush()
+
+        finding = Finding(
+            scan_id=scan.id,
+            title="SQLi",
+            severity="high",
+            description="demo",
+            evidence={"vector": "id=1"},
+            evidence_hash="",
+            validation_status="passed",
+            validated_at=datetime.now(timezone.utc),
+        )
+        session.add(finding)
+        session.commit()
+        finding_id = finding.id
+
+    denied = client.post(
+        "/validate",
+        json={"finding_id": finding_id},
+        headers=auth_headers(),
+    )
+    assert denied.status_code == 409
+
+    forced = client.post(
+        "/validate",
+        json={"finding_id": finding_id, "force": True},
+        headers=auth_headers(),
+    )
+    assert forced.status_code == 202
+    assert queue.messages[-1][1]["finding_id"] == finding_id
+
+
+def test_validator_callback_records_validation(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+    monkeypatch,
+) -> None:
+    client, queue, session_factory, settings = api_client
+    settings.slack_webhook_url = "https://hooks.slack.test"
+    settings.email_smtp_host = "smtp.test"
+    settings.email_from = "alerts@example.com"
+    settings.email_recipients = ["sec@example.com"]
+
+    slack_calls: list[dict] = []
+    email_calls: list[tuple[str, str]] = []
+
+    def _fake_slack(url: str, payload: dict) -> None:
+        slack_calls.append({"url": url, "payload": payload})
+
+    def _fake_email(local_settings, subject: str, body: str) -> None:
+        email_calls.append((subject, body))
+
+    monkeypatch.setattr("controller.main._post_slack_notification", _fake_slack)
+    monkeypatch.setattr("controller.main._send_email_notification", _fake_email)
+
+    with session_factory() as session:
+        target = Target(name="Callback", scope="cb.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="nuclei",
+            status="completed",
+            initiated_by="validator@test",
+            parameters={},
+        )
+        session.add(scan)
+        session.flush()
+
+        finding = Finding(
+            scan_id=scan.id,
+            title="Critical Exposure",
+            severity="critical",
+            description="demo",
+            evidence={"endpoint": "/admin"},
+            evidence_hash="",
+        )
+        session.add(finding)
+        session.commit()
+        finding_id = finding.id
+
+    enqueue = client.post(
+        "/validate",
+        json={"finding_id": finding_id},
+        headers=auth_headers(),
+    )
+    assert enqueue.status_code == 202
+    job_payload = queue.messages[-1][1]
+    job_id = job_payload["job_id"]
+
+    executed_at = datetime.now(timezone.utc).isoformat()
+    callback_response = client.post(
+        "/internal/validator/callback",
+        json={
+            "job_id": job_id,
+            "finding_id": finding_id,
+            "status": "passed",
+            "validator": "retest-agent",
+            "executed_at": executed_at,
+            "metadata": {"notes": "all clear"},
+            "evidence": {"status": 200},
+        },
+        headers={"X-Callback-Token": "validator-secret"},
+    )
+    assert callback_response.status_code == 202, callback_response.text
+    body = callback_response.json()
+    assert body["data"]["validation_status"] == "passed"
+    assert body["data"]["validations"], "validation history should include new record"
+
+    with session_factory() as session:
+        stored = session.get(Finding, finding_id)
+        assert stored is not None
+        assert stored.validation_status == "passed"
+        validations = session.query(FindingValidation).filter_by(finding_id=finding_id).all()
+        assert len(validations) == 1
+        assert validations[0].validator == "retest-agent"
+
+    assert slack_calls, "Slack notification should be dispatched for critical findings"
+    assert email_calls, "Email notification should be dispatched for critical findings"
 
 
 def test_audit_log_rbac_regression(
@@ -1478,6 +1677,7 @@ def test_principal_creation_validates_and_expands_roles(
             "binary:fuzzing",
             "targets:read",
             "enrich:enqueue",
+            "validation:enqueue",
             "report:export",
         ]
     )
@@ -1506,6 +1706,7 @@ def test_principal_creation_validates_and_expands_roles(
             "targets:read",
             "targets:write",
             "enrich:enqueue",
+            "validation:enqueue",
             "report:export",
             "ticket:create",
         ]

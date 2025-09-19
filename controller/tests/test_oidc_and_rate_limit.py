@@ -20,7 +20,7 @@ from controller.main import (
     get_rate_limiter,
 )
 from controller.security.oidc import OIDCSettings, OIDCValidator
-from tests.test_api_contracts import api_client  # noqa: F401  # re-export fixture
+from controller.tests.conftest import api_client  # noqa: F401  # re-export fixture
 
 
 @pytest.fixture()

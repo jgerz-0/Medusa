@@ -84,6 +84,17 @@ def _normalize_status(value: Optional[str]) -> str:
     return "open"
 
 
+def _normalize_validation_status(value: Optional[str]) -> str:
+    """Clamp validation lifecycle state to the supported vocabulary."""
+
+    allowed = {"pending", "queued", "running", "passed", "failed"}
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in allowed:
+            return lowered
+    return "pending"
+
+
 class TimestampMixin:
     """Reusable timestamp columns."""
 
@@ -174,6 +185,12 @@ class Finding(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
     assigned_to: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    validation_status: Mapped[str] = mapped_column(
+        String(32), default="pending", nullable=False
+    )
+    validated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     scan: Mapped["Scan"] = relationship(back_populates="findings")
     audit_entries: Mapped[list["AuditLog"]] = relationship(
@@ -186,6 +203,9 @@ class Finding(TimestampMixin, Base):
         back_populates="finding", cascade="all, delete-orphan"
     )
     tickets: Mapped[list["FindingTicket"]] = relationship(
+        back_populates="finding", cascade="all, delete-orphan"
+    )
+    validations: Mapped[list["FindingValidation"]] = relationship(
         back_populates="finding", cascade="all, delete-orphan"
     )
 
@@ -216,6 +236,36 @@ class FindingEnrichment(TimestampMixin, Base):
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 
     finding: Mapped["Finding"] = relationship(back_populates="enrichments")
+
+
+class FindingValidation(TimestampMixin, Base):
+    """Validator agent retest results for findings."""
+
+    __tablename__ = "finding_validations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    finding_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False
+    )
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    validator: Mapped[str] = mapped_column(String(128), nullable=False)
+    executed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    requested_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    requested_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    metadata_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    finding: Mapped["Finding"] = relationship(back_populates="validations")
 
 
 class AuditLog(Base):
@@ -476,6 +526,9 @@ def _finding_set_hash(mapper, connection, target: Finding) -> None:
     target.evidence = _coerce_evidence(target.evidence)
     target.tags = _normalize_tags(target.tags)
     target.status = _normalize_status(target.status)
+    target.validation_status = _normalize_validation_status(
+        target.validation_status
+    )
     if target.assigned_to:
         target.assigned_to = target.assigned_to.strip()
     if not target.evidence_hash:
@@ -494,6 +547,9 @@ def _finding_prevent_evidence_mutation(mapper, connection, target: Finding) -> N
     hash_attr = state.attrs.evidence_hash
     target.tags = _normalize_tags(target.tags)
     target.status = _normalize_status(target.status)
+    target.validation_status = _normalize_validation_status(
+        target.validation_status
+    )
     if target.assigned_to:
         target.assigned_to = target.assigned_to.strip()
     if (
@@ -545,6 +601,45 @@ def _finding_ticket_prevent_payload_mutation(
         target.reference = target.reference.strip()
     if target.status:
         target.status = target.status.strip().lower()
+
+
+@event.listens_for(FindingValidation, "before_insert", propagate=True)
+def _finding_validation_set_hash(
+    mapper, connection, target: FindingValidation
+) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    target.evidence = _coerce_evidence(target.evidence)
+    target.status = _normalize_validation_status(target.status)
+    if target.validator:
+        target.validator = target.validator.strip()
+    if target.requested_by:
+        target.requested_by = target.requested_by.strip()
+    if target.notes:
+        target.notes = target.notes.strip()
+    if not target.evidence_hash:
+        target.evidence_hash = _hash_evidence(target.evidence)
+    if not target.metadata_hash:
+        target.metadata_hash = _hash_json(target.metadata_json)
+
+
+@event.listens_for(FindingValidation, "before_update", propagate=True)
+def _finding_validation_prevent_mutation(
+    mapper, connection, target: FindingValidation
+) -> None:
+    state = inspect(target)
+    immutable_changed = any(
+        state.attrs[column].history.has_changes()
+        for column in ("evidence", "metadata_json", "evidence_hash", "metadata_hash")
+    )
+    if immutable_changed:
+        raise ValueError("Validation evidence is immutable once recorded.")
+    target.status = _normalize_validation_status(target.status)
+    if target.validator:
+        target.validator = target.validator.strip()
+    if target.requested_by:
+        target.requested_by = target.requested_by.strip()
+    if target.notes:
+        target.notes = target.notes.strip()
 
 
 @event.listens_for(AuditLog, "before_insert", propagate=True)
