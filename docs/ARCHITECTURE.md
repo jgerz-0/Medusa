@@ -63,6 +63,14 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
 - Network policies restrict scanner pods to egress only to approved target CIDRs.
 - Secrets sourced from Vault/External Secrets in Kubernetes; `.env.example` governs local development.
 - Audit log appended on every scan lifecycle event (created, queued, running, completed, rejected).
+- Role-based access control enforces least privilege. Admins manage credentials and audit logs;
+  analysts operate scans, view findings, and enqueue enrichment but cannot touch `/principals`.
+- API keys are never stored in clear text. The controller hashes incoming keys with `_hash_secret`
+  and persists only the hash and a truncated `key_fingerprint` for rotation tracking.
+- Every rejected authentication or authorization attempt emits an `access_denied` audit entry with
+  the attempted resource, required roles, and rotation fingerprint to aid incident response.
+- Revocation returns `401` with `"API key revoked"` and the same fingerprint metadata, ensuring
+  operators can correlate secrets without revealing them.
 
 ## Extensibility Principles
 - New agents register their JSON schema in `docs/interfaces/` and implement handshake contracts with the controller.
