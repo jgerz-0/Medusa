@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from controller.db.models import (
     AuditLog,
+    BinarySample,
     Finding,
     FindingEnrichment,
     PrincipalCredential,
@@ -55,6 +56,7 @@ ROLE_ANALYST = "analyst"
 ROLE_FINDINGS_READ = "findings:read"
 ROLE_SCANS_READ = "scans:read"
 ROLE_SCAN_ENQUEUE = "scan:enqueue"
+ROLE_BINARY_PREPROCESS_ENQUEUE = "binary:preprocess"
 ROLE_TARGETS_READ = "targets:read"
 ROLE_TARGETS_WRITE = "targets:write"
 ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
@@ -65,6 +67,7 @@ ALLOWED_ROLES = {
     ROLE_FINDINGS_READ,
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
+    ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -75,6 +78,7 @@ DEFAULT_ANALYST_ROLES = [
     ROLE_FINDINGS_READ,
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
+    ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_ENRICHMENT_ENQUEUE,
 ]
@@ -84,6 +88,7 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_FINDINGS_READ,
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
+    ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -490,6 +495,9 @@ class Settings(BaseSettings):
         "queues:enrichment:cve",
         description="Redis list channel for CVE enrichment jobs.",
     )
+    binary_preprocess_queue_channel: str = Field(
+        "queues:binary:preprocess",
+        description="Redis list channel for binary preprocessing jobs.",
     cve_enrichment_qdrant_url: Optional[str] = Field(
         default=None,
         description="Base URL for the Qdrant vector collection used by enrichment workers.",
@@ -530,6 +538,7 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {}
     return payload
 
+
 Network = Union[IPv4Network, IPv6Network]
 
 def _normalize_hostname(value: str) -> str:
@@ -539,7 +548,6 @@ def _normalize_hostname(value: str) -> str:
     if normalized.startswith("*."):
         normalized = normalized[2:]
     return normalized
-
 
 def _hash_secret(secret: str) -> str:
     """Return a SHA-256 hash of the provided secret."""
@@ -664,6 +672,29 @@ class ScanRequest(BaseModel):
     ] = Field(description="Scanner identifier")
     parameters: Dict[str, Any] = Field(
         default_factory=dict, description="Scanner-specific configuration payload"
+    )
+
+
+class BinaryPreprocessRequest(BaseModel):
+    target_id: str
+    object_bucket: str = Field(
+        ..., min_length=1, max_length=128, description="Bucket containing the uploaded artifact"
+    )
+    object_key: str = Field(
+        ..., min_length=1, max_length=512, description="Object key referencing the uploaded artifact"
+    )
+    file_name: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="Optional analyst-supplied filename to retain for context",
+    )
+    expected_scope: Optional[str] = Field(
+        default=None,
+        description="Optional assertion matching the controller's stored target scope",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Arbitrary metadata forwarded to the preprocess worker",
     )
 
 
@@ -1013,11 +1044,10 @@ def _authenticate_api_key(
             .first()
         )
         if active_credential:
-            roles = list(active_credential.roles or [])
             return Principal(
                 subject=f"apikey:{subject_hash}",
                 auth_method="api_key",
-                roles=list(DEFAULT_ADMIN_ROLES),
+                roles=list(active_credential.roles or []),
             )
 
         api_key_hash = _hash_secret(candidate_api_key)
@@ -1090,6 +1120,10 @@ def _authenticate_api_key(
                     "credential_id": str(revoked_credential.id),
                     "credential_status": "revoked",
                 },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Authentication required",
             )
 
     if silent:
@@ -1760,6 +1794,22 @@ def enqueue_scan(
         scan_request.parameters
     )
 
+    requested_hosts_raw = _coerce_requested_hosts(
+        (scan_request.parameters or {}).get("requested_hosts")
+    )
+    rejected_hosts: List[str] = []
+    if requested_hosts_raw:
+        allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
+            target.scope, requested_hosts_raw
+        )
+        sanitized_parameters["requested_hosts"] = allowed_hosts
+        if rejected_hosts:
+            sanitized_parameters["rejected_hosts"] = rejected_hosts
+        if requested_hosts_raw and not allowed_hosts:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No requested hosts remain within the authorized target scope",
+            )
     if "requested_hosts" in scan_request.parameters:
         sanitized_parameters["requested_hosts"] = allowed_hosts
 
@@ -1775,16 +1825,33 @@ def enqueue_scan(
     submitted_at = datetime.now(tz=timezone.utc)
     job_id = str(uuid.uuid4())
 
-    tags: List[str] = []
-    job_payload: Dict[str, Any]
-    callback_url: str
-    metadata_payload: Dict[str, Any] = {
+    job_metadata: Dict[str, Any] = {
         "scan_id": str(scan.id),
         "target_id": str(target.id),
         "target_scope": target.scope,
         "target_name": target.name,
         "initiated_by": principal.subject,
         "submitted_at": submitted_at.isoformat(),
+        "template_profile": profile,
+        "controller_callback_url": callback_url,
+        "parameters": sanitized_parameters,
+    }
+    if requested_hosts_raw:
+        job_metadata["requested_hosts_raw"] = requested_hosts_raw
+    if sanitized_parameters.get("requested_hosts"):
+        job_metadata["requested_hosts"] = sanitized_parameters["requested_hosts"]
+    if rejected_hosts:
+        job_metadata["rejected_hosts"] = rejected_hosts
+
+    job_payload = {
+        "job_id": job_id,
+        "scan_id": str(scan.id),
+        "target_id": str(target.id),
+        "target_scope": target.scope,
+        "target_name": target.name,
+        "initiated_by": principal.subject,
+        "submitted_at": submitted_at.isoformat(),
+        "metadata": job_metadata,
     }
 
     if scan.scanner == SCAN_TYPE_NUCLEI:
@@ -1950,7 +2017,134 @@ def enqueue_scan(
         resource_type="scan",
         resource_id=scan.id,
         scan_id=scan.id,
-        metadata=audit_metadata,
+        metadata={
+            "target_id": target.id,
+            "scanner": scan.scanner,
+            "job_id": job_id,
+            "template_profile": profile,
+            "requested_hosts": sanitized_parameters.get("requested_hosts", []),
+            "rejected_hosts": rejected_hosts,
+        },
+    )
+
+    return serialize_scan(scan)
+
+
+@app.post(
+    "/preprocess",
+    response_model=ScanResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_binary_preprocess(
+    request: BinaryPreprocessRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
+) -> ScanResponse:
+    """Queue a binary preprocessing task for an uploaded artifact."""
+
+    enforce_roles(
+        principal,
+        [ROLE_BINARY_PREPROCESS_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/preprocess",
+    )
+
+    target = db.get(Target, request.target_id)
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Target not found"
+        )
+
+    if not target.is_authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Target is currently outside the authorized scope",
+        )
+
+    if request.expected_scope:
+        provided = _normalize_hostname(request.expected_scope)
+        expected = _normalize_hostname(target.scope)
+        if provided != expected:
+            record_audit_event(
+                db,
+                actor=principal,
+                action="preprocess_scope_mismatch",
+                resource_type="target",
+                resource_id=target.id,
+                metadata={
+                    "provided_scope": request.expected_scope,
+                    "normalized_provided": provided,
+                    "expected_scope": expected,
+                },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Target scope assertion failed",
+            )
+
+    scan = Scan(
+        target_id=target.id,
+        scanner="binary_preprocess",
+        parameters={
+            "object_bucket": request.object_bucket,
+            "object_key": request.object_key,
+            "file_name": request.file_name,
+            "metadata": request.metadata,
+        },
+        initiated_by=principal.subject,
+    )
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+
+    submitted_at = datetime.now(tz=timezone.utc)
+    job_id = str(uuid.uuid4())
+
+    job_metadata: Dict[str, Any] = {
+        "scan_id": str(scan.id),
+        "target_id": str(target.id),
+        "target_scope": target.scope,
+        "target_name": target.name,
+        "object_bucket": request.object_bucket,
+        "object_key": request.object_key,
+        "file_name": request.file_name,
+        "submitted_at": submitted_at.isoformat(),
+        "initiated_by": principal.subject,
+    }
+    if request.metadata:
+        job_metadata["analyst_metadata"] = request.metadata
+
+    job_payload = {
+        "job_id": job_id,
+        "scan_id": str(scan.id),
+        "target_id": str(target.id),
+        "target_scope": target.scope,
+        "object_bucket": request.object_bucket,
+        "object_key": request.object_key,
+        "file_name": request.file_name,
+        "submitted_by": principal.subject,
+        "submitted_at": submitted_at.isoformat(),
+        "metadata": job_metadata,
+    }
+
+    queue.enqueue(settings.binary_preprocess_queue_channel, job_payload)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enqueue_binary_preprocess",
+        resource_type="scan",
+        resource_id=scan.id,
+        scan_id=scan.id,
+        metadata={
+            "target_id": target.id,
+            "object_bucket": request.object_bucket,
+            "object_key": request.object_key,
+            "job_id": job_id,
+        },
     )
 
     return serialize_scan(scan)
@@ -2405,9 +2599,8 @@ def get_finding(
         [ROLE_FINDINGS_READ],
         db,
         resource_type="endpoint",
-        resource_id=f"/findings/{finding_id}
+        resource_id="/findings/{finding_id}",
     )
-      
     finding = db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(
