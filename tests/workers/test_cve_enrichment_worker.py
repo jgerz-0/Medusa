@@ -221,3 +221,17 @@ def test_main_serializes_result(tmp_path, monkeypatch, capsys):
     assert payload["job_id"] == job.job_id
     assert payload["advisories"][0]["identifier"] == "CVE-2023-2000"
 
+
+def test_enrichment_result_json_serializes_errors() -> None:
+    result = CVEEnrichmentResult(
+        job_id="job-json-errors",
+        finding_id="finding-json",
+        advisories=[],
+        errors={CVESource.NVD: "timeout"},
+        generated_at=datetime.now(timezone.utc),
+    )
+
+    payload = json.loads(result.json())
+    assert payload["errors"][CVESource.NVD.value] == "timeout"
+    assert "generated_at" in payload
+

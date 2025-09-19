@@ -46,8 +46,10 @@ payload is enqueued on `MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL` (defaults to
 
 ## Worker → Controller Response Skeleton
 
-The worker posts deterministic enrichment results back to a future controller
-callback endpoint. The structure matches the `CVEEnrichmentResult` model.
+The worker posts deterministic enrichment results back to the controller via
+`POST /internal/enrich/callback`. Requests must include the shared secret header
+`X-Callback-Token` (configured as `MEDUSA_ENRICHMENT_CALLBACK_TOKEN`). The
+payload matches the `CVEEnrichmentResult` model.
 
 | Field         | Type      | Description |
 | ------------- | --------- | ----------- |
@@ -94,9 +96,37 @@ Each advisory entry contains:
     }
   ],
   "errors": {},
-  "generated_at": "2024-01-10T12:00:05+00:00"
+"generated_at": "2024-01-10T12:00:05+00:00"
 }
 ```
+
+### Controller Persistence
+
+Successful callbacks create immutable records in the `finding_enrichments`
+table. Each row stores:
+
+- `job_id` – unique reference to the enrichment request/response pair.
+- `generated_at` – worker-produced timestamp for audit correlation.
+- `advisories`, `errors`, and `provenance` JSON payloads.
+- SHA-256 hashes of each JSON document plus a composite `payload_hash`.
+
+Attempts to mutate persisted enrichment rows raise errors to preserve the audit
+trail. Duplicate `job_id` submissions return HTTP 409 to prevent replay.
+
+### Surfacing Enrichment to Analysts
+
+API responses from `/findings` and `/findings/{id}` now include an
+`enrichments` array containing the latest normalized payloads. Each enrichment
+object exposes:
+
+- `job_id`, `generated_at`, and `recorded_at` timestamps.
+- `advisories`, `errors`, and `provenance` as immutable JSON blocks.
+- `advisories_hash`, `errors_hash`, `provenance_hash`, and `payload_hash` for
+  deterministic verification.
+
+Frontend components display the most recent advisory count or error state per
+finding, allowing analysts to quickly identify which CVEs have supplemental
+intelligence versus feeds that timed out.
 
 ## Security + Determinism Notes
 
@@ -113,5 +143,7 @@ Each advisory entry contains:
 
 - Worker implementation: `workers/enrichment/cve/worker.py`
 - Source clients: `workers/enrichment/cve/sources.py`
-- Controller endpoint: `controller/main.py` (`POST /enrich`)
+- Controller endpoints: `controller/main.py` (`POST /enrich`,
+  `POST /internal/enrich/callback`)
+- Persistence: `controller/db/models.py` (`FindingEnrichment`)
 

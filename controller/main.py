@@ -7,6 +7,7 @@ import json
 import logging
 import secrets
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional
@@ -31,8 +32,16 @@ from redis import Redis
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
-from controller.db.models import AuditLog, Finding, PrincipalCredential, Scan, Target
+from controller.db.models import (
+    AuditLog,
+    Finding,
+    FindingEnrichment,
+    PrincipalCredential,
+    Scan,
+    Target,
+)
 from controller.db.session import SessionLocal
+from workers.enrichment.cve.schemas import CVEEnrichmentResult
 
 
 LOGGER = logging.getLogger("medusa.controller")
@@ -77,6 +86,8 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_ENRICHMENT_ENQUEUE,
 ]
 
+CALLBACK_TOKEN_HEADER = "X-Callback-Token"
+
 class Settings(BaseSettings):
     """Runtime configuration for the controller service."""
 
@@ -100,6 +111,9 @@ class Settings(BaseSettings):
     )
     nuclei_callback_token: str = Field(
         ..., description="Shared secret token required for nuclei worker callbacks."
+    )
+    enrichment_callback_token: str = Field(
+        ..., description="Shared secret required for enrichment worker callbacks."
     )
 
     model_config = ConfigDict(env_prefix="MEDUSA_", case_sensitive=False)
@@ -226,6 +240,18 @@ class EnrichmentResponse(BaseModel):
     sources: List[str] = Field(default_factory=list)
 
 
+class FindingEnrichmentSummary(BaseModel):
+    id: str
+    job_id: str
+    generated_at: datetime
+    recorded_at: datetime
+    advisories: List[Dict[str, Any]] = Field(default_factory=list)
+    advisories_hash: str
+    errors: Dict[str, str] = Field(default_factory=dict)
+    errors_hash: str
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+    provenance_hash: str
+    payload_hash: str
 class FindingResponse(BaseModel):
     id: str
     scan_id: str
@@ -239,6 +265,7 @@ class FindingResponse(BaseModel):
     template_id: str
     evidence: Optional[str]
     remediation: Optional[str]
+    enrichments: List[FindingEnrichmentSummary] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -397,6 +424,21 @@ def get_queue_client(settings: Settings = Depends(get_settings)) -> QueueClient:
     return RedisQueueClient(settings.redis_url)
 
 
+def _authenticate_callback_worker(
+    request: Request,
+    *,
+    expected_token: str,
+    subject: str,
+) -> Principal:
+    token = request.headers.get(CALLBACK_TOKEN_HEADER)
+    if not token or not secrets.compare_digest(token, expected_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid callback token",
+        )
+    return Principal(subject=subject, auth_method="shared_secret")
+
+
 def authenticate(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
@@ -492,13 +534,24 @@ def authenticate_worker(
 ) -> Principal:
     """Authenticate nuclei worker callbacks using a shared secret header."""
 
-    token = request.headers.get("X-Callback-Token")
-    if not token or token != settings.nuclei_callback_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid callback token"
-        )
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.nuclei_callback_token,
+        subject="worker:nuclei",
+    )
 
-    return Principal(subject="worker:nuclei", auth_method="shared_secret")
+
+def authenticate_enrichment_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> Principal:
+    """Authenticate enrichment worker callbacks using a dedicated shared secret."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.enrichment_callback_token,
+        subject="worker:enrichment",
+    )
 
 
 def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
@@ -999,6 +1052,107 @@ def nuclei_callback(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@app.post(
+    "/internal/enrich/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def enrichment_callback(
+    payload: CVEEnrichmentResult,
+    principal: Principal = Depends(authenticate_enrichment_worker),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Persist deterministic enrichment payloads emitted by the CVE worker."""
+
+    finding = (
+        db.query(Finding)
+        .options(selectinload(Finding.enrichments))
+        .filter(Finding.id == payload.finding_id)
+        .first()
+    )
+    if finding is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+        )
+
+    existing = (
+        db.query(FindingEnrichment)
+        .filter(FindingEnrichment.job_id == payload.job_id)
+        .first()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Enrichment already recorded",
+        )
+
+    advisories = [advisory.model_dump(mode="json") for advisory in payload.advisories]
+    errors = {str(source): str(message) for source, message in payload.errors.items()}
+    generated_at = payload.generated_at.astimezone(timezone.utc)
+    received_at = datetime.now(tz=timezone.utc)
+    provenance: Dict[str, Any] = {
+        "job_id": payload.job_id,
+        "worker_subject": principal.subject,
+        "generated_at": generated_at.isoformat(),
+        "received_at": received_at.isoformat(),
+    }
+    if advisories:
+        provenance["sources"] = sorted(
+            {
+                entry.get("source")
+                for entry in advisories
+                if isinstance(entry, dict) and entry.get("source")
+            }
+        )
+    if errors:
+        provenance["error_sources"] = sorted(errors.keys())
+
+    enrichment = FindingEnrichment(
+        finding_id=finding.id,
+        job_id=payload.job_id,
+        generated_at=generated_at,
+        advisories=advisories,
+        advisories_hash="",
+        errors=errors,
+        errors_hash="",
+        provenance=provenance,
+        provenance_hash="",
+        payload_hash="",
+    )
+    db.add(enrichment)
+
+    try:
+        db.commit()
+        db.refresh(enrichment)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        LOGGER.exception(
+            "Failed to persist enrichment callback",
+            extra={"job_id": payload.job_id, "finding_id": payload.finding_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist enrichment",
+        ) from exc
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enrichment_callback",
+        resource_type="finding",
+        resource_id=str(finding.id),
+        scan_id=finding.scan_id,
+        finding_id=finding.id,
+        metadata={
+            "job_id": payload.job_id,
+            "advisory_count": len(advisories),
+            "error_sources": sorted(errors.keys()),
+        },
+    )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.get("/findings", response_model=FindingCollectionResponse)
 def list_findings(
     target_id: Optional[str] = None,
@@ -1009,7 +1163,7 @@ def list_findings(
     """Return the latest findings for the requested scope."""
 
     enforce_roles(principal, [ROLE_FINDINGS_READ])
-    query = db.query(Finding)
+    query = db.query(Finding).options(selectinload(Finding.enrichments))
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
     elif target_id is not None:
@@ -1041,7 +1195,12 @@ def get_finding(
     """Fetch a single finding for detailed analysis views."""
 
     enforce_roles(principal, [ROLE_FINDINGS_READ])
-    finding = db.get(Finding, finding_id)
+    finding = (
+        db.query(Finding)
+        .options(selectinload(Finding.enrichments))
+        .filter(Finding.id == finding_id)
+        .first()
+    )
     if finding is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
@@ -1092,6 +1251,33 @@ def serialize_finding(finding: Finding) -> FindingResponse:
 
     template_id = finding.cve_id or "nuclei:unspecified"
 
+    enrichments_payload: List[FindingEnrichmentSummary] = []
+    if hasattr(finding, "enrichments") and finding.enrichments:
+        ordered = sorted(
+            finding.enrichments,
+            key=lambda record: record.created_at,
+            reverse=True,
+        )
+        for enrichment in ordered:
+            advisories = deepcopy(enrichment.advisories or [])
+            errors = deepcopy(enrichment.errors or {})
+            provenance = deepcopy(enrichment.provenance or {})
+            enrichments_payload.append(
+                FindingEnrichmentSummary(
+                    id=str(enrichment.id),
+                    job_id=enrichment.job_id,
+                    generated_at=enrichment.generated_at,
+                    recorded_at=enrichment.created_at,
+                    advisories=advisories,
+                    advisories_hash=enrichment.advisories_hash,
+                    errors=errors,
+                    errors_hash=enrichment.errors_hash,
+                    provenance=provenance,
+                    provenance_hash=enrichment.provenance_hash,
+                    payload_hash=enrichment.payload_hash,
+                )
+            )
+
     return FindingResponse(
         id=str(finding.id),
         scan_id=str(finding.scan_id),
@@ -1105,6 +1291,7 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         template_id=template_id,
         evidence=evidence_text,
         remediation=None,
+        enrichments=enrichments_payload,
     )
 
 
@@ -1115,11 +1302,13 @@ __all__ = [
     "Target",
     "Scan",
     "Finding",
+    "FindingEnrichment",
     "AuditLog",
     "ScanResponse",
     "ScanCollectionResponse",
     "TargetCollectionResponse",
     "FindingResponse",
+    "FindingEnrichmentSummary",
     "FindingCollectionResponse",
     "FindingItemResponse",
     "get_db_session",
@@ -1131,4 +1320,6 @@ __all__ = [
     "serialize_finding",
     "record_audit_event",
     "authenticate",
+    "authenticate_worker",
+    "authenticate_enrichment_worker",
 ]

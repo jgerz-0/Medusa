@@ -37,6 +37,7 @@ def client():
         cve_enrichment_queue_channel="test-enrichment",
         jwt_secret="unit-test-secret",
         nuclei_callback_token="callback-secret",
+        enrichment_callback_token="enrichment-secret",
     )
 
     engine = create_engine(

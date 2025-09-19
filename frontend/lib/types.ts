@@ -38,4 +38,31 @@ export interface Finding {
   updated_at: string;
   evidence?: string | null;
   remediation?: string | null;
+  enrichments: FindingEnrichment[];
+}
+
+export interface CVEAdvisory {
+  source: string;
+  identifier: string;
+  summary?: string | null;
+  severity?: string | null;
+  cvss_score?: number | null;
+  published?: string | null;
+  modified?: string | null;
+  references: string[];
+  raw?: Record<string, unknown>;
+}
+
+export interface FindingEnrichment {
+  id: string;
+  job_id: string;
+  generated_at: string;
+  recorded_at: string;
+  advisories: CVEAdvisory[];
+  advisories_hash: string;
+  errors: Record<string, string>;
+  errors_hash: string;
+  provenance: Record<string, unknown>;
+  provenance_hash: string;
+  payload_hash: string;
 }
