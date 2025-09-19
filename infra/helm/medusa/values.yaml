@@ -32,8 +32,10 @@ secrets:
     MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: "queues:binary:preprocess"
     MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: "queues:binary:static-analysis"
     MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: "queues:binary:fuzzing"
+    MEDUSA_VALIDATOR_QUEUE_CHANNEL: "queues:validator:jobs"
     MEDUSA_NUCLEI_CALLBACK_TOKEN: "change-me"
     MEDUSA_ENRICHMENT_CALLBACK_TOKEN: "change-me"
+    MEDUSA_VALIDATOR_CALLBACK_TOKEN: "change-me"
     MEDUSA_JWT_SECRET: "change-me"
     MINIO_ROOT_USER: "medusaadmin"
     MINIO_ROOT_PASSWORD: "medusaadmin123"
@@ -467,6 +469,50 @@ workers:
         apiKeySecretKey: CVE_ENRICHMENT_QDRANT_API_KEY
         timeoutSeconds: 5
         vectorSize: 64
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+
+  validator:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-validator
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: validator-worker
+    command: []
+    args: []
+    env:
+      redisSecretKey: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_VALIDATOR_QUEUE_CHANNEL
+      callbackTokenSecretKey: MEDUSA_VALIDATOR_CALLBACK_TOKEN
+      deadLetterKey: "queues:validator:dead"
+      maxRetries: 3
+      pollTimeout: 5
+      httpTimeout: 10
+      verifyTLS: true
       extra: []
     resources:
       requests:

@@ -40,6 +40,7 @@ def api_client() -> (
         nuclei_queue_channel="nuclei:test",
         zap_queue_channel="zap:test",
         sqlmap_queue_channel="sqlmap:test",
+        validator_queue_channel="validator:test",
         jwt_secret="unit-test-secret",
         nuclei_callback_token="callback-secret",
         zap_callback_token="zap-callback",
@@ -49,6 +50,7 @@ def api_client() -> (
         binary_static_analysis_callback_token="binary-static-secret",
         binary_fuzzing_queue_channel="binary-fuzzing:test",
         binary_fuzzing_callback_token="binary-fuzzing-secret",
+        validator_callback_token="validator-secret",
     )
 
     engine = create_engine(

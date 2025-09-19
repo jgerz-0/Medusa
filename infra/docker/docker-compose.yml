@@ -83,6 +83,7 @@ services:
       MEDUSA_NUCLEI_QUEUE_CHANNEL: ${MEDUSA_NUCLEI_QUEUE_CHANNEL:-queues:nuclei:jobs}
       MEDUSA_ZAP_QUEUE_CHANNEL: ${MEDUSA_ZAP_QUEUE_CHANNEL:-queues:zap:jobs}
       MEDUSA_SQLMAP_QUEUE_CHANNEL: ${MEDUSA_SQLMAP_QUEUE_CHANNEL:-queues:sqlmap:jobs}
+      MEDUSA_VALIDATOR_QUEUE_CHANNEL: ${MEDUSA_VALIDATOR_QUEUE_CHANNEL:-queues:validator:jobs}
       MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: ${MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL:-queues:enrichment:cve}
       MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: ${MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL:-queues:binary:preprocess}
       MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: ${MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL:-queues:binary:static-analysis}
@@ -93,6 +94,7 @@ services:
       MEDUSA_ENRICHMENT_CALLBACK_TOKEN: ${MEDUSA_ENRICHMENT_CALLBACK_TOKEN:-local-dev-enrichment-callback}
       MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: ${MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN:-local-dev-binary-static-callback}
       MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: ${MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN:-local-dev-binary-fuzzing-callback}
+      MEDUSA_VALIDATOR_CALLBACK_TOKEN: ${MEDUSA_VALIDATOR_CALLBACK_TOKEN:-local-dev-validator-callback}
       MEDUSA_JWT_SECRET: ${MEDUSA_JWT_SECRET:-change-this-in-production}
       MEDUSA_CVE_ENRICHMENT_QDRANT_URL: ${MEDUSA_CVE_ENRICHMENT_QDRANT_URL:-http://qdrant:6333}
       MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION: ${MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION:-medusa-advisories}
@@ -322,6 +324,29 @@ services:
       - ../../workers/binary/fuzzing:/app/workers/binary/fuzzing:delegated
       # Reuse the host container runtime; tighten permissions in production.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+  validator-worker:
+    build:
+      context: ../..
+      dockerfile: workers/validator/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_validator_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      VALIDATOR_QUEUE_KEY: ${VALIDATOR_QUEUE_KEY:-queues:validator:jobs}
+      VALIDATOR_DEAD_LETTER_KEY: ${VALIDATOR_DEAD_LETTER_KEY:-queues:validator:dead}
+      VALIDATOR_CALLBACK_TOKEN: ${VALIDATOR_CALLBACK_TOKEN:-local-dev-validator-callback}
+      VALIDATOR_POLL_TIMEOUT: ${VALIDATOR_POLL_TIMEOUT:-5}
+      VALIDATOR_HTTP_TIMEOUT: ${VALIDATOR_HTTP_TIMEOUT:-10}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/validator:/app/workers/validator:delegated
+
   cve-enrichment-worker:
     build:
       context: ../..

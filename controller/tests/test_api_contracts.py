@@ -45,6 +45,10 @@ def binary_fuzzing_headers() -> dict[str, str]:
     return {"X-Callback-Token": "binary-fuzzing-secret"}
 
 
+def validator_headers() -> dict[str, str]:
+    return {"X-Callback-Token": "validator-secret"}
+
+
 def _create_finding_record(session_factory: sessionmaker) -> str:
     """Persist a minimal target/scan/finding for RBAC regression tests."""
 
@@ -580,6 +584,56 @@ def test_binary_fuzzing_callback_persists_findings(
         assert scan is not None
         assert scan.status == "completed"
         assert scan.completed_at is not None
+
+
+def test_validation_enqueue_and_callback(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, queue, session_factory, settings = api_client
+    finding_id = _create_finding_record(session_factory)
+
+    enqueue_response = client.post(
+        "/validate",
+        json={"finding_id": finding_id},
+        headers=auth_headers(),
+    )
+    assert enqueue_response.status_code == 202, enqueue_response.text
+    enqueue_payload = enqueue_response.json()
+    assert enqueue_payload["status"] == "queued"
+
+    assert queue.messages, "validator enqueue should push a job"
+    channel, job_payload = queue.messages[-1]
+    assert channel == settings.validator_queue_channel
+    assert job_payload["validation_id"] == enqueue_payload["validation_id"]
+
+    callback_payload = {
+        "validation_id": enqueue_payload["validation_id"],
+        "finding_id": finding_id,
+        "job_id": job_payload["job_id"],
+        "status": "completed",
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+        "outcome": "confirmed",
+        "attempts": 0,
+        "observations": {"status_code": 200},
+        "evidence": {"response_snippet": "validator-confirmed"},
+    }
+
+    callback_response = client.post(
+        "/internal/validate/callback",
+        json=callback_payload,
+        headers=validator_headers(),
+    )
+    assert callback_response.status_code == 204, callback_response.text
+
+    finding_response = client.get(
+        f"/findings/{finding_id}", headers=auth_headers()
+    )
+    assert finding_response.status_code == 200, finding_response.text
+    finding_payload = finding_response.json()["data"]
+    validation_summary = finding_payload.get("validation")
+    assert validation_summary is not None
+    assert validation_summary["status"] == "completed"
+    assert validation_summary["outcome"] == "confirmed"
 
 
 def test_scan_requested_hosts_scope_enforcement(

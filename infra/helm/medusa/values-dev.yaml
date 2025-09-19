@@ -157,6 +157,11 @@ workers:
         - name: BINARY_FUZZING_MAX_DURATION
           value: "900"
 
+  validator:
+    image:
+      repository: medusa/worker-validator
+      tag: latest
+
 secrets:
   strategy: inline
   inline:
@@ -181,6 +186,8 @@ secrets:
     S3_ACCESS_KEY_ID: medusaadmin
     S3_SECRET_ACCESS_KEY: medusaadmin123
     MEDUSA_POSTGRES_PASSWORD: medusa
+    MEDUSA_VALIDATOR_QUEUE_CHANNEL: queues:validator:jobs
+    MEDUSA_VALIDATOR_CALLBACK_TOKEN: local-dev-validator-callback
     BINARY_PREPROCESS_DEAD_LETTER_KEY: queues:binary:preprocess:dead
     BINARY_METADATA_BUCKET: binary-metadata
     BINARY_METADATA_PREFIX: preprocess/metadata/

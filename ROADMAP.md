@@ -33,8 +33,8 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 
 ## Phase 4 – Multi-Scanner + Validator (Weeks 7–8)
 - ✅ Integrate ZAP and SQLMap workers with scope guardrails (see [workers/web/zap/README.md](workers/web/zap/README.md) and [workers/web/sqlmap/README.md](workers/web/sqlmap/README.md)).
-- ☐ Validator agent performs targeted retests before findings are promoted — pending.
-- ☐ Consolidated JSON schema and severity scoring rules — pending.
+- ✅ Validator agent performs targeted retests before findings are promoted.
+- ✅ Consolidated JSON schema and severity scoring rules.
 - ☐ Notification hooks (Slack, email) for critical findings after validation — pending.
 
 ## Phase 5 – Kubernetes Orchestration (Weeks 9–10)

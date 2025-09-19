@@ -188,6 +188,9 @@ class Finding(TimestampMixin, Base):
     tickets: Mapped[list["FindingTicket"]] = relationship(
         back_populates="finding", cascade="all, delete-orphan"
     )
+    validations: Mapped[list["FindingValidation"]] = relationship(
+        back_populates="finding", cascade="all, delete-orphan"
+    )
 
 
 class FindingEnrichment(TimestampMixin, Base):
@@ -285,6 +288,42 @@ class FindingTicket(TimestampMixin, Base):
     created_by: Mapped[str] = mapped_column(String(128), nullable=False)
 
     finding: Mapped["Finding"] = relationship(back_populates="tickets")
+
+
+class FindingValidation(TimestampMixin, Base):
+    """Validator agent executions linked to findings."""
+
+    __tablename__ = "finding_validations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    finding_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False
+    )
+    scan_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False
+    )
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    validator: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    outcome: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    submitted_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    processed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    requested_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    metadata_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    finding: Mapped["Finding"] = relationship(back_populates="validations")
+    scan: Mapped["Scan"] = relationship()
 
 
 class BinarySample(TimestampMixin, Base):
@@ -468,6 +507,52 @@ def _binary_static_analysis_prevent_mutation(
         raise ValueError(
             "Static analysis evidence payloads are immutable once persisted."
         )
+
+
+@event.listens_for(FindingValidation, "before_insert", propagate=True)
+def _finding_validation_set_hash(
+    mapper, connection, target: FindingValidation
+) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    target.evidence = _coerce_evidence(target.evidence)
+    target.metadata_hash = _hash_json(target.metadata_json)
+    payload = {"metadata": target.metadata_hash, "evidence": target.evidence}
+    target.evidence_hash = _hash_evidence(payload)
+    if target.validator:
+        target.validator = target.validator.strip().lower()
+    if target.status:
+        target.status = target.status.strip().lower()
+    if target.outcome:
+        target.outcome = target.outcome.strip().lower()
+    if target.severity:
+        target.severity = target.severity.strip().lower()
+    if target.requested_by:
+        target.requested_by = target.requested_by.strip()
+    if target.attempts < 0:
+        target.attempts = 0
+
+
+@event.listens_for(FindingValidation, "before_update", propagate=True)
+def _finding_validation_update_hashes(
+    mapper, connection, target: FindingValidation
+) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    target.evidence = _coerce_evidence(target.evidence)
+    target.metadata_hash = _hash_json(target.metadata_json)
+    payload = {"metadata": target.metadata_hash, "evidence": target.evidence}
+    target.evidence_hash = _hash_evidence(payload)
+    if target.validator:
+        target.validator = target.validator.strip().lower()
+    if target.status:
+        target.status = target.status.strip().lower()
+    if target.outcome:
+        target.outcome = target.outcome.strip().lower()
+    if target.severity:
+        target.severity = target.severity.strip().lower()
+    if target.requested_by:
+        target.requested_by = target.requested_by.strip()
+    if target.attempts < 0:
+        target.attempts = 0
 
 
 @event.listens_for(Finding, "before_insert", propagate=True)

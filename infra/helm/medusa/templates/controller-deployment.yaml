@@ -71,6 +71,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.name }}
                   key: MEDUSA_NUCLEI_QUEUE_CHANNEL
+            - name: MEDUSA_VALIDATOR_QUEUE_CHANNEL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_VALIDATOR_QUEUE_CHANNEL
             - name: MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL
               valueFrom:
                 secretKeyRef:
@@ -86,6 +91,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.name }}
                   key: MEDUSA_ENRICHMENT_CALLBACK_TOKEN
+            - name: MEDUSA_VALIDATOR_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: MEDUSA_VALIDATOR_CALLBACK_TOKEN
             - name: MEDUSA_CVE_ENRICHMENT_QDRANT_URL
               valueFrom:
                 secretKeyRef:
