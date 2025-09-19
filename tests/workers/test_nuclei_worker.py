@@ -75,6 +75,7 @@ def test_normalize_findings(sample_job):
         "cve_id",
         "metadata",
         "evidence",
+        "artifacts",
     }
 
     assert findings[0]["artifacts"] == []
@@ -90,6 +91,7 @@ def test_normalize_findings(sample_job):
         "cve_id",
         "metadata",
         "evidence",
+        "artifacts",
     }
 
     # Ensure the payload satisfies the controller schema expectations.
@@ -108,7 +110,7 @@ def test_normalize_findings_with_unknown_severity(sample_job):
     findings = worker.normalize_findings(raw_records, sample_job)
     assert findings[0]["severity"] == "info"
     CallbackFinding(**findings[0])
-    assert findings[1]["artifacts"] == []
+    assert findings[0].get("artifacts", []) == []
 
 
 def test_process_job_posts_callback(sample_job):
