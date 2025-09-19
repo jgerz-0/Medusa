@@ -42,6 +42,7 @@ def client():
         zap_callback_token="zap-secret",
         sqlmap_callback_token="sqlmap-secret",
         enrichment_callback_token="enrichment-secret",
+        binary_static_analysis_callback_token="static-secret",
     )
 
     engine = create_engine(

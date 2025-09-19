@@ -117,6 +117,9 @@ class Scan(TimestampMixin, Base):
     binary_samples: Mapped[list["BinarySample"]] = relationship(
         back_populates="scan", cascade="all, delete-orphan"
     )
+    binary_analysis_findings: Mapped[list["BinaryStaticAnalysisFinding"]] = (
+        relationship(back_populates="scan", cascade="all, delete-orphan")
+    )
 
 
 class Finding(TimestampMixin, Base):
@@ -166,7 +169,9 @@ class FindingEnrichment(TimestampMixin, Base):
     advisories_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     errors: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     errors_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    provenance: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    provenance: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     provenance_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 
@@ -217,8 +222,12 @@ class BinarySample(TimestampMixin, Base):
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
     mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
     magic_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    policy_status: Mapped[str] = mapped_column(String(32), default="allowed", nullable=False)
-    policy_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    policy_status: Mapped[str] = mapped_column(
+        String(32), default="allowed", nullable=False
+    )
+    policy_reasons: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
     storage_bucket: Mapped[str] = mapped_column(String(128), nullable=False)
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
     metadata_json: Mapped[Dict[str, Any]] = mapped_column(
@@ -232,6 +241,41 @@ class BinarySample(TimestampMixin, Base):
 
     scan: Mapped["Scan"] = relationship(back_populates="binary_samples")
     target: Mapped["Target"] = relationship(back_populates="binary_samples")
+    analysis_findings: Mapped[list["BinaryStaticAnalysisFinding"]] = relationship(
+        back_populates="sample", cascade="all, delete-orphan"
+    )
+
+
+class BinaryStaticAnalysisFinding(TimestampMixin, Base):
+    """Static analysis findings associated with binary samples."""
+
+    __tablename__ = "binary_static_analysis_findings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    sample_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("binary_samples.id", ondelete="CASCADE"), nullable=False
+    )
+    scan_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False
+    )
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_bucket: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    artifact_key: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    executed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    sample: Mapped["BinarySample"] = relationship(back_populates="analysis_findings")
+    scan: Mapped["Scan"] = relationship(back_populates="binary_analysis_findings")
 
 
 @event.listens_for(BinarySample, "before_insert", propagate=True)
@@ -247,6 +291,38 @@ def _binary_sample_update_hash(mapper, connection, target: BinarySample) -> None
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.policy_reasons = list(dict.fromkeys(target.policy_reasons or []))
     target.metadata_hash = _hash_json(target.metadata_json)
+
+
+@event.listens_for(BinaryStaticAnalysisFinding, "before_insert", propagate=True)
+def _binary_static_analysis_set_hash(
+    mapper, connection, target: BinaryStaticAnalysisFinding
+) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    target.evidence = _coerce_evidence(target.evidence)
+    if not target.evidence_hash:
+        payload = {
+            "metadata": target.metadata_json,
+            "evidence": target.evidence,
+        }
+        target.evidence_hash = _hash_evidence(payload)
+
+
+@event.listens_for(BinaryStaticAnalysisFinding, "before_update", propagate=True)
+def _binary_static_analysis_prevent_mutation(
+    mapper, connection, target: BinaryStaticAnalysisFinding
+) -> None:
+    state = inspect(target)
+    metadata_attr = state.attrs.metadata_json
+    evidence_attr = state.attrs.evidence
+    hash_attr = state.attrs.evidence_hash
+    if (
+        metadata_attr.history.has_changes()
+        or evidence_attr.history.has_changes()
+        or hash_attr.history.has_changes()
+    ):
+        raise ValueError(
+            "Static analysis evidence payloads are immutable once persisted."
+        )
 
 
 @event.listens_for(Finding, "before_insert", propagate=True)
@@ -300,9 +376,7 @@ def _normalize_json_payload(value: Any, default_factory):
 
 
 @event.listens_for(FindingEnrichment, "before_insert", propagate=True)
-def _finding_enrichment_set_hash(
-    mapper, connection, target: FindingEnrichment
-) -> None:
+def _finding_enrichment_set_hash(mapper, connection, target: FindingEnrichment) -> None:
     target.advisories = list(_normalize_json_payload(target.advisories, list))
     target.errors = dict(_normalize_json_payload(target.errors, dict))
     target.provenance = dict(_normalize_json_payload(target.provenance, dict))
@@ -343,6 +417,7 @@ def _finding_enrichment_prevent_mutation(
     if changed:
         raise ValueError("Finding enrichment payloads are immutable once recorded.")
 
+
 class PrincipalCredential(Base):
     """Authentication material for API keys and JWT principals."""
 
@@ -359,7 +434,7 @@ class PrincipalCredential(Base):
             postgresql_where=text("revoked_at IS NULL"),
         ),
     )
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     subject: Mapped[str] = mapped_column(String(255), nullable=False)
     auth_method: Mapped[str] = mapped_column(String(32), nullable=False)

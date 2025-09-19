@@ -71,6 +71,41 @@ The worker is intentionally modular:
 - `workers/binary/preprocess/policies.py` – MIME allow-list and max-size
   policies with deterministic decisions.
 
+### Static Analysis Worker
+
+Phase two introduces `workers/binary/static_analysis`, a companion worker that
+consumes jobs from `queues:binary:static-analysis`, runs `checksec` and
+`bandit` inside hardened container runtimes, and posts normalized findings back
+to the controller. The worker is intentionally deterministic:
+
+- CLI flags for the runtime are allow-listed (`--rm`, `--network=none`,
+  `--cpus`, `--memory`, `--pids-limit`, `--security-opt`, `-v`). Any attempt to
+  use disallowed flags raises an exception before the container launches.
+- Each tool mounts the downloaded artifact read-only under `/workspace` inside
+  the container. No user-supplied command line arguments are honored.
+- Raw JSON output for each tool is persisted to MinIO using the
+  `analysis/reports/<sample-id>/<tool>-<uuid>.json` convention via the shared
+  `S3ObjectStorageClient` wrapper.
+- Findings are normalized into the `binary_static_analysis_findings` table with
+  immutable hashes, mirroring the guarantees of network scan findings.
+
+Jobs are queued through the new controller endpoint:
+
+```http
+POST /binary/static-analysis
+{
+  "sample_id": "uuid-from-binary_samples",
+  "target_id": "optional-guard",
+  "metadata": {"profile": "baseline"}
+}
+```
+
+The controller validates ownership of the binary sample, records an audit log,
+creates a `Scan` row with `scanner="binary_static_analysis"`, and pushes a job
+onto Redis. Workers call back to
+`/internal/binary/static-analysis/callback` using the shared secret supplied in
+`MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN`.
+
 ### Environment Variables
 
 | Variable | Purpose |
@@ -83,6 +118,16 @@ The worker is intentionally modular:
 | `BINARY_METADATA_PREFIX` | Prefix inside the metadata bucket (default `preprocess/metadata/`). |
 | `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | MinIO/S3 connectivity. |
 | `DATABASE_URL` | SQLAlchemy URL for Postgres. |
+| `BINARY_STATIC_ANALYSIS_QUEUE_KEY` | Redis list key for static analysis jobs (`queues:binary:static-analysis`). |
+| `BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY` | Redis key for failed static analysis jobs. |
+| `BINARY_STATIC_ANALYSIS_RUNTIME` | Container runtime binary (`docker` or `podman`). |
+| `BINARY_STATIC_ANALYSIS_RUNTIME_FLAGS` | Space-separated runtime flags validated against the allow-list. |
+| `BINARY_STATIC_ANALYSIS_CHECKSEC_IMAGE` | Container image that provides the `checksec` CLI. |
+| `BINARY_STATIC_ANALYSIS_BANDIT_IMAGE` | Container image that provides the `bandit` CLI. |
+| `BINARY_STATIC_ANALYSIS_TOOL_TIMEOUT` | Per-tool execution timeout in seconds (default 120). |
+| `BINARY_ANALYSIS_BUCKET` | Bucket for persisted analyzer artifacts (defaults to the sample's bucket). |
+| `BINARY_ANALYSIS_PREFIX` | Prefix inside the analysis bucket (default `analysis/reports/`). |
+| `MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN` | Shared secret required for worker callbacks. |
 
 Run the worker locally:
 
@@ -99,6 +144,18 @@ poetry run python -m workers.binary.preprocess.worker --once
 The worker logs policy outcomes and will dead-letter invalid payloads with a
 JSON object describing the failure reason.
 
+Launch the static analysis worker in a separate process:
+
+```bash
+poetry run python -m workers.binary.static_analysis.worker
+```
+
+Provide a JSON job file to exercise the smoke-test mode:
+
+```bash
+poetry run python -m workers.binary.static_analysis.worker --once job.json
+```
+
 ## Data Model
 
 `controller/db/models.py` now includes a `binary_samples` table storing:
@@ -110,6 +167,10 @@ JSON object describing the failure reason.
 - Timestamps for forensic replay
 
 SQLAlchemy events ensure payloads are normalized and hashed before persistence.
+
+Static analysis results persist to `binary_static_analysis_findings`, linking
+each tool finding back to the originating sample and scan with immutable JSON
+hashes for evidence integrity.
 
 ## Testing
 

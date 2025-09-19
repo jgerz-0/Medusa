@@ -27,7 +27,7 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 
 ## Phase 3 – Binary Support (Weeks 5–6)
 - Preprocess agent (file type detection, triage rules, scope enforcement).
-- Static analyzers (checksec, bandit) with JSON adapters.
+- ✅ Static analyzers (checksec, bandit) with JSON adapters.
 - Fuzzing harness using AFL/libFuzzer container jobs with artifact collection in MinIO.
 - Binary findings schema aligned with web findings for unified reporting.
 

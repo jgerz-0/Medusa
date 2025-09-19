@@ -31,6 +31,7 @@ def test_sqlmap_worker_config_defaults(monkeypatch):
         zap_callback_token="zap-token",
         sqlmap_callback_token="sqlmap-token",
         enrichment_callback_token="enrichment-token",
+        binary_static_analysis_callback_token="static-secret",
     )
     assert config.queue_key == settings.sqlmap_queue_channel
     assert config.dead_letter_key == "queues:sqlmap:dead"

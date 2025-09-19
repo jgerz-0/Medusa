@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session, selectinload
 from controller.db.models import (
     AuditLog,
     BinarySample,
+    BinaryStaticAnalysisFinding,
     Finding,
     FindingEnrichment,
     PrincipalCredential,
@@ -57,6 +58,7 @@ ROLE_FINDINGS_READ = "findings:read"
 ROLE_SCANS_READ = "scans:read"
 ROLE_SCAN_ENQUEUE = "scan:enqueue"
 ROLE_BINARY_PREPROCESS_ENQUEUE = "binary:preprocess"
+ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE = "binary:static-analysis"
 ROLE_TARGETS_READ = "targets:read"
 ROLE_TARGETS_WRITE = "targets:write"
 ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
@@ -68,6 +70,7 @@ ALLOWED_ROLES = {
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
     ROLE_BINARY_PREPROCESS_ENQUEUE,
+    ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -79,6 +82,7 @@ DEFAULT_ANALYST_ROLES = [
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
     ROLE_BINARY_PREPROCESS_ENQUEUE,
+    ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_ENRICHMENT_ENQUEUE,
 ]
@@ -89,6 +93,7 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
     ROLE_BINARY_PREPROCESS_ENQUEUE,
+    ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -132,6 +137,7 @@ ALLOWED_NUCLEI_TEMPLATE_PREFIXES: Tuple[str, ...] = (
 SCAN_TYPE_NUCLEI = "nuclei"
 SCAN_TYPE_ZAP = "zap"
 SCAN_TYPE_SQLMAP = "sqlmap"
+SCAN_TYPE_BINARY_STATIC = "binary_static_analysis"
 
 ALLOWED_SCANNERS: Tuple[str, ...] = (
     SCAN_TYPE_NUCLEI,
@@ -179,7 +185,9 @@ def _sanitize_template_name(candidate: Any) -> Optional[str]:
     lowered = value.lower()
     if ".." in lowered or lowered.startswith(("/", "\\")):
         return None
-    if not any(lowered.startswith(prefix) for prefix in ALLOWED_NUCLEI_TEMPLATE_PREFIXES):
+    if not any(
+        lowered.startswith(prefix) for prefix in ALLOWED_NUCLEI_TEMPLATE_PREFIXES
+    ):
         return None
     return value
 
@@ -238,10 +246,14 @@ def resolve_nuclei_job_configuration(
     tags = sorted({*user_tags, f"profile:{profile}"})
 
     requested_hosts_value = (
-        raw_parameters.get("requested_hosts") or raw_parameters.get("allowed_hosts") or []
+        raw_parameters.get("requested_hosts")
+        or raw_parameters.get("allowed_hosts")
+        or []
     )
     normalized_hosts = _coerce_requested_hosts(requested_hosts_value)
-    allowed_hosts, rejected_hosts = _filter_hosts_for_scope(target_scope, normalized_hosts)
+    allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
+        target_scope, normalized_hosts
+    )
 
     sanitized_parameters: Dict[str, Any] = {"profile": profile}
     if sanitized_requested:
@@ -328,20 +340,28 @@ def resolve_zap_job_configuration(
     include_paths: List[str] = []
     include_value = raw_parameters.get("include_paths")
     if isinstance(include_value, str):
-        include_paths = [segment.strip() for segment in include_value.split(",") if segment.strip()]
+        include_paths = [
+            segment.strip() for segment in include_value.split(",") if segment.strip()
+        ]
     elif isinstance(include_value, Iterable) and not isinstance(
         include_value, (bytes, bytearray, dict)
     ):
-        include_paths = [str(item).strip() for item in include_value if str(item).strip()]
+        include_paths = [
+            str(item).strip() for item in include_value if str(item).strip()
+        ]
 
     exclude_paths: List[str] = []
     exclude_value = raw_parameters.get("exclude_paths")
     if isinstance(exclude_value, str):
-        exclude_paths = [segment.strip() for segment in exclude_value.split(",") if segment.strip()]
+        exclude_paths = [
+            segment.strip() for segment in exclude_value.split(",") if segment.strip()
+        ]
     elif isinstance(exclude_value, Iterable) and not isinstance(
         exclude_value, (bytes, bytearray, dict)
     ):
-        exclude_paths = [str(item).strip() for item in exclude_value if str(item).strip()]
+        exclude_paths = [
+            str(item).strip() for item in exclude_value if str(item).strip()
+        ]
 
     requested_hosts = raw_parameters.get("allowed_hosts") or []
     allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
@@ -399,7 +419,9 @@ def resolve_sqlmap_job_configuration(
     techniques_value = raw_parameters.get("techniques")
     techniques: List[str] = []
     if isinstance(techniques_value, str):
-        candidates = [segment.strip().lower() for segment in techniques_value.split(",")]
+        candidates = [
+            segment.strip().lower() for segment in techniques_value.split(",")
+        ]
         techniques = [item for item in candidates if item in ALLOWED_SQLMAP_TECHNIQUES]
     elif isinstance(techniques_value, Iterable) and not isinstance(
         techniques_value, (bytes, bytearray, dict)
@@ -464,6 +486,7 @@ def _is_http_target(scope: str) -> bool:
     value = scope.strip().lower()
     return value.startswith("http://") or value.startswith("https://")
 
+
 class Settings(BaseSettings):
     """Runtime configuration for the controller service."""
 
@@ -498,6 +521,11 @@ class Settings(BaseSettings):
     binary_preprocess_queue_channel: str = Field(
         "queues:binary:preprocess",
         description="Redis list channel for binary preprocessing jobs.",
+    )
+    binary_static_analysis_queue_channel: str = Field(
+        "queues:binary:static-analysis",
+        description="Redis list channel for binary static analysis jobs.",
+    )
     cve_enrichment_qdrant_url: Optional[str] = Field(
         default=None,
         description="Base URL for the Qdrant vector collection used by enrichment workers.",
@@ -518,6 +546,10 @@ class Settings(BaseSettings):
     enrichment_callback_token: str = Field(
         ..., description="Shared secret required for enrichment worker callbacks."
     )
+    binary_static_analysis_callback_token: str = Field(
+        ...,
+        description="Shared secret required for binary static analysis worker callbacks.",
+    )
 
     model_config = ConfigDict(env_prefix="MEDUSA_", case_sensitive=False)
 
@@ -527,6 +559,7 @@ def get_settings() -> Settings:
     """Return cached settings instance loaded from environment."""
 
     return Settings()
+
 
 security_scheme = HTTPBearer(auto_error=False)
 
@@ -541,6 +574,7 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 Network = Union[IPv4Network, IPv6Network]
 
+
 def _normalize_hostname(value: str) -> str:
     """Return a lowercase hostname without trailing dots or wildcard prefixes."""
 
@@ -548,6 +582,7 @@ def _normalize_hostname(value: str) -> str:
     if normalized.startswith("*."):
         normalized = normalized[2:]
     return normalized
+
 
 def _hash_secret(secret: str) -> str:
     """Return a SHA-256 hash of the provided secret."""
@@ -564,6 +599,7 @@ def _fingerprint_from_hash(key_hash: Optional[str]) -> Optional[str]:
     if not key_hash:
         return None
     return key_hash[:KEY_FINGERPRINT_LENGTH]
+
 
 def _scope_to_network(scope: str) -> Optional[Network]:
     """Attempt to parse the target scope as an IP network."""
@@ -586,7 +622,9 @@ def _coerce_requested_hosts(value: Any) -> List[str]:
     raise TypeError("requested_hosts must be an iterable of host strings")
 
 
-def _filter_hosts_for_scope(scope: str, requested_hosts: Iterable[str]) -> Tuple[List[str], List[str]]:
+def _filter_hosts_for_scope(
+    scope: str, requested_hosts: Iterable[str]
+) -> Tuple[List[str], List[str]]:
     """Return hosts within scope alongside those rejected."""
 
     network = _scope_to_network(scope)
@@ -664,12 +702,12 @@ class TargetResponse(BaseModel):
 class TargetCollectionResponse(BaseModel):
     data: List[TargetResponse]
 
-      
+
 class ScanRequest(BaseModel):
     target_id: str
-    scanner: Literal[
-        SCAN_TYPE_NUCLEI, SCAN_TYPE_ZAP, SCAN_TYPE_SQLMAP
-    ] = Field(description="Scanner identifier")
+    scanner: Literal[SCAN_TYPE_NUCLEI, SCAN_TYPE_ZAP, SCAN_TYPE_SQLMAP] = Field(
+        description="Scanner identifier"
+    )
     parameters: Dict[str, Any] = Field(
         default_factory=dict, description="Scanner-specific configuration payload"
     )
@@ -678,10 +716,16 @@ class ScanRequest(BaseModel):
 class BinaryPreprocessRequest(BaseModel):
     target_id: str
     object_bucket: str = Field(
-        ..., min_length=1, max_length=128, description="Bucket containing the uploaded artifact"
+        ...,
+        min_length=1,
+        max_length=128,
+        description="Bucket containing the uploaded artifact",
     )
     object_key: str = Field(
-        ..., min_length=1, max_length=512, description="Object key referencing the uploaded artifact"
+        ...,
+        min_length=1,
+        max_length=512,
+        description="Object key referencing the uploaded artifact",
     )
     file_name: Optional[str] = Field(
         default=None,
@@ -695,6 +739,20 @@ class BinaryPreprocessRequest(BaseModel):
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
         description="Arbitrary metadata forwarded to the preprocess worker",
+    )
+
+
+class BinaryStaticAnalysisRequest(BaseModel):
+    sample_id: str = Field(
+        ..., description="Identifier of the normalized binary sample to analyze"
+    )
+    target_id: Optional[str] = Field(
+        default=None,
+        description="Optional assertion ensuring the sample belongs to the expected target",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Operator-provided hints recorded with the analysis job",
     )
 
 
@@ -741,6 +799,49 @@ class PaginationMetadata(BaseModel):
 class AuditLogCollectionResponse(BaseModel):
     data: List[AuditLogResponse]
     meta: PaginationMetadata
+
+
+class StaticAnalysisArtifactPayload(BaseModel):
+    tool: str
+    bucket: str
+    key: str
+
+
+class StaticAnalysisFindingPayload(BaseModel):
+    tool: str
+    severity: str
+    title: str
+    description: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    artifact_bucket: Optional[str] = None
+    artifact_key: Optional[str] = None
+    executed_at: datetime
+
+
+class StaticAnalysisReportPayload(BaseModel):
+    tool: str
+    status: Literal["completed", "failed"]
+    exit_code: int
+    stdout: str
+    stderr: str
+    raw_output: Dict[str, Any] = Field(default_factory=dict)
+    findings: List[StaticAnalysisFindingPayload] = Field(default_factory=list)
+    artifact: Optional[StaticAnalysisArtifactPayload] = None
+    executed_at: Optional[datetime] = None
+
+
+class StaticAnalysisCallbackRequest(BaseModel):
+    job_id: str
+    scan_id: str
+    sample_id: str
+    status: Literal["completed", "failed"]
+    processed_at: datetime
+    findings: List[StaticAnalysisFindingPayload] = Field(default_factory=list)
+    artifacts: List[StaticAnalysisArtifactPayload] = Field(default_factory=list)
+    reports: List[StaticAnalysisReportPayload] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
 
 
 SUPPORTED_ENRICHMENT_SOURCES = {"nvd", "circl"}
@@ -792,7 +893,8 @@ class FindingEnrichmentSummary(BaseModel):
     provenance: Dict[str, Any] = Field(default_factory=dict)
     provenance_hash: str
     payload_hash: str
-      
+
+
 class FindingResponse(BaseModel):
     id: str
     scan_id: str
@@ -894,7 +996,9 @@ class PrincipalCredentialCreateRequest(BaseModel):
     def _validate_roles(cls, value: List[str]) -> List[str]:
         invalid = [role for role in value if role not in ALLOWED_ROLES]
         if invalid:
-            raise ValueError(f"Unsupported roles requested: {', '.join(sorted(invalid))}")
+            raise ValueError(
+                f"Unsupported roles requested: {', '.join(sorted(invalid))}"
+            )
         return value
 
 
@@ -985,6 +1089,7 @@ def get_db_session() -> Iterator[Session]:
 def get_queue_client(settings: Settings = Depends(get_settings)) -> QueueClient:
     return RedisQueueClient(settings.redis_url)
 
+
 def _authenticate_callback_worker(
     request: Request,
     *,
@@ -1023,8 +1128,7 @@ def _authenticate_api_key(
     api_key_hash = _hash_secret(candidate_api_key)
     fingerprint = _fingerprint_from_hash(api_key_hash)
 
-    candidate_api_key = api_key_header or bearer_token
-    if candidate_api_key and candidate_api_key in settings.api_keys:
+    if candidate_api_key in settings.api_keys:
         subject_hash = _hash_secret(candidate_api_key)
         return Principal(
             subject=f"apikey:{subject_hash}",
@@ -1032,33 +1136,20 @@ def _authenticate_api_key(
             roles=list(DEFAULT_ADMIN_ROLES),
         )
 
-    if candidate_api_key:
-        api_key_hash = _hash_secret(candidate_api_key)
-        active_credential = (
-            db.query(PrincipalCredential)
-            .filter(
-                PrincipalCredential.auth_method == "api_key",
-                PrincipalCredential.key_hash == api_key_hash,
-                PrincipalCredential.revoked_at.is_(None),
-            )
-            .first()
+    active_credential = (
+        db.query(PrincipalCredential)
+        .filter(
+            PrincipalCredential.auth_method == "api_key",
+            PrincipalCredential.key_hash == api_key_hash,
+            PrincipalCredential.revoked_at.is_(None),
         )
-        if active_credential:
-            return Principal(
-                subject=f"apikey:{subject_hash}",
-                auth_method="api_key",
-                roles=list(active_credential.roles or []),
-            )
-
-        api_key_hash = _hash_secret(candidate_api_key)
-        active_credential = (
-            db.query(PrincipalCredential)
-            .filter(
-                PrincipalCredential.auth_method == "api_key",
-                PrincipalCredential.key_hash == api_key_hash,
-                PrincipalCredential.revoked_at.is_(None),
-            )
-            .first()
+        .first()
+    )
+    if active_credential:
+        return Principal(
+            subject=active_credential.subject,
+            auth_method="api_key",
+            roles=list(active_credential.roles or []),
         )
 
     revoked_credential = (
@@ -1092,39 +1183,10 @@ def _authenticate_api_key(
             extra_metadata={
                 "credential_id": str(revoked_credential.id),
                 "credential_status": "revoked",
-                "key_fingerprint": _fingerprint_from_hash(
-                    revoked_credential.key_hash
-                ),
+                "key_fingerprint": _fingerprint_from_hash(revoked_credential.key_hash),
                 "api_key_source": source,
             },
         )
-
-    for configured_key in settings.api_keys:
-        if secrets.compare_digest(candidate_api_key, configured_key):
-            subject_hash = api_key_hash
-            return Principal(
-                subject=f"apikey:{subject_hash}",
-                auth_method="api_key",
-                roles=list(revoked_credential.roles or []),
-            )
-            log_access_denied(
-                db,
-                principal=revoked_principal,
-                required_roles=[],
-                resource_type="principal_credential",
-                resource_id=str(revoked_credential.id),
-                reason="credential_revoked",
-                detail="API key revoked",
-                status_code=status.HTTP_403_FORBIDDEN,
-                extra_metadata={
-                    "credential_id": str(revoked_credential.id),
-                    "credential_status": "revoked",
-                },
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Authentication required",
-            )
 
     if silent:
         return None
@@ -1228,6 +1290,43 @@ def _authenticate_jwt(
     return Principal(subject=record.subject, auth_method="jwt", roles=roles)
 
 
+def authenticate(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
+    db: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> Principal:
+    """Authenticate API requests via API key header or bearer JWT."""
+
+    api_key_header = request.headers.get("X-API-Key")
+    bearer_token = credentials.credentials if credentials else None
+
+    if api_key_header:
+        principal = _authenticate_api_key(
+            api_key_header,
+            db=db,
+            settings=settings,
+            source="header",
+        )
+        if principal is not None:
+            return principal
+
+    if bearer_token:
+        return _authenticate_jwt(bearer_token, settings=settings, db=db)
+
+    anonymous = Principal(subject="anonymous", auth_method="unauthenticated", roles=[])
+    log_access_denied(
+        db,
+        principal=anonymous,
+        required_roles=[],
+        resource_type="endpoint",
+        resource_id=str(request.url.path),
+        reason="missing_credentials",
+        detail="Authentication required",
+        status_code=status.HTTP_401_UNAUTHORIZED,
+    )
+
+
 def authenticate_nuclei_worker(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -1271,6 +1370,8 @@ def authenticate_zap_worker(
         request,
         expected_token=settings.zap_callback_token,
         subject="worker:zap",
+        db=db,
+        resource_id="zap",
     )
 
 
@@ -1285,6 +1386,24 @@ def authenticate_sqlmap_worker(
         request,
         expected_token=settings.sqlmap_callback_token,
         subject="worker:sqlmap",
+        db=db,
+        resource_id="sqlmap",
+    )
+
+
+def authenticate_binary_static_analysis_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
+) -> Principal:
+    """Authenticate binary static analysis worker callbacks."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.binary_static_analysis_callback_token,
+        subject="worker:binary-static-analysis",
+        db=db,
+        resource_id="binary-static-analysis",
     )
 
 
@@ -1431,10 +1550,7 @@ def list_principals(
         .order_by(PrincipalCredential.created_at.desc())
         .all()
     )
-    response_items = [
-        _serialize_principal_credential(record)
-        for record in records
-    ]
+    response_items = [_serialize_principal_credential(record) for record in records]
 
     record_audit_event(
         db,
@@ -1483,10 +1599,7 @@ def list_audit_log(
 
     total = query.count()
     records = (
-        query.order_by(AuditLog.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
+        query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
     )
 
     response_items = [
@@ -1645,16 +1758,16 @@ def revoke_principal_credential(
         "subject": credential.subject,
         "auth_method": credential.auth_method,
         "roles": credential.roles,
-        "revoked_at": credential.revoked_at.isoformat()
-        if credential.revoked_at
-        else None,
+        "revoked_at": (
+            credential.revoked_at.isoformat() if credential.revoked_at else None
+        ),
     }
     if fingerprint:
         metadata["rotation"] = {
             "key_fingerprint": fingerprint,
-            "revoked_at": credential.revoked_at.isoformat()
-            if credential.revoked_at
-            else None,
+            "revoked_at": (
+                credential.revoked_at.isoformat() if credential.revoked_at else None
+            ),
         }
 
     record_audit_event(
@@ -1711,6 +1824,7 @@ def create_target(
 
     return TargetResponse.model_validate(target, from_attributes=True)
 
+
 @app.get("/targets", response_model=TargetCollectionResponse)
 def list_targets(
     principal: Principal = Depends(authenticate),
@@ -1735,7 +1849,10 @@ def list_targets(
     )
 
     return TargetCollectionResponse(
-        data=[TargetResponse.model_validate(target, from_attributes=True) for target in targets]
+        data=[
+            TargetResponse.model_validate(target, from_attributes=True)
+            for target in targets
+        ]
     )
 
 
@@ -1768,50 +1885,15 @@ def enqueue_scan(
             detail="Target is currently outside the authorized scope",
         )
 
-    requested_hosts_param = scan_request.parameters.get("requested_hosts")
-    allowed_hosts: List[str] = []
-    rejected_hosts: List[str] = []
-    if "requested_hosts" in scan_request.parameters:
-        try:
-            requested_hosts = _coerce_requested_hosts(requested_hosts_param)
-        except TypeError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="parameters.requested_hosts must be an array of host strings",
-            ) from exc
-
-        allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
-            target.scope, requested_hosts
-        )
-
-        if requested_hosts and not allowed_hosts and rejected_hosts:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No requested hosts remain within the authorized target scope",
-            )
-
-    profile, templates, tags, sanitized_parameters = resolve_nuclei_job_configuration(
-        scan_request.parameters
-    )
-
-    requested_hosts_raw = _coerce_requested_hosts(
-        (scan_request.parameters or {}).get("requested_hosts")
-    )
-    rejected_hosts: List[str] = []
-    if requested_hosts_raw:
-        allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
-            target.scope, requested_hosts_raw
-        )
-        sanitized_parameters["requested_hosts"] = allowed_hosts
-        if rejected_hosts:
-            sanitized_parameters["rejected_hosts"] = rejected_hosts
-        if requested_hosts_raw and not allowed_hosts:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No requested hosts remain within the authorized target scope",
-            )
-    if "requested_hosts" in scan_request.parameters:
-        sanitized_parameters["requested_hosts"] = allowed_hosts
+    for host_key in ("requested_hosts", "allowed_hosts"):
+        if host_key in scan_request.parameters:
+            try:
+                _coerce_requested_hosts(scan_request.parameters.get(host_key))
+            except TypeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"parameters.{host_key} must be an array of host strings",
+                ) from exc
 
     scan = Scan(
         target_id=target.id,
@@ -1825,39 +1907,31 @@ def enqueue_scan(
     submitted_at = datetime.now(tz=timezone.utc)
     job_id = str(uuid.uuid4())
 
-    job_metadata: Dict[str, Any] = {
+    base_metadata: Dict[str, Any] = {
         "scan_id": str(scan.id),
         "target_id": str(target.id),
         "target_scope": target.scope,
         "target_name": target.name,
         "initiated_by": principal.subject,
         "submitted_at": submitted_at.isoformat(),
-        "template_profile": profile,
-        "controller_callback_url": callback_url,
-        "parameters": sanitized_parameters,
     }
-    if requested_hosts_raw:
-        job_metadata["requested_hosts_raw"] = requested_hosts_raw
-    if sanitized_parameters.get("requested_hosts"):
-        job_metadata["requested_hosts"] = sanitized_parameters["requested_hosts"]
-    if rejected_hosts:
-        job_metadata["rejected_hosts"] = rejected_hosts
 
-    job_payload = {
-        "job_id": job_id,
-        "scan_id": str(scan.id),
-        "target_id": str(target.id),
-        "target_scope": target.scope,
-        "target_name": target.name,
-        "initiated_by": principal.subject,
-        "submitted_at": submitted_at.isoformat(),
-        "metadata": job_metadata,
-    }
+    sanitized_parameters: Dict[str, Any] = {}
+    extra_metadata: Dict[str, Any] = {}
+    queue_channel: str
+    job_payload: Dict[str, Any]
+    audit_metadata: Dict[str, Any]
+    rejected_hosts: List[str] = []
 
     if scan.scanner == SCAN_TYPE_NUCLEI:
-        profile, templates, tags, sanitized_parameters, extra_metadata = (
-            resolve_nuclei_job_configuration(target.scope, scan_request.parameters)
-        )
+        (
+            profile,
+            templates,
+            tags,
+            sanitized_parameters,
+            extra_metadata,
+        ) = resolve_nuclei_job_configuration(target.scope, scan_request.parameters)
+
         if (
             extra_metadata.get("rejected_hosts")
             and extra_metadata.get("requested_host_count")
@@ -1868,8 +1942,10 @@ def enqueue_scan(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No requested hosts remain within the authorized target scope",
             )
+
         scan.parameters = sanitized_parameters
         callback_url = str(http_request.url_for("nuclei_callback"))
+        metadata_payload = dict(base_metadata)
         metadata_payload.update(
             {
                 "template_profile": profile,
@@ -1879,6 +1955,7 @@ def enqueue_scan(
         )
         if extra_metadata:
             metadata_payload.update(extra_metadata)
+
         job_payload = {
             "job_id": job_id,
             "scan_id": str(scan.id),
@@ -1896,7 +1973,9 @@ def enqueue_scan(
             "submitted_at": submitted_at.isoformat(),
             "metadata": metadata_payload,
         }
+
         queue_channel = settings.nuclei_queue_channel
+        rejected_hosts = list(extra_metadata.get("rejected_hosts", []))
         audit_metadata = {
             "target_id": target.id,
             "scanner": scan.scanner,
@@ -1904,9 +1983,8 @@ def enqueue_scan(
             "template_profile": profile,
             "requested_host_count": extra_metadata.get("requested_host_count", 0),
             "requested_hosts": sanitized_parameters.get("requested_hosts", []),
+            "rejected_hosts": rejected_hosts,
         }
-        if extra_metadata.get("rejected_hosts"):
-            audit_metadata["rejected_hosts"] = extra_metadata["rejected_hosts"]
     elif scan.scanner == SCAN_TYPE_ZAP:
         if not _is_http_target(target.scope):
             raise HTTPException(
@@ -1918,6 +1996,7 @@ def enqueue_scan(
         )
         scan.parameters = sanitized_parameters
         callback_url = str(http_request.url_for("zap_callback"))
+        metadata_payload = dict(base_metadata)
         metadata_payload.update(
             {
                 "controller_callback_url": callback_url,
@@ -1959,6 +2038,7 @@ def enqueue_scan(
         )
         scan.parameters = sanitized_parameters
         callback_url = str(http_request.url_for("sqlmap_callback"))
+        metadata_payload = dict(base_metadata)
         metadata_payload.update(
             {
                 "controller_callback_url": callback_url,
@@ -2001,14 +2081,6 @@ def enqueue_scan(
     db.refresh(scan)
 
     queue.enqueue(queue_channel, job_payload)
-            **(
-                {"rejected_hosts": rejected_hosts}
-                if rejected_hosts
-                else {}
-            ),
-        },
-    }
-    queue.enqueue(settings.nuclei_queue_channel, job_payload)
 
     record_audit_event(
         db,
@@ -2017,14 +2089,7 @@ def enqueue_scan(
         resource_type="scan",
         resource_id=scan.id,
         scan_id=scan.id,
-        metadata={
-            "target_id": target.id,
-            "scanner": scan.scanner,
-            "job_id": job_id,
-            "template_profile": profile,
-            "requested_hosts": sanitized_parameters.get("requested_hosts", []),
-            "rejected_hosts": rejected_hosts,
-        },
+        metadata=audit_metadata,
     )
 
     return serialize_scan(scan)
@@ -2149,7 +2214,128 @@ def enqueue_binary_preprocess(
 
     return serialize_scan(scan)
 
-@app.post("/enrich", response_model=EnrichmentResponse, status_code=status.HTTP_202_ACCEPTED)
+
+@app.post(
+    "/binary/static-analysis",
+    response_model=ScanResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_binary_static_analysis(
+    request: BinaryStaticAnalysisRequest,
+    http_request: Request,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
+) -> ScanResponse:
+    """Queue a binary static analysis job for a previously normalized sample."""
+
+    enforce_roles(
+        principal,
+        [ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/binary/static-analysis",
+    )
+
+    sample = db.get(BinarySample, request.sample_id)
+    if sample is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Sample not found"
+        )
+
+    if request.target_id and request.target_id != sample.target_id:
+        record_audit_event(
+            db,
+            actor=principal,
+            action="static_analysis_target_mismatch",
+            resource_type="binary_sample",
+            resource_id=sample.id,
+            scan_id=None,
+            metadata={
+                "provided_target_id": request.target_id,
+                "expected_target_id": sample.target_id,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sample does not belong to the asserted target",
+        )
+
+    target = db.get(Target, sample.target_id)
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Target not found"
+        )
+
+    scan = Scan(
+        target_id=sample.target_id,
+        scanner=SCAN_TYPE_BINARY_STATIC,
+        parameters={
+            "sample_id": sample.id,
+            "storage_bucket": sample.storage_bucket,
+            "storage_key": sample.storage_key,
+            "file_name": sample.file_name,
+            "metadata": request.metadata,
+        },
+        initiated_by=principal.subject,
+    )
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+
+    submitted_at = datetime.now(tz=timezone.utc)
+    job_id = str(uuid.uuid4())
+    callback_url = str(http_request.url_for("binary_static_analysis_callback"))
+
+    job_metadata: Dict[str, Any] = {
+        "scan_id": str(scan.id),
+        "sample_id": sample.id,
+        "target_id": sample.target_id,
+        "target_scope": target.scope,
+        "initiated_by": principal.subject,
+        "submitted_at": submitted_at.isoformat(),
+    }
+    if request.metadata:
+        job_metadata["analyst_metadata"] = request.metadata
+
+    job_payload = {
+        "job_id": job_id,
+        "scan_id": str(scan.id),
+        "sample_id": sample.id,
+        "target_id": sample.target_id,
+        "object_bucket": sample.storage_bucket,
+        "object_key": sample.storage_key,
+        "file_name": sample.file_name,
+        "callback_url": callback_url,
+        "attempts": 0,
+        "submitted_at": submitted_at.isoformat(),
+        "metadata": job_metadata,
+    }
+
+    queue.enqueue(settings.binary_static_analysis_queue_channel, job_payload)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enqueue_binary_static_analysis",
+        resource_type="scan",
+        resource_id=scan.id,
+        scan_id=scan.id,
+        metadata={
+            "sample_id": sample.id,
+            "job_id": job_id,
+            "object_bucket": sample.storage_bucket,
+            "object_key": sample.storage_key,
+        },
+    )
+
+    return serialize_scan(scan)
+
+
+@app.post(
+    "/enrich", response_model=EnrichmentResponse, status_code=status.HTTP_202_ACCEPTED
+)
 def enqueue_enrichment(
     request: EnrichmentRequest,
     principal: Principal = Depends(authenticate),
@@ -2208,6 +2394,7 @@ def enqueue_enrichment(
         sources=list(request.sources),
     )
 
+
 app.add_api_route(
     "/scans",
     enqueue_scan,
@@ -2215,6 +2402,7 @@ app.add_api_route(
     response_model=ScanResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
+
 
 @app.get("/scans", response_model=ScanCollectionResponse)
 def list_scans(
@@ -2303,7 +2491,9 @@ def _persist_scan_callback(
 
     try:
         db.commit()
-    except SQLAlchemyError as exc:  # pragma: no cover - exercised in error handling tests
+    except (
+        SQLAlchemyError
+    ) as exc:  # pragma: no cover - exercised in error handling tests
         db.rollback()
         LOGGER.exception(
             "Failed to persist %s callback payload",
@@ -2339,6 +2529,91 @@ def _handle_scan_callback(
         worker_name=worker_name,
     )
     return scan, findings_persisted
+
+
+def _persist_static_analysis_callback(
+    *,
+    db: Session,
+    payload: StaticAnalysisCallbackRequest,
+) -> Tuple[Scan, BinarySample, int]:
+    scan = db.get(Scan, payload.scan_id)
+    if scan is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found"
+        )
+    if scan.scanner != SCAN_TYPE_BINARY_STATIC:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Scan is not assigned to binary static analysis",
+        )
+
+    sample = db.get(BinarySample, payload.sample_id)
+    if sample is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Sample not found"
+        )
+    if sample.target_id != scan.target_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Sample target does not match scan target",
+        )
+
+    existing = (
+        db.query(BinaryStaticAnalysisFinding)
+        .filter(
+            BinaryStaticAnalysisFinding.scan_id == scan.id,
+            BinaryStaticAnalysisFinding.job_id == payload.job_id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Static analysis findings already recorded for this job",
+        )
+
+    if scan.started_at is None:
+        scan.started_at = payload.processed_at
+    scan.status = payload.status
+    if payload.status in {"completed", "failed"}:
+        scan.completed_at = payload.processed_at
+
+    findings_count = 0
+    for finding_payload in payload.findings:
+        metadata_payload = deepcopy(_normalize_payload(finding_payload.metadata))
+        evidence_payload = deepcopy(_normalize_payload(finding_payload.evidence))
+        record = BinaryStaticAnalysisFinding(
+            sample_id=sample.id,
+            scan_id=scan.id,
+            job_id=payload.job_id,
+            tool=finding_payload.tool,
+            severity=finding_payload.severity,
+            title=finding_payload.title,
+            description=finding_payload.description,
+            metadata_json=metadata_payload,
+            evidence=evidence_payload,
+            evidence_hash="",
+            artifact_bucket=finding_payload.artifact_bucket,
+            artifact_key=finding_payload.artifact_key,
+            executed_at=finding_payload.executed_at,
+        )
+        db.add(record)
+        findings_count += 1
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:  # pragma: no cover - defensive path
+        db.rollback()
+        LOGGER.exception(
+            "Failed to persist binary static analysis callback",
+            extra={"scan_id": scan.id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist static analysis callback",
+        ) from exc
+
+    return scan, sample, findings_count
 
 
 @app.post(
@@ -2443,6 +2718,42 @@ def sqlmap_callback(
         },
         message=payload.error,
     )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
+    "/internal/binary/static-analysis/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def binary_static_analysis_callback(
+    payload: StaticAnalysisCallbackRequest,
+    principal: Principal = Depends(authenticate_binary_static_analysis_worker),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Persist binary static analysis findings and emit audit metadata."""
+
+    scan, sample, findings_persisted = _persist_static_analysis_callback(
+        db=db,
+        payload=payload,
+    )
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="binary_static_analysis_callback",
+        resource_type="scan",
+        resource_id=str(scan.id),
+        scan_id=scan.id,
+        metadata={
+            "status": payload.status,
+            "findings_count": findings_persisted,
+            "job_id": payload.job_id,
+            "sample_id": sample.id,
+        },
+        message=payload.error,
+    )
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -2624,7 +2935,7 @@ def serialize_scan(scan: Scan) -> ScanResponse:
     """Project a Scan ORM object into the API contract expected by the UI."""
 
     target_scope = scan.target.scope if scan.target else ""
-    findings_count = len(scan.findings)
+    findings_count = len(scan.findings) + len(scan.binary_analysis_findings)
 
     return ScanResponse(
         id=str(scan.id),
