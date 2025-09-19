@@ -12,6 +12,7 @@ import jwt
 from controller.db.models import (
     AuditLog,
     Base,
+    BinaryFuzzingFinding,
     BinarySample,
     BinaryStaticAnalysisFinding,
     Finding,
@@ -60,6 +61,8 @@ def api_client() -> (
         enrichment_callback_token="enrichment-secret",
         binary_static_analysis_queue_channel="binary-static:test",
         binary_static_analysis_callback_token="binary-static-secret",
+        binary_fuzzing_queue_channel="binary-fuzzing:test",
+        binary_fuzzing_callback_token="binary-fuzzing-secret",
     )
 
     engine = create_engine(
@@ -119,6 +122,10 @@ def enrichment_headers() -> dict[str, str]:
 
 def binary_static_headers() -> dict[str, str]:
     return {"X-Callback-Token": "binary-static-secret"}
+
+
+def binary_fuzzing_headers() -> dict[str, str]:
+    return {"X-Callback-Token": "binary-fuzzing-secret"}
 
 
 def _create_finding_record(session_factory: sessionmaker) -> str:
@@ -260,7 +267,7 @@ def test_preprocess_enqueue_flow(
     assert job["object_bucket"] == "binary-uploads"
     assert job["metadata"]["target_scope"] == "firmware.example.com"
 
-    with session_factory() as session:
+    with _session_factory() as session:
         audit_entry = (
             session.query(AuditLog)
             .filter(AuditLog.action == "enqueue_binary_preprocess")
@@ -475,6 +482,182 @@ def test_binary_static_analysis_callback_persists_findings(
         assert finding.severity == "high"
         assert finding.artifact_bucket == "analysis"
         assert finding.artifact_key == "reports/checksec.json"
+
+        scan = session.get(Scan, scan_id)
+        assert scan is not None
+        assert scan.status == "completed"
+        assert scan.completed_at is not None
+
+
+def test_binary_fuzzing_enqueue(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, queue, session_factory, settings = api_client
+
+    with session_factory() as session:
+        target = Target(
+            name="Firmware", scope="firmware.example.com", is_authorized=True
+        )
+        session.add(target)
+        session.flush()
+
+        preprocess_scan = Scan(
+            target_id=target.id,
+            scanner="binary_preprocess",
+            initiated_by="tester",
+            status="completed",
+            parameters={},
+        )
+        session.add(preprocess_scan)
+        session.flush()
+
+        sample = BinarySample(
+            scan_id=preprocess_scan.id,
+            target_id=target.id,
+            file_name="sample.bin",
+            sha256="ab" * 32,
+            file_size=4096,
+            mime_type="application/octet-stream",
+            magic_type="ELF 64-bit",
+            policy_status="allowed",
+            policy_reasons=[],
+            storage_bucket="binary-uploads",
+            storage_key="uploads/sample.bin",
+            metadata_json={},
+            metadata_hash="",
+            processed_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(sample)
+        session.commit()
+
+        sample_id = sample.id
+        target_payload = {"id": target.id}
+
+    response = client.post(
+        "/binary/fuzzing",
+        json={
+            "sample_id": sample_id,
+            "target_id": target_payload["id"],
+            "fuzz_duration_seconds": 120,
+            "metadata": {"profile": "quick"},
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["scanner"] == "binary_fuzzing"
+
+    assert queue.messages, "fuzzing enqueue should push a job"
+    channel, job = queue.messages[-1]
+    assert channel == settings.binary_fuzzing_queue_channel
+    assert job["sample_id"] == sample_id
+    assert job["callback_url"].endswith("/internal/binary/fuzzing/callback")
+    assert job["metadata"]["target_id"] == target_payload["id"]
+    assert job["max_duration_seconds"] == 120
+
+
+def test_binary_fuzzing_callback_persists_findings(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(
+            name="Firmware", scope="firmware.example.com", is_authorized=True
+        )
+        session.add(target)
+        session.flush()
+
+        preprocess_scan = Scan(
+            target_id=target.id,
+            scanner="binary_preprocess",
+            initiated_by="tester",
+            status="completed",
+            parameters={},
+        )
+        session.add(preprocess_scan)
+        session.flush()
+
+        sample = BinarySample(
+            scan_id=preprocess_scan.id,
+            target_id=target.id,
+            file_name="sample.bin",
+            sha256="ef" * 32,
+            file_size=8192,
+            mime_type="application/octet-stream",
+            magic_type="ELF 64-bit",
+            policy_status="allowed",
+            policy_reasons=[],
+            storage_bucket="binary-uploads",
+            storage_key="uploads/sample.bin",
+            metadata_json={},
+            metadata_hash="",
+            processed_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(sample)
+        session.flush()
+
+        fuzz_scan = Scan(
+            target_id=target.id,
+            scanner="binary_fuzzing",
+            initiated_by="tester",
+            status="running",
+            parameters={"sample_id": sample.id},
+        )
+        session.add(fuzz_scan)
+        session.commit()
+
+        sample_id = sample.id
+        scan_id = fuzz_scan.id
+
+    executed_at = datetime.now(tz=timezone.utc)
+    response = client.post(
+        "/internal/binary/fuzzing/callback",
+        json={
+            "job_id": "job-fuzz-1",
+            "scan_id": scan_id,
+            "sample_id": sample_id,
+            "status": "completed",
+            "processed_at": executed_at.isoformat(),
+            "findings": [
+                {
+                    "tool": "afl",
+                    "severity": "high",
+                    "title": "Crash detected",
+                    "description": "AFL discovered a crash",
+                    "metadata": {"crash_id": "id-1"},
+                    "evidence": {"input": "AAAA"},
+                    "artifact_bucket": "analysis",
+                    "artifact_key": "fuzzing/afl.json",
+                    "executed_at": executed_at.isoformat(),
+                    "crash_type": "SEGV",
+                }
+            ],
+            "artifacts": [
+                {
+                    "tool": "afl",
+                    "bucket": "analysis",
+                    "key": "fuzzing/afl.json",
+                }
+            ],
+            "runs": [],
+            "metadata": {},
+        },
+        headers=binary_fuzzing_headers(),
+    )
+    assert response.status_code == 204, response.text
+
+    with session_factory() as session:
+        findings = (
+            session.query(BinaryFuzzingFinding)
+            .filter(BinaryFuzzingFinding.scan_id == scan_id)
+            .all()
+        )
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding.tool == "afl"
+        assert finding.metadata_json.get("crash_id") == "id-1"
+        assert finding.artifact_key == "fuzzing/afl.json"
 
         scan = session.get(Scan, scan_id)
         assert scan is not None
@@ -822,6 +1005,10 @@ def test_finding_contracts(
     assert finding_item["template_id"] == "CVE-2024-0001"
     assert finding_item["evidence"]
     assert finding_item["enrichments"] == []
+    assert finding_item["scanner"] == "nuclei"
+    assert finding_item["category"] == "web"
+    assert finding_item["tool"] == "nuclei"
+    assert finding_item["sample_id"] is None
     datetime.fromisoformat(finding_item["detected_at"])  # raises on invalid format
 
     detail_response = client.get(f"/findings/{finding_id}", headers=auth_headers())
@@ -829,6 +1016,7 @@ def test_finding_contracts(
     detail_payload = detail_response.json()
     assert detail_payload["data"]["id"] == finding_id
     assert detail_payload["data"]["enrichments"] == []
+    assert detail_payload["data"]["category"] == "web"
 
 
 def test_audit_log_rbac_regression(
@@ -1370,6 +1558,7 @@ def test_principal_creation_validates_and_expands_roles(
             "scans:read",
             "binary:preprocess",
             "binary:static-analysis",
+            "binary:fuzzing",
             "targets:read",
             "enrich:enqueue",
         ]
@@ -1395,6 +1584,7 @@ def test_principal_creation_validates_and_expands_roles(
             "scans:read",
             "binary:preprocess",
             "binary:static-analysis",
+            "binary:fuzzing",
             "targets:read",
             "targets:write",
             "enrich:enqueue",

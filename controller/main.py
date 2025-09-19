@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from controller.db.models import (
     AuditLog,
+    BinaryFuzzingFinding,
     BinarySample,
     BinaryStaticAnalysisFinding,
     Finding,
@@ -59,6 +60,7 @@ ROLE_SCANS_READ = "scans:read"
 ROLE_SCAN_ENQUEUE = "scan:enqueue"
 ROLE_BINARY_PREPROCESS_ENQUEUE = "binary:preprocess"
 ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE = "binary:static-analysis"
+ROLE_BINARY_FUZZING_ENQUEUE = "binary:fuzzing"
 ROLE_TARGETS_READ = "targets:read"
 ROLE_TARGETS_WRITE = "targets:write"
 ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
@@ -71,6 +73,7 @@ ALLOWED_ROLES = {
     ROLE_SCAN_ENQUEUE,
     ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE,
+    ROLE_BINARY_FUZZING_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -83,6 +86,7 @@ DEFAULT_ANALYST_ROLES = [
     ROLE_SCAN_ENQUEUE,
     ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE,
+    ROLE_BINARY_FUZZING_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_ENRICHMENT_ENQUEUE,
 ]
@@ -94,6 +98,7 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_SCAN_ENQUEUE,
     ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE,
+    ROLE_BINARY_FUZZING_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -155,6 +160,7 @@ SCAN_TYPE_NUCLEI = "nuclei"
 SCAN_TYPE_ZAP = "zap"
 SCAN_TYPE_SQLMAP = "sqlmap"
 SCAN_TYPE_BINARY_STATIC = "binary_static_analysis"
+SCAN_TYPE_BINARY_FUZZING = "binary_fuzzing"
 
 ALLOWED_SCANNERS: Tuple[str, ...] = (
     SCAN_TYPE_NUCLEI,
@@ -543,6 +549,10 @@ class Settings(BaseSettings):
         "queues:binary:static-analysis",
         description="Redis list channel for binary static analysis jobs.",
     )
+    binary_fuzzing_queue_channel: str = Field(
+        "queues:binary:fuzzing",
+        description="Redis list channel for binary fuzzing jobs.",
+    )
     cve_enrichment_qdrant_url: Optional[str] = Field(
         default=None,
         description="Base URL for the Qdrant vector collection used by enrichment workers.",
@@ -566,6 +576,9 @@ class Settings(BaseSettings):
     binary_static_analysis_callback_token: str = Field(
         ...,
         description="Shared secret required for binary static analysis worker callbacks.",
+    )
+    binary_fuzzing_callback_token: str = Field(
+        ..., description="Shared secret required for binary fuzzing worker callbacks."
     )
 
     model_config = ConfigDict(env_prefix="MEDUSA_", case_sensitive=False)
@@ -773,6 +786,26 @@ class BinaryStaticAnalysisRequest(BaseModel):
     )
 
 
+class BinaryFuzzingRequest(BaseModel):
+    sample_id: str = Field(
+        ..., description="Identifier of the normalized binary sample to fuzz"
+    )
+    target_id: Optional[str] = Field(
+        default=None,
+        description="Optional assertion ensuring the sample belongs to the expected target",
+    )
+    fuzz_duration_seconds: Optional[int] = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description="Optional override for the maximum fuzzing duration in seconds",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Operator-provided hints recorded with the fuzzing job",
+    )
+
+
 class ScanResponse(BaseModel):
     id: str
     target_id: str
@@ -861,6 +894,60 @@ class StaticAnalysisCallbackRequest(BaseModel):
     error: Optional[str] = None
 
 
+class FuzzingArtifactPayload(BaseModel):
+    tool: str
+    bucket: str
+    key: str
+
+
+class FuzzingFindingPayload(BaseModel):
+    tool: str
+    severity: str
+    title: str
+    description: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    artifact_bucket: Optional[str] = None
+    artifact_key: Optional[str] = None
+    executed_at: datetime
+    crash_type: Optional[str] = None
+
+    @field_validator("severity")
+    @classmethod
+    def validate_severity(cls, value: str) -> str:
+        allowed = {"critical", "high", "medium", "low", "info"}
+        lowered = value.lower()
+        if lowered not in allowed:
+            raise ValueError("Unsupported severity level")
+        return lowered
+
+
+class FuzzingRunPayload(BaseModel):
+    tool: str
+    status: Literal["completed", "failed"]
+    exit_code: int
+    stdout: str
+    stderr: str
+    raw_output: Dict[str, Any] = Field(default_factory=dict)
+    findings: List[FuzzingFindingPayload] = Field(default_factory=list)
+    artifact: Optional[FuzzingArtifactPayload] = None
+    executed_at: Optional[datetime] = None
+    duration_seconds: Optional[int] = None
+
+
+class FuzzingCallbackRequest(BaseModel):
+    job_id: str
+    scan_id: str
+    sample_id: str
+    status: Literal["completed", "failed"]
+    processed_at: datetime
+    findings: List[FuzzingFindingPayload] = Field(default_factory=list)
+    artifacts: List[FuzzingArtifactPayload] = Field(default_factory=list)
+    runs: List[FuzzingRunPayload] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+
+
 SUPPORTED_ENRICHMENT_SOURCES = {"nvd", "circl"}
 DEFAULT_ENRICHMENT_SOURCES = ["nvd", "circl"]
 
@@ -927,6 +1014,10 @@ class FindingResponse(BaseModel):
     remediation: Optional[str]
     enrichments: List[FindingEnrichmentSummary] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    scanner: str
+    sample_id: Optional[str] = None
+    tool: Optional[str] = None
+    category: Literal["web", "binary_static", "binary_fuzzing"]
 
 
 class FindingCollectionResponse(BaseModel):
@@ -1421,6 +1512,22 @@ def authenticate_binary_static_analysis_worker(
         subject="worker:binary-static-analysis",
         db=db,
         resource_id="binary-static-analysis",
+    )
+
+
+def authenticate_binary_fuzzing_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
+) -> Principal:
+    """Authenticate binary fuzzing worker callbacks."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.binary_fuzzing_callback_token,
+        subject="worker:binary-fuzzing",
+        db=db,
+        resource_id="binary-fuzzing",
     )
 
 
@@ -2351,6 +2458,130 @@ def enqueue_binary_static_analysis(
 
 
 @app.post(
+    "/binary/fuzzing",
+    response_model=ScanResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_binary_fuzzing(
+    request: BinaryFuzzingRequest,
+    http_request: Request,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
+) -> ScanResponse:
+    """Queue a binary fuzzing job for a previously normalized sample."""
+
+    enforce_roles(
+        principal,
+        [ROLE_BINARY_FUZZING_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/binary/fuzzing",
+    )
+
+    sample = db.get(BinarySample, request.sample_id)
+    if sample is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Sample not found"
+        )
+
+    if request.target_id and request.target_id != sample.target_id:
+        record_audit_event(
+            db,
+            actor=principal,
+            action="fuzzing_target_mismatch",
+            resource_type="binary_sample",
+            resource_id=sample.id,
+            scan_id=None,
+            metadata={
+                "provided_target_id": request.target_id,
+                "expected_target_id": sample.target_id,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sample does not belong to the asserted target",
+        )
+
+    target = db.get(Target, sample.target_id)
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Target not found"
+        )
+
+    scan = Scan(
+        target_id=sample.target_id,
+        scanner=SCAN_TYPE_BINARY_FUZZING,
+        parameters={
+            "sample_id": sample.id,
+            "storage_bucket": sample.storage_bucket,
+            "storage_key": sample.storage_key,
+            "file_name": sample.file_name,
+            "metadata": request.metadata,
+            "fuzz_duration_seconds": request.fuzz_duration_seconds,
+        },
+        initiated_by=principal.subject,
+    )
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+
+    submitted_at = datetime.now(tz=timezone.utc)
+    job_id = str(uuid.uuid4())
+    callback_url = str(http_request.url_for("binary_fuzzing_callback"))
+
+    job_metadata: Dict[str, Any] = {
+        "scan_id": str(scan.id),
+        "sample_id": sample.id,
+        "target_id": sample.target_id,
+        "target_scope": target.scope,
+        "initiated_by": principal.subject,
+        "submitted_at": submitted_at.isoformat(),
+    }
+    if request.metadata:
+        job_metadata["analyst_metadata"] = request.metadata
+    if request.fuzz_duration_seconds:
+        job_metadata["requested_duration_seconds"] = request.fuzz_duration_seconds
+
+    job_payload = {
+        "job_id": job_id,
+        "scan_id": str(scan.id),
+        "sample_id": sample.id,
+        "target_id": sample.target_id,
+        "object_bucket": sample.storage_bucket,
+        "object_key": sample.storage_key,
+        "file_name": sample.file_name,
+        "callback_url": callback_url,
+        "attempts": 0,
+        "submitted_at": submitted_at.isoformat(),
+        "metadata": job_metadata,
+    }
+    if request.fuzz_duration_seconds:
+        job_payload["max_duration_seconds"] = request.fuzz_duration_seconds
+
+    queue.enqueue(settings.binary_fuzzing_queue_channel, job_payload)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enqueue_binary_fuzzing",
+        resource_type="scan",
+        resource_id=scan.id,
+        scan_id=scan.id,
+        metadata={
+            "sample_id": sample.id,
+            "job_id": job_id,
+            "object_bucket": sample.storage_bucket,
+            "object_key": sample.storage_key,
+            "requested_duration_seconds": request.fuzz_duration_seconds,
+        },
+    )
+
+    return serialize_scan(scan)
+
+
+@app.post(
     "/enrich", response_model=EnrichmentResponse, status_code=status.HTTP_202_ACCEPTED
 )
 def enqueue_enrichment(
@@ -2633,6 +2864,91 @@ def _persist_static_analysis_callback(
     return scan, sample, findings_count
 
 
+def _persist_binary_fuzzing_callback(
+    *, db: Session, payload: FuzzingCallbackRequest
+) -> Tuple[Scan, BinarySample, int]:
+    scan = db.get(Scan, payload.scan_id)
+    if scan is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found"
+        )
+    if scan.scanner != SCAN_TYPE_BINARY_FUZZING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Scan is not assigned to binary fuzzing",
+        )
+
+    sample = db.get(BinarySample, payload.sample_id)
+    if sample is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Sample not found"
+        )
+    if sample.target_id != scan.target_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Sample target does not match scan target",
+        )
+
+    existing = (
+        db.query(BinaryFuzzingFinding)
+        .filter(
+            BinaryFuzzingFinding.scan_id == scan.id,
+            BinaryFuzzingFinding.job_id == payload.job_id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Binary fuzzing findings already recorded for this job",
+        )
+
+    if scan.started_at is None:
+        scan.started_at = payload.processed_at
+    scan.status = payload.status
+    if payload.status in {"completed", "failed"}:
+        scan.completed_at = payload.processed_at
+
+    findings_count = 0
+    for finding_payload in payload.findings:
+        metadata_payload = deepcopy(_normalize_payload(finding_payload.metadata))
+        evidence_payload = deepcopy(_normalize_payload(finding_payload.evidence))
+        if finding_payload.crash_type and "crash_type" not in metadata_payload:
+            metadata_payload["crash_type"] = finding_payload.crash_type
+        record = BinaryFuzzingFinding(
+            sample_id=sample.id,
+            scan_id=scan.id,
+            job_id=payload.job_id,
+            tool=finding_payload.tool,
+            severity=finding_payload.severity,
+            title=finding_payload.title,
+            description=finding_payload.description,
+            metadata_json=metadata_payload,
+            evidence=evidence_payload,
+            evidence_hash="",
+            artifact_bucket=finding_payload.artifact_bucket,
+            artifact_key=finding_payload.artifact_key,
+            executed_at=finding_payload.executed_at,
+        )
+        db.add(record)
+        findings_count += 1
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:  # pragma: no cover - defensive path
+        db.rollback()
+        LOGGER.exception(
+            "Failed to persist binary fuzzing callback",
+            extra={"scan_id": scan.id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist binary fuzzing callback",
+        ) from exc
+
+    return scan, sample, findings_count
+
+
 @app.post(
     "/internal/nuclei/callback",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -2775,6 +3091,42 @@ def binary_static_analysis_callback(
 
 
 @app.post(
+    "/internal/binary/fuzzing/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def binary_fuzzing_callback(
+    payload: FuzzingCallbackRequest,
+    principal: Principal = Depends(authenticate_binary_fuzzing_worker),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Persist binary fuzzing findings and emit audit metadata."""
+
+    scan, sample, findings_persisted = _persist_binary_fuzzing_callback(
+        db=db,
+        payload=payload,
+    )
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="binary_fuzzing_callback",
+        resource_type="scan",
+        resource_id=str(scan.id),
+        scan_id=scan.id,
+        metadata={
+            "status": payload.status,
+            "findings_count": findings_persisted,
+            "job_id": payload.job_id,
+            "sample_id": sample.id,
+        },
+        message=payload.error,
+    )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
     "/internal/enrich/callback",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
@@ -2891,13 +3243,58 @@ def list_findings(
         resource_type="endpoint",
         resource_id="/findings",
     )
-    query = db.query(Finding)
+
+    query = db.query(Finding).options(selectinload(Finding.enrichments))
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
     elif target_id is not None:
         query = query.join(Finding.scan).filter(Scan.target_id == target_id)
 
     findings = query.order_by(Finding.created_at.desc()).all()
+
+    static_query = db.query(BinaryStaticAnalysisFinding).options(
+        selectinload(BinaryStaticAnalysisFinding.scan)
+    )
+    fuzzing_query = db.query(BinaryFuzzingFinding).options(
+        selectinload(BinaryFuzzingFinding.scan)
+    )
+
+    if scan_id is not None:
+        static_query = static_query.filter(
+            BinaryStaticAnalysisFinding.scan_id == scan_id
+        )
+        fuzzing_query = fuzzing_query.filter(BinaryFuzzingFinding.scan_id == scan_id)
+    elif target_id is not None:
+        static_query = static_query.join(BinaryStaticAnalysisFinding.scan).filter(
+            Scan.target_id == target_id
+        )
+        fuzzing_query = fuzzing_query.join(BinaryFuzzingFinding.scan).filter(
+            Scan.target_id == target_id
+        )
+
+    static_findings = static_query.order_by(
+        BinaryStaticAnalysisFinding.executed_at.desc()
+    ).all()
+    fuzzing_findings = fuzzing_query.order_by(
+        BinaryFuzzingFinding.executed_at.desc()
+    ).all()
+
+    aggregated: List[Tuple[datetime, FindingResponse]] = []
+    for record in findings:
+        aggregated.append((record.created_at, serialize_finding(record)))
+    for record in static_findings:
+        aggregated.append(
+            (record.executed_at, serialize_binary_static_finding(record))
+        )
+    for record in fuzzing_findings:
+        aggregated.append(
+            (record.executed_at, serialize_binary_fuzzing_finding(record))
+        )
+
+    ordered = [
+        response
+        for _, response in sorted(aggregated, key=lambda item: item[0], reverse=True)
+    ]
 
     record_audit_event(
         db,
@@ -2906,12 +3303,15 @@ def list_findings(
         resource_type="finding",
         resource_id=None,
         scan_id=scan_id,
-        metadata={"target_id": target_id, "count": len(findings)},
+        metadata={
+            "target_id": target_id,
+            "count": len(ordered),
+            "binary_static_count": len(static_findings),
+            "binary_fuzzing_count": len(fuzzing_findings),
+        },
     )
 
-    return FindingCollectionResponse(
-        data=[serialize_finding(finding) for finding in findings]
-    )
+    return FindingCollectionResponse(data=ordered)
 
 
 @app.get("/findings/{finding_id}", response_model=FindingItemResponse)
@@ -2930,29 +3330,68 @@ def get_finding(
         resource_id="/findings/{finding_id}",
     )
     finding = db.get(Finding, finding_id)
-    if finding is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+    if finding is not None:
+        record_audit_event(
+            db,
+            actor=principal,
+            action="get_finding",
+            resource_type="finding",
+            resource_id=finding_id,
+            finding_id=finding_id,
+            metadata={"scan_id": finding.scan_id},
+        )
+        return FindingItemResponse(data=serialize_finding(finding))
+
+    static_record = db.get(BinaryStaticAnalysisFinding, finding_id)
+    if static_record is not None:
+        record_audit_event(
+            db,
+            actor=principal,
+            action="get_binary_static_finding",
+            resource_type="finding",
+            resource_id=finding_id,
+            finding_id=finding_id,
+            metadata={
+                "scan_id": static_record.scan_id,
+                "category": "binary_static",
+            },
+        )
+        return FindingItemResponse(
+            data=serialize_binary_static_finding(static_record)
         )
 
-    record_audit_event(
-        db,
-        actor=principal,
-        action="get_finding",
-        resource_type="finding",
-        resource_id=finding_id,
-        finding_id=finding_id,
-        metadata={"scan_id": finding.scan_id},
-    )
+    fuzz_record = db.get(BinaryFuzzingFinding, finding_id)
+    if fuzz_record is not None:
+        record_audit_event(
+            db,
+            actor=principal,
+            action="get_binary_fuzzing_finding",
+            resource_type="finding",
+            resource_id=finding_id,
+            finding_id=finding_id,
+            metadata={
+                "scan_id": fuzz_record.scan_id,
+                "category": "binary_fuzzing",
+            },
+        )
+        return FindingItemResponse(
+            data=serialize_binary_fuzzing_finding(fuzz_record)
+        )
 
-    return FindingItemResponse(data=serialize_finding(finding))
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+    )
 
 
 def serialize_scan(scan: Scan) -> ScanResponse:
     """Project a Scan ORM object into the API contract expected by the UI."""
 
     target_scope = scan.target.scope if scan.target else ""
-    findings_count = len(scan.findings) + len(scan.binary_analysis_findings)
+    findings_count = (
+        len(scan.findings)
+        + len(scan.binary_analysis_findings)
+        + len(scan.binary_fuzzing_findings)
+    )
 
     return ScanResponse(
         id=str(scan.id),
@@ -2994,6 +3433,13 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         template_id = f"{scanner_name}:unspecified"
     else:
         template_id = "scanner:unspecified"
+
+    scanner_value = (
+        scanner_name
+        or (finding.scan.scanner if finding.scan else "scanner:unknown")
+    )
+    tool_value = metadata_payload.get("tool")
+    metadata_payload.setdefault("scanner", scanner_value)
 
     enrichments_payload: List[FindingEnrichmentSummary] = []
     if hasattr(finding, "enrichments") and finding.enrichments:
@@ -3037,6 +3483,99 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         remediation=None,
         enrichments=enrichments_payload,
         metadata=metadata_payload,
+        scanner=scanner_value,
+        sample_id=None,
+        tool=str(tool_value) if tool_value else scanner_value,
+        category="web",
+    )
+
+
+def serialize_binary_static_finding(
+    record: BinaryStaticAnalysisFinding,
+) -> FindingResponse:
+    metadata_payload = deepcopy(_normalize_payload(record.metadata_json))
+    metadata_payload.setdefault("scanner", SCAN_TYPE_BINARY_STATIC)
+    metadata_payload.setdefault("tool", record.tool)
+    evidence_payload = _normalize_payload(record.evidence)
+    evidence_text = (
+        json.dumps(evidence_payload, sort_keys=True) if evidence_payload else None
+    )
+    template_id_source = (
+        metadata_payload.get("template_id")
+        or metadata_payload.get("rule_id")
+        or metadata_payload.get("alert_id")
+        or metadata_payload.get("signature_id")
+        or metadata_payload.get("finding_id")
+    )
+    template_id = (
+        str(template_id_source)
+        if template_id_source
+        else f"{record.tool}:finding"
+    )
+
+    return FindingResponse(
+        id=str(record.id),
+        scan_id=str(record.scan_id),
+        title=record.title,
+        severity=record.severity,
+        cve_id=metadata_payload.get("cve_id"),
+        description=record.description,
+        detected_at=record.executed_at,
+        updated_at=record.updated_at or record.executed_at,
+        status="open",
+        template_id=template_id,
+        evidence=evidence_text,
+        remediation=None,
+        enrichments=[],
+        metadata=metadata_payload,
+        scanner=SCAN_TYPE_BINARY_STATIC,
+        sample_id=str(record.sample_id),
+        tool=record.tool,
+        category="binary_static",
+    )
+
+
+def serialize_binary_fuzzing_finding(
+    record: BinaryFuzzingFinding,
+) -> FindingResponse:
+    metadata_payload = deepcopy(_normalize_payload(record.metadata_json))
+    metadata_payload.setdefault("scanner", SCAN_TYPE_BINARY_FUZZING)
+    metadata_payload.setdefault("tool", record.tool)
+    evidence_payload = _normalize_payload(record.evidence)
+    evidence_text = (
+        json.dumps(evidence_payload, sort_keys=True) if evidence_payload else None
+    )
+    template_id_source = (
+        metadata_payload.get("template_id")
+        or metadata_payload.get("finding_id")
+        or metadata_payload.get("crash_id")
+        or metadata_payload.get("crash_type")
+    )
+    template_id = (
+        str(template_id_source)
+        if template_id_source
+        else f"{record.tool}:crash"
+    )
+
+    return FindingResponse(
+        id=str(record.id),
+        scan_id=str(record.scan_id),
+        title=record.title,
+        severity=record.severity,
+        cve_id=metadata_payload.get("cve_id"),
+        description=record.description,
+        detected_at=record.executed_at,
+        updated_at=record.updated_at or record.executed_at,
+        status="open",
+        template_id=template_id,
+        evidence=evidence_text,
+        remediation=None,
+        enrichments=[],
+        metadata=metadata_payload,
+        scanner=SCAN_TYPE_BINARY_FUZZING,
+        sample_id=str(record.sample_id),
+        tool=record.tool,
+        category="binary_fuzzing",
     )
 
 

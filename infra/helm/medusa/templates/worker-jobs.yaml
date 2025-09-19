@@ -149,8 +149,16 @@ spec:
             - {{- toYaml . | nindent 14 }}
             {{- end }}
           {{- end }}
+          {{- if $worker.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml $worker.extraVolumeMounts | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml $worker.resources | nindent 12 }}
+      {{- if $worker.extraVolumes }}
+      volumes:
+        {{- toYaml $worker.extraVolumes | nindent 8 }}
+      {{- end }}
 ---
 {{- end }}
 {{- end }}
