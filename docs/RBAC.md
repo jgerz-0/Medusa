@@ -10,15 +10,15 @@ Principals are provisioned in the `principal_credentials` table with the
 following attributes:
 
 - **subject** – stable identifier for the caller (e.g., `svc-admin`).
-- **auth_method** – `api_key` or `jwt`, describing how the subject
+- **auth_method** – `api_key`, `jwt`, or `oidc`, describing how the subject
   authenticates.
-- **key_hash** – SHA-256 hash of the API key secret. Empty for JWT subjects.
+- **key_hash** – SHA-256 hash of the API key secret. Empty for JWT/OIDC subjects.
 - **roles** – JSON array describing the permissions the subject holds.
 - **revoked_at** – null when active, timestamp when the credential is revoked.
 
-API keys are compared using the stored hash; JWT subjects must also be present
-in this table to be accepted. The controller rejects any credential that is not
-registered or that lacks roles.
+API keys are compared using the stored hash; JWT and OIDC subjects must also be
+present in this table to be accepted. The controller rejects any credential that
+is not registered or that lacks roles.
 
 ## Authentication Flow
 
@@ -30,8 +30,12 @@ The controller authenticates requests using the following precedence rules:
    principal inherits the stored role set.
 2. If the hash only matches revoked credentials, the controller immediately
    returns `403 Forbidden`. Revoked keys never fall back to other mechanisms.
-3. Finally, bearer tokens are validated as JWTs and mapped to `jwt`
-   credentials stored in the same table.
+3. Bearer tokens that include a `kid` header are validated as OpenID Connect
+   tokens against the configured JWKS document. The controller maps the `sub`
+   claim to an `oidc` credential and enforces the stored role set.
+4. If OIDC validation is not configured or the token omits `kid`, the
+   controller falls back to validating the token using the local symmetric
+   `jwt_secret` and the `jwt` credential table.
 
 All API key authentication therefore depends on presence in the
 `principal_credentials` table. Operators should seed baseline service
@@ -68,6 +72,15 @@ Each RBAC decision—successful authorizations and explicit denials—is recorde
 via the audit logging pipeline. This ensures post-incident review includes both
 the sensitive operations that executed and the attempts that were blocked for
 missing roles or revoked credentials.
+
+### Request Rate Limiting
+
+Authenticated principals are rate limited using a shared in-memory token bucket
+to minimize credential abuse. The defaults permit 300 requests per 60 seconds
+per subject. Administrators can tune the limit using the `MEDUSA_RATE_LIMIT_*`
+environment variables and exempt specific automation principals by adding their
+subjects to `rate_limit_exempt_subjects`. Denials are logged with
+`reason=rate_limit_exceeded` to the audit log to support anomaly detection.
 
 ## Audit Log Access Workflow
 
