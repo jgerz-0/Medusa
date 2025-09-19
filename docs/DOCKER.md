@@ -9,7 +9,7 @@ This guide covers the Phase 1 local Docker Compose environment. It stands up eve
 - 20 GB free disk space for container images, Postgres, MinIO, and Qdrant data directories
 
 ## Compose Manifests
-- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei worker, and the Next.js frontend.
+- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, and SQLMap workers, plus the Next.js frontend.
 - `infra/docker/controller.Dockerfile` – Poetry-based image for the controller with Uvicorn hot reload enabled.
 - `infra/docker/frontend.Dockerfile` – Node 20 + pnpm image for the dashboard.
 - `infra/docker/.env.example` – sane defaults for development credentials and exposed ports.
@@ -33,11 +33,22 @@ docker compose ps
 docker compose exec controller cat /var/lib/medusa/principal_credentials.env
 ```
 
+The `.env` file keeps the controller and workers aligned. Ensure the
+following secrets are set before starting the stack:
+
+- `MEDUSA_NUCLEI_CALLBACK_TOKEN`
+- `MEDUSA_ZAP_CALLBACK_TOKEN`
+- `MEDUSA_SQLMAP_CALLBACK_TOKEN`
+
+Each worker reads the corresponding token via `NUCLEI_CALLBACK_TOKEN`,
+`ZAP_CALLBACK_TOKEN`, or `SQLMAP_CALLBACK_TOKEN` so callbacks are rejected if a
+container is misconfigured.
+
 Set the optional `COMPOSE_BIN` environment variable if you prefer an alternate
 Compose implementation (for example `podman compose`). The smoke test script
 uses the same variable to avoid hard-coding the binary path.
 
-The compose file automatically mounts code from `controller/`, `workers/web/nuclei/`, and `frontend/` into the containers so edits on the host trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts. Principal API keys are written to `/var/lib/medusa/principal_credentials.env` inside the controller container and shared with the frontend so human analysts can authenticate without hard-coded secrets.
+The compose file automatically mounts code from `controller/`, `workers/web/nuclei/`, `workers/web/zap/`, `workers/web/sqlmap/`, and `frontend/` into the containers so edits on the host trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Postgres, Redis, MinIO, and Qdrant data persist under `infra/docker/data/` and survive container restarts. Principal API keys are written to `/var/lib/medusa/principal_credentials.env` inside the controller container and shared with the frontend so human analysts can authenticate without hard-coded secrets.
 
 ## Smoke Test
 Run the end-to-end smoke test once the services report `healthy`:

@@ -41,6 +41,11 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
     );
   }
 
+  const scannerValue =
+    typeof finding.metadata?.['scanner'] === 'string'
+      ? (finding.metadata['scanner'] as string)
+      : 'unknown';
+
   return (
     <section className="space-y-6">
       <Link href="/findings" className="text-sm">
@@ -55,7 +60,7 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
             <StatusBadge value={finding.severity} />
             <StatusBadge value={finding.status} />
             <span className="rounded-full bg-surface-muted/60 px-2.5 py-0.5 text-xs font-mono text-gray-300">
-              Template {finding.template_id}
+              Scanner {scannerValue} • Rule {finding.template_id}
             </span>
           </div>
         </header>

@@ -18,6 +18,7 @@ import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
 try:  # pragma: no cover - compatibility shim for environments without pydantic-settings
     from pydantic_settings import BaseSettings
@@ -123,6 +124,39 @@ ALLOWED_NUCLEI_TEMPLATE_PREFIXES: Tuple[str, ...] = (
 )
 
 
+SCAN_TYPE_NUCLEI = "nuclei"
+SCAN_TYPE_ZAP = "zap"
+SCAN_TYPE_SQLMAP = "sqlmap"
+
+ALLOWED_SCANNERS: Tuple[str, ...] = (
+    SCAN_TYPE_NUCLEI,
+    SCAN_TYPE_ZAP,
+    SCAN_TYPE_SQLMAP,
+)
+
+DEFAULT_ZAP_POLICY = "baseline"
+ALLOWED_ZAP_POLICIES: Tuple[str, ...] = ("baseline", "full")
+DEFAULT_ZAP_RATE_LIMIT = "5"
+ALLOWED_ZAP_MODES: Tuple[str, ...] = ("baseline", "full")
+
+DEFAULT_SQLMAP_LEVEL = 1
+DEFAULT_SQLMAP_RISK = 1
+ALLOWED_SQLMAP_TECHNIQUES: Tuple[str, ...] = (
+    "boolean",
+    "error",
+    "stacked",
+    "time",
+    "union",
+)
+ALLOWED_SQLMAP_TAMPER_SCRIPTS: Tuple[str, ...] = (
+    "between",
+    "charunicodeencode",
+    "equaltolike",
+    "modsecurityversioned",
+    "space2comment",
+)
+
+
 def _normalize_profile(requested_profile: Any) -> str:
     if isinstance(requested_profile, str):
         candidate = requested_profile.strip().lower()
@@ -174,9 +208,9 @@ def _merge_templates(
 
 
 def resolve_nuclei_job_configuration(
-    parameters: Optional[Dict[str, Any]]
-) -> Tuple[str, List[str], List[str], Dict[str, Any]]:
-    """Return a hardened nuclei profile, template list, tags, and parameters."""
+    target_scope: str, parameters: Optional[Dict[str, Any]]
+) -> Tuple[str, List[str], List[str], Dict[str, Any], Dict[str, Any]]:
+    """Return sanitized nuclei configuration and metadata for auditing."""
 
     raw_parameters: Dict[str, Any] = dict(parameters or {})
 
@@ -198,6 +232,12 @@ def resolve_nuclei_job_configuration(
     user_tags = _sanitize_tags(raw_parameters.get("tags"))
     tags = sorted({*user_tags, f"profile:{profile}"})
 
+    requested_hosts_value = (
+        raw_parameters.get("requested_hosts") or raw_parameters.get("allowed_hosts") or []
+    )
+    normalized_hosts = _coerce_requested_hosts(requested_hosts_value)
+    allowed_hosts, rejected_hosts = _filter_hosts_for_scope(target_scope, normalized_hosts)
+
     sanitized_parameters: Dict[str, Any] = {"profile": profile}
     if sanitized_requested:
         sanitized_parameters["requested_templates"] = sanitized_requested
@@ -214,7 +254,210 @@ def resolve_nuclei_job_configuration(
     if isinstance(severity, str) and severity.strip():
         sanitized_parameters["severity"] = severity.strip().lower()
 
-    return profile, templates, tags, sanitized_parameters
+    if allowed_hosts:
+        sanitized_parameters["requested_hosts"] = allowed_hosts
+
+    metadata: Dict[str, Any] = {}
+    if normalized_hosts:
+        metadata["requested_host_count"] = len(normalized_hosts)
+    if rejected_hosts:
+        metadata["rejected_hosts"] = rejected_hosts
+
+    return profile, templates, tags, sanitized_parameters, metadata
+
+
+def _sanitize_rate_limit(value: Any, *, default: str) -> str:
+    if isinstance(value, (int, float)):
+        if value <= 0:
+            return default
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return default
+        try:
+            parsed = float(candidate)
+        except ValueError:
+            return default
+        if parsed <= 0:
+            return default
+        return f"{parsed:.2f}".rstrip("0").rstrip(".")
+    return default
+
+
+def _sanitize_boolean(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def resolve_zap_job_configuration(
+    target_scope: str, parameters: Optional[Dict[str, Any]]
+) -> Tuple[Dict[str, Any], List[str], Dict[str, Any]]:
+    """Return sanitized configuration for Zap-based crawls."""
+
+    raw_parameters: Dict[str, Any] = dict(parameters or {})
+
+    requested_policy = str(raw_parameters.get("policy") or "").strip().lower()
+    if requested_policy not in ALLOWED_ZAP_POLICIES:
+        policy = DEFAULT_ZAP_POLICY
+    else:
+        policy = requested_policy
+
+    requested_mode = str(raw_parameters.get("mode") or "").strip().lower()
+    if requested_mode not in ALLOWED_ZAP_MODES:
+        mode = DEFAULT_ZAP_POLICY
+    else:
+        mode = requested_mode
+
+    rate_limit = _sanitize_rate_limit(
+        raw_parameters.get("rate_limit"), default=DEFAULT_ZAP_RATE_LIMIT
+    )
+
+    include_paths: List[str] = []
+    include_value = raw_parameters.get("include_paths")
+    if isinstance(include_value, str):
+        include_paths = [segment.strip() for segment in include_value.split(",") if segment.strip()]
+    elif isinstance(include_value, Iterable) and not isinstance(
+        include_value, (bytes, bytearray, dict)
+    ):
+        include_paths = [str(item).strip() for item in include_value if str(item).strip()]
+
+    exclude_paths: List[str] = []
+    exclude_value = raw_parameters.get("exclude_paths")
+    if isinstance(exclude_value, str):
+        exclude_paths = [segment.strip() for segment in exclude_value.split(",") if segment.strip()]
+    elif isinstance(exclude_value, Iterable) and not isinstance(
+        exclude_value, (bytes, bytearray, dict)
+    ):
+        exclude_paths = [str(item).strip() for item in exclude_value if str(item).strip()]
+
+    requested_hosts = raw_parameters.get("allowed_hosts") or []
+    allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
+        target_scope, _coerce_requested_hosts(requested_hosts)
+    )
+
+    ajax_spider = _sanitize_boolean(raw_parameters.get("ajax_spider"), default=False)
+
+    tags = sorted(
+        {
+            f"zap:mode:{mode}",
+            f"zap:policy:{policy}",
+        }
+    )
+
+    sanitized_parameters: Dict[str, Any] = {
+        "policy": policy,
+        "mode": mode,
+        "rate_limit": rate_limit,
+        "ajax_spider": ajax_spider,
+    }
+    if include_paths:
+        sanitized_parameters["include_paths"] = include_paths
+    if exclude_paths:
+        sanitized_parameters["exclude_paths"] = exclude_paths
+    if allowed_hosts:
+        sanitized_parameters["allowed_hosts"] = allowed_hosts
+
+    metadata: Dict[str, Any] = {}
+    if rejected_hosts:
+        metadata["rejected_hosts"] = rejected_hosts
+
+    return sanitized_parameters, tags, metadata
+
+
+def resolve_sqlmap_job_configuration(
+    target_scope: str, parameters: Optional[Dict[str, Any]]
+) -> Tuple[Dict[str, Any], List[str], Dict[str, Any]]:
+    """Return sanitized configuration for SQLMap injections."""
+
+    raw_parameters: Dict[str, Any] = dict(parameters or {})
+
+    try:
+        requested_level = int(raw_parameters.get("level", DEFAULT_SQLMAP_LEVEL))
+    except (TypeError, ValueError):
+        requested_level = DEFAULT_SQLMAP_LEVEL
+    level = max(1, min(5, requested_level))
+
+    try:
+        requested_risk = int(raw_parameters.get("risk", DEFAULT_SQLMAP_RISK))
+    except (TypeError, ValueError):
+        requested_risk = DEFAULT_SQLMAP_RISK
+    risk = max(0, min(3, requested_risk))
+
+    techniques_value = raw_parameters.get("techniques")
+    techniques: List[str] = []
+    if isinstance(techniques_value, str):
+        candidates = [segment.strip().lower() for segment in techniques_value.split(",")]
+        techniques = [item for item in candidates if item in ALLOWED_SQLMAP_TECHNIQUES]
+    elif isinstance(techniques_value, Iterable) and not isinstance(
+        techniques_value, (bytes, bytearray, dict)
+    ):
+        techniques = [
+            str(item).strip().lower()
+            for item in techniques_value
+            if str(item).strip().lower() in ALLOWED_SQLMAP_TECHNIQUES
+        ]
+
+    tamper_value = raw_parameters.get("tamper")
+    tamper_scripts: List[str] = []
+    if isinstance(tamper_value, str):
+        tamper_scripts = [
+            segment.strip().lower()
+            for segment in tamper_value.split(",")
+            if segment.strip().lower() in ALLOWED_SQLMAP_TAMPER_SCRIPTS
+        ]
+    elif isinstance(tamper_value, Iterable) and not isinstance(
+        tamper_value, (bytes, bytearray, dict)
+    ):
+        tamper_scripts = [
+            str(item).strip().lower()
+            for item in tamper_value
+            if str(item).strip().lower() in ALLOWED_SQLMAP_TAMPER_SCRIPTS
+        ]
+
+    delay = _sanitize_rate_limit(raw_parameters.get("request_delay"), default="0")
+
+    requested_hosts = raw_parameters.get("allowed_hosts") or []
+    allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
+        target_scope, _coerce_requested_hosts(requested_hosts)
+    )
+
+    sanitized_parameters: Dict[str, Any] = {
+        "level": level,
+        "risk": risk,
+        "request_delay": delay,
+    }
+    if techniques:
+        sanitized_parameters["techniques"] = techniques
+    if tamper_scripts:
+        sanitized_parameters["tamper"] = tamper_scripts
+    if allowed_hosts:
+        sanitized_parameters["allowed_hosts"] = allowed_hosts
+
+    tags = sorted(
+        {
+            f"sqlmap:level:{level}",
+            f"sqlmap:risk:{risk}",
+        }
+    )
+
+    metadata: Dict[str, Any] = {}
+    if rejected_hosts:
+        metadata["rejected_hosts"] = rejected_hosts
+
+    return sanitized_parameters, tags, metadata
+
+
+def _is_http_target(scope: str) -> bool:
+    value = scope.strip().lower()
+    return value.startswith("http://") or value.startswith("https://")
 
 class Settings(BaseSettings):
     """Runtime configuration for the controller service."""
@@ -229,6 +472,12 @@ class Settings(BaseSettings):
     )
     nuclei_queue_channel: str = Field(
         "queues:nuclei:jobs", description="Redis list channel for nuclei scan jobs."
+    )
+    zap_queue_channel: str = Field(
+        "queues:zap:jobs", description="Redis list channel for ZAP scan jobs."
+    )
+    sqlmap_queue_channel: str = Field(
+        "queues:sqlmap:jobs", description="Redis list channel for SQLMap scan jobs."
     )
     jwt_secret: str = Field(
         ..., description="JWT secret used to validate bearer tokens."
@@ -251,6 +500,12 @@ class Settings(BaseSettings):
     )
     nuclei_callback_token: str = Field(
         ..., description="Shared secret token required for nuclei worker callbacks."
+    )
+    zap_callback_token: str = Field(
+        ..., description="Shared secret token required for ZAP worker callbacks."
+    )
+    sqlmap_callback_token: str = Field(
+        ..., description="Shared secret token required for SQLMap worker callbacks."
     )
     enrichment_callback_token: str = Field(
         ..., description="Shared secret required for enrichment worker callbacks."
@@ -277,7 +532,6 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 Network = Union[IPv4Network, IPv6Network]
 
-
 def _normalize_hostname(value: str) -> str:
     """Return a lowercase hostname without trailing dots or wildcard prefixes."""
 
@@ -285,6 +539,7 @@ def _normalize_hostname(value: str) -> str:
     if normalized.startswith("*."):
         normalized = normalized[2:]
     return normalized
+
 
 def _hash_secret(secret: str) -> str:
     """Return a SHA-256 hash of the provided secret."""
@@ -404,9 +659,9 @@ class TargetCollectionResponse(BaseModel):
       
 class ScanRequest(BaseModel):
     target_id: str
-    scanner: str = Field(
-        ..., min_length=1, max_length=64, description="Scanner identifier"
-    )
+    scanner: Literal[
+        SCAN_TYPE_NUCLEI, SCAN_TYPE_ZAP, SCAN_TYPE_SQLMAP
+    ] = Field(description="Scanner identifier")
     parameters: Dict[str, Any] = Field(
         default_factory=dict, description="Scanner-specific configuration payload"
     )
@@ -521,6 +776,7 @@ class FindingResponse(BaseModel):
     evidence: Optional[str]
     remediation: Optional[str]
     enrichments: List[FindingEnrichmentSummary] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class FindingCollectionResponse(BaseModel):
@@ -549,7 +805,7 @@ class CallbackFinding(BaseModel):
         return lowered
 
 
-class NucleiCallbackRequest(BaseModel):
+class ScanCallbackRequest(BaseModel):
     scan_id: str
     status: str = Field(..., min_length=1, max_length=32)
     findings: List[CallbackFinding] = Field(default_factory=list)
@@ -565,6 +821,9 @@ class NucleiCallbackRequest(BaseModel):
         if lowered not in allowed:
             raise ValueError("Unsupported scan status")
         return lowered
+
+
+NucleiCallbackRequest = ScanCallbackRequest
 
 
 class Principal(BaseModel):
@@ -734,9 +993,27 @@ def _authenticate_api_key(
     fingerprint = _fingerprint_from_hash(api_key_hash)
 
     candidate_api_key = api_key_header or bearer_token
+    if candidate_api_key and candidate_api_key in settings.api_keys:
+        subject_hash = _hash_secret(candidate_api_key)
+        return Principal(
+            subject=f"apikey:{subject_hash}",
+            auth_method="api_key",
+            roles=list(DEFAULT_ADMIN_ROLES),
+        )
+
     if candidate_api_key:
-        if candidate_api_key in settings.api_keys:
-            subject_hash = _hash_secret(candidate_api_key)
+        api_key_hash = _hash_secret(candidate_api_key)
+        active_credential = (
+            db.query(PrincipalCredential)
+            .filter(
+                PrincipalCredential.auth_method == "api_key",
+                PrincipalCredential.key_hash == api_key_hash,
+                PrincipalCredential.revoked_at.is_(None),
+            )
+            .first()
+        )
+        if active_credential:
+            roles = list(active_credential.roles or [])
             return Principal(
                 subject=f"apikey:{subject_hash}",
                 auth_method="api_key",
@@ -798,7 +1075,21 @@ def _authenticate_api_key(
             return Principal(
                 subject=f"apikey:{subject_hash}",
                 auth_method="api_key",
-                roles=list(DEFAULT_ADMIN_ROLES),
+                roles=list(revoked_credential.roles or []),
+            )
+            log_access_denied(
+                db,
+                principal=revoked_principal,
+                required_roles=[],
+                resource_type="principal_credential",
+                resource_id=str(revoked_credential.id),
+                reason="credential_revoked",
+                detail="API key revoked",
+                status_code=status.HTTP_403_FORBIDDEN,
+                extra_metadata={
+                    "credential_id": str(revoked_credential.id),
+                    "credential_status": "revoked",
+                },
             )
 
     if silent:
@@ -903,55 +1194,7 @@ def _authenticate_jwt(
     return Principal(subject=record.subject, auth_method="jwt", roles=roles)
 
 
-def authenticate(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
-    settings: Settings = Depends(get_settings),
-    db: Session = Depends(get_db_session),
-) -> Principal:
-    """Authenticate caller via JWT bearer token or API key headers."""
-
-    api_key_header = request.headers.get("X-API-Key")
-    if api_key_header:
-        api_principal = _authenticate_api_key(
-            api_key_header,
-            db=db,
-            settings=settings,
-            source="header",
-            silent=False,
-        )
-        if api_principal:
-            return api_principal
-
-    if credentials and credentials.scheme.lower() == "bearer":
-        bearer_token = credentials.credentials or ""
-        api_principal = _authenticate_api_key(
-            bearer_token,
-            db=db,
-            settings=settings,
-            source="authorization",
-            silent=True,
-        )
-        if api_principal is not None:
-            return api_principal
-
-        if bearer_token:
-            return _authenticate_jwt(bearer_token, settings=settings, db=db)
-
-    anonymous_principal = Principal(subject="anonymous", auth_method="none", roles=[])
-    log_access_denied(
-        db,
-        principal=anonymous_principal,
-        required_roles=[],
-        resource_type="authentication",
-        resource_id=None,
-        reason="missing_credentials",
-        detail="Authentication required",
-        status_code=status.HTTP_401_UNAUTHORIZED,
-    )
-
-
-def authenticate_worker(
+def authenticate_nuclei_worker(
     request: Request,
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db_session),
@@ -966,6 +1209,7 @@ def authenticate_worker(
         resource_id="nuclei",
     )
 
+
 def authenticate_enrichment_worker(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -979,6 +1223,34 @@ def authenticate_enrichment_worker(
         subject="worker:enrichment",
         db=db,
         resource_id="enrichment",
+    )
+
+
+def authenticate_zap_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
+) -> Principal:
+    """Authenticate ZAP worker callbacks using a shared secret header."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.zap_callback_token,
+        subject="worker:zap",
+    )
+
+
+def authenticate_sqlmap_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
+) -> Principal:
+    """Authenticate SQLMap worker callbacks using a shared secret header."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.sqlmap_callback_token,
+        subject="worker:sqlmap",
     )
 
 
@@ -1375,7 +1647,8 @@ def create_target(
         principal,
         [ROLE_TARGETS_WRITE],
         db,
-        resource_type="target",
+        resource_type="endpoint",
+        resource_id="/targets",
     )
     existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
@@ -1413,7 +1686,8 @@ def list_targets(
         principal,
         [ROLE_TARGETS_READ],
         db,
-        resource_type="target",
+        resource_type="endpoint",
+        resource_id="/targets",
     )
     targets = db.query(Target).order_by(Target.created_at.desc()).all()
 
@@ -1444,8 +1718,8 @@ def enqueue_scan(
         principal,
         [ROLE_SCAN_ENQUEUE],
         db,
-        resource_type="scan",
-        resource_id=str(scan_request.target_id),
+        resource_type="endpoint",
+        resource_id="/scan",
     )
 
     target = db.get(Target, scan_request.target_id)
@@ -1492,42 +1766,174 @@ def enqueue_scan(
     scan = Scan(
         target_id=target.id,
         scanner=scan_request.scanner,
-        parameters=sanitized_parameters,
+        parameters={},
         initiated_by=principal.subject,
     )
     db.add(scan)
+    db.flush()
+
+    submitted_at = datetime.now(tz=timezone.utc)
+    job_id = str(uuid.uuid4())
+
+    tags: List[str] = []
+    job_payload: Dict[str, Any]
+    callback_url: str
+    metadata_payload: Dict[str, Any] = {
+        "scan_id": str(scan.id),
+        "target_id": str(target.id),
+        "target_scope": target.scope,
+        "target_name": target.name,
+        "initiated_by": principal.subject,
+        "submitted_at": submitted_at.isoformat(),
+    }
+
+    if scan.scanner == SCAN_TYPE_NUCLEI:
+        profile, templates, tags, sanitized_parameters, extra_metadata = (
+            resolve_nuclei_job_configuration(target.scope, scan_request.parameters)
+        )
+        if (
+            extra_metadata.get("rejected_hosts")
+            and extra_metadata.get("requested_host_count")
+            and not sanitized_parameters.get("requested_hosts")
+        ):
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No requested hosts remain within the authorized target scope",
+            )
+        scan.parameters = sanitized_parameters
+        callback_url = str(http_request.url_for("nuclei_callback"))
+        metadata_payload.update(
+            {
+                "template_profile": profile,
+                "controller_callback_url": callback_url,
+                "parameters": sanitized_parameters,
+            }
+        )
+        if extra_metadata:
+            metadata_payload.update(extra_metadata)
+        job_payload = {
+            "job_id": job_id,
+            "scan_id": str(scan.id),
+            "target": target.scope,
+            "target_id": str(target.id),
+            "target_name": target.name,
+            "scanner": scan.scanner,
+            "templates": templates,
+            "template_profile": profile,
+            "parameters": sanitized_parameters,
+            "callback_url": callback_url,
+            "attempts": 0,
+            "tags": tags,
+            "initiated_by": principal.subject,
+            "submitted_at": submitted_at.isoformat(),
+            "metadata": metadata_payload,
+        }
+        queue_channel = settings.nuclei_queue_channel
+        audit_metadata = {
+            "target_id": target.id,
+            "scanner": scan.scanner,
+            "job_id": job_id,
+            "template_profile": profile,
+            "requested_host_count": extra_metadata.get("requested_host_count", 0),
+            "requested_hosts": sanitized_parameters.get("requested_hosts", []),
+        }
+        if extra_metadata.get("rejected_hosts"):
+            audit_metadata["rejected_hosts"] = extra_metadata["rejected_hosts"]
+    elif scan.scanner == SCAN_TYPE_ZAP:
+        if not _is_http_target(target.scope):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ZAP scans require an HTTP or HTTPS scope",
+            )
+        sanitized_parameters, tags, extra_metadata = resolve_zap_job_configuration(
+            target.scope, scan_request.parameters
+        )
+        scan.parameters = sanitized_parameters
+        callback_url = str(http_request.url_for("zap_callback"))
+        metadata_payload.update(
+            {
+                "controller_callback_url": callback_url,
+                "parameters": sanitized_parameters,
+            }
+        )
+        if extra_metadata:
+            metadata_payload.update(extra_metadata)
+        job_payload = {
+            "job_id": job_id,
+            "scan_id": str(scan.id),
+            "target": target.scope,
+            "target_id": str(target.id),
+            "target_name": target.name,
+            "scanner": scan.scanner,
+            "parameters": sanitized_parameters,
+            "callback_url": callback_url,
+            "attempts": 0,
+            "tags": tags,
+            "initiated_by": principal.subject,
+            "submitted_at": submitted_at.isoformat(),
+            "metadata": metadata_payload,
+        }
+        queue_channel = settings.zap_queue_channel
+        audit_metadata = {
+            "target_id": target.id,
+            "scanner": scan.scanner,
+            "job_id": job_id,
+            "policy": sanitized_parameters.get("policy"),
+        }
+    elif scan.scanner == SCAN_TYPE_SQLMAP:
+        if not _is_http_target(target.scope):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="SQLMap scans require an HTTP or HTTPS scope",
+            )
+        sanitized_parameters, tags, extra_metadata = resolve_sqlmap_job_configuration(
+            target.scope, scan_request.parameters
+        )
+        scan.parameters = sanitized_parameters
+        callback_url = str(http_request.url_for("sqlmap_callback"))
+        metadata_payload.update(
+            {
+                "controller_callback_url": callback_url,
+                "parameters": sanitized_parameters,
+            }
+        )
+        if extra_metadata:
+            metadata_payload.update(extra_metadata)
+        job_payload = {
+            "job_id": job_id,
+            "scan_id": str(scan.id),
+            "target": target.scope,
+            "target_id": str(target.id),
+            "target_name": target.name,
+            "scanner": scan.scanner,
+            "parameters": sanitized_parameters,
+            "callback_url": callback_url,
+            "attempts": 0,
+            "tags": tags,
+            "initiated_by": principal.subject,
+            "submitted_at": submitted_at.isoformat(),
+            "metadata": metadata_payload,
+        }
+        queue_channel = settings.sqlmap_queue_channel
+        audit_metadata = {
+            "target_id": target.id,
+            "scanner": scan.scanner,
+            "job_id": job_id,
+            "level": sanitized_parameters.get("level"),
+            "risk": sanitized_parameters.get("risk"),
+        }
+    else:  # pragma: no cover - literal guard
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported scanner {scan.scanner}",
+        )
+
+    scan.parameters = dict(scan.parameters)
     db.commit()
     db.refresh(scan)
 
-    submitted_at = datetime.now(tz=timezone.utc)
-    callback_url = str(http_request.url_for("nuclei_callback"))
-    job_id = str(uuid.uuid4())
-
-    job_payload = {
-        "job_id": job_id,
-        "scan_id": str(scan.id),
-        "target": target.scope,
-        "target_id": str(target.id),
-        "target_name": target.name,
-        "scanner": scan.scanner,
-        "templates": templates,
-        "template_profile": profile,
-        "parameters": sanitized_parameters,
-        "callback_url": callback_url,
-        "attempts": 0,
-        "tags": tags,
-        "initiated_by": principal.subject,
-        "submitted_at": submitted_at.isoformat(),
-        "metadata": {
-            "scan_id": str(scan.id),
-            "target_id": str(target.id),
-            "target_scope": target.scope,
-            "target_name": target.name,
-            "initiated_by": principal.subject,
-            "submitted_at": submitted_at.isoformat(),
-            "template_profile": profile,
-            "controller_callback_url": callback_url,
-            "parameters": sanitized_parameters,
+    queue.enqueue(queue_channel, job_payload)
             **(
                 {"rejected_hosts": rejected_hosts}
                 if rejected_hosts
@@ -1544,20 +1950,7 @@ def enqueue_scan(
         resource_type="scan",
         resource_id=scan.id,
         scan_id=scan.id,
-        metadata={
-            "target_id": target.id,
-            "scanner": scan.scanner,
-            "job_id": job_id,
-            "template_profile": profile,
-            **(
-                {
-                    "requested_hosts": allowed_hosts,
-                    **({"rejected_hosts": rejected_hosts} if rejected_hosts else {}),
-                }
-                if "requested_hosts" in scan_request.parameters
-                else {}
-            ),
-        },
+        metadata=audit_metadata,
     )
 
     return serialize_scan(scan)
@@ -1641,7 +2034,8 @@ def list_scans(
         principal,
         [ROLE_SCANS_READ],
         db,
-        resource_type="scan",
+        resource_type="endpoint",
+        resource_id="/scans",
     )
     query = db.query(Scan).options(
         selectinload(Scan.target), selectinload(Scan.findings)
@@ -1662,22 +2056,18 @@ def list_scans(
     return ScanCollectionResponse(data=[serialize_scan(scan) for scan in scans])
 
 
-@app.post(
-    "/internal/nuclei/callback",
-    status_code=status.HTTP_200_OK,
-    response_class=Response,
-)
-def nuclei_callback(
-    payload: NucleiCallbackRequest,
-    principal: Principal = Depends(authenticate_worker),
-    db: Session = Depends(get_db_session),
-) -> Response:
-    """Persist nuclei worker results while enforcing evidence immutability."""
-
-    scan = db.get(Scan, payload.scan_id)
-    if scan is None:
+def _persist_scan_callback(
+    *,
+    db: Session,
+    scan: Scan,
+    payload: ScanCallbackRequest,
+    principal: Principal,
+    worker_name: str,
+) -> int:
+    if scan.scanner != worker_name:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found"
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Scan assigned to {scan.scanner} cannot accept {worker_name} callbacks",
         )
     if scan.status in {"completed", "failed"}:
         raise HTTPException(
@@ -1700,14 +2090,18 @@ def nuclei_callback(
 
     findings_persisted = 0
     for finding_payload in payload.findings:
+        metadata_payload = deepcopy(_normalize_payload(finding_payload.metadata))
+        if "scanner" not in metadata_payload:
+            metadata_payload["scanner"] = scan.scanner
+        evidence_payload = deepcopy(_normalize_payload(finding_payload.evidence))
         finding = Finding(
             scan_id=scan.id,
             severity=finding_payload.severity,
             title=finding_payload.title,
             description=finding_payload.description,
             cve_id=finding_payload.cve_id,
-            metadata_json=_normalize_payload(finding_payload.metadata),
-            evidence=_normalize_payload(finding_payload.evidence),
+            metadata_json=metadata_payload,
+            evidence=evidence_payload,
             evidence_hash="",
         )
         db.add(finding)
@@ -1715,22 +2109,137 @@ def nuclei_callback(
 
     try:
         db.commit()
-    except (
-        SQLAlchemyError
-    ) as exc:  # pragma: no cover - exercised in error handling tests
+    except SQLAlchemyError as exc:  # pragma: no cover - exercised in error handling tests
         db.rollback()
         LOGGER.exception(
-            "Failed to persist nuclei callback payload", extra={"scan_id": scan.id}
+            "Failed to persist %s callback payload",
+            worker_name,
+            extra={"scan_id": scan.id},
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to persist callback",
         ) from exc
 
+    return findings_persisted
+
+
+def _handle_scan_callback(
+    *,
+    db: Session,
+    payload: ScanCallbackRequest,
+    principal: Principal,
+    worker_name: str,
+) -> Tuple[Scan, int]:
+    scan = db.get(Scan, payload.scan_id)
+    if scan is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found"
+        )
+
+    findings_persisted = _persist_scan_callback(
+        db=db,
+        scan=scan,
+        payload=payload,
+        principal=principal,
+        worker_name=worker_name,
+    )
+    return scan, findings_persisted
+
+
+@app.post(
+    "/internal/nuclei/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def nuclei_callback(
+    payload: ScanCallbackRequest,
+    principal: Principal = Depends(authenticate_nuclei_worker),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Persist nuclei worker results while enforcing evidence immutability."""
+
+    scan, findings_persisted = _handle_scan_callback(
+        db=db,
+        payload=payload,
+        principal=principal,
+        worker_name=SCAN_TYPE_NUCLEI,
+    )
+
     record_audit_event(
         db,
         actor=principal,
         action="nuclei_callback",
+        resource_type="scan",
+        resource_id=str(scan.id),
+        scan_id=scan.id,
+        metadata={
+            "status": payload.status,
+            "findings_count": findings_persisted,
+        },
+        message=payload.error,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
+    "/internal/zap/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def zap_callback(
+    payload: ScanCallbackRequest,
+    principal: Principal = Depends(authenticate_zap_worker),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Persist ZAP worker results."""
+
+    scan, findings_persisted = _handle_scan_callback(
+        db=db,
+        payload=payload,
+        principal=principal,
+        worker_name=SCAN_TYPE_ZAP,
+    )
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="zap_callback",
+        resource_type="scan",
+        resource_id=str(scan.id),
+        scan_id=scan.id,
+        metadata={
+            "status": payload.status,
+            "findings_count": findings_persisted,
+        },
+        message=payload.error,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
+    "/internal/sqlmap/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def sqlmap_callback(
+    payload: ScanCallbackRequest,
+    principal: Principal = Depends(authenticate_sqlmap_worker),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Persist SQLMap worker results."""
+
+    scan, findings_persisted = _handle_scan_callback(
+        db=db,
+        payload=payload,
+        principal=principal,
+        worker_name=SCAN_TYPE_SQLMAP,
+    )
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="sqlmap_callback",
         resource_type="scan",
         resource_id=str(scan.id),
         scan_id=scan.id,
@@ -1857,7 +2366,8 @@ def list_findings(
         principal,
         [ROLE_FINDINGS_READ],
         db,
-        resource_type="finding",
+        resource_type="endpoint",
+        resource_id="/findings",
     )
     query = db.query(Finding)
     if scan_id is not None:
@@ -1894,9 +2404,10 @@ def get_finding(
         principal,
         [ROLE_FINDINGS_READ],
         db,
-        resource_type="finding",
-        resource_id=finding_id,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}
     )
+      
     finding = db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(
@@ -1941,12 +2452,27 @@ def serialize_finding(finding: Finding) -> FindingResponse:
     """Project a Finding ORM object into the deterministic UI schema."""
 
     detected_at = finding.created_at
+    metadata_payload = deepcopy(_normalize_payload(finding.metadata_json))
     evidence_payload = _normalize_payload(finding.evidence)
     evidence_text = (
         json.dumps(evidence_payload, sort_keys=True) if evidence_payload else None
     )
 
-    template_id = finding.cve_id or "nuclei:unspecified"
+    template_id_source = (
+        metadata_payload.get("template_id")
+        or metadata_payload.get("rule_id")
+        or metadata_payload.get("alert_id")
+        or metadata_payload.get("signature_id")
+        or metadata_payload.get("finding_id")
+        or finding.cve_id
+    )
+    scanner_name = metadata_payload.get("scanner")
+    if template_id_source:
+        template_id = str(template_id_source)
+    elif scanner_name:
+        template_id = f"{scanner_name}:unspecified"
+    else:
+        template_id = "scanner:unspecified"
 
     enrichments_payload: List[FindingEnrichmentSummary] = []
     if hasattr(finding, "enrichments") and finding.enrichments:
@@ -1989,6 +2515,7 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         evidence=evidence_text,
         remediation=None,
         enrichments=enrichments_payload,
+        metadata=metadata_payload,
     )
 
 
@@ -2017,6 +2544,9 @@ __all__ = [
     "serialize_finding",
     "record_audit_event",
     "authenticate",
-    "authenticate_worker",
+    "authenticate_nuclei_worker",
     "authenticate_enrichment_worker",
+    "authenticate_zap_worker",
+    "authenticate_sqlmap_worker",
+    "ScanCallbackRequest",
 ]
