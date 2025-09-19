@@ -67,7 +67,6 @@ def client():
         nuclei_callback_token="callback-secret",
         zap_callback_token="zap-secret",
         sqlmap_callback_token="sqlmap-secret",
-        validator_callback_token="validator-secret",
         enrichment_callback_token="enrichment-secret",
         validator_callback_token="validator-secret",
         binary_static_analysis_callback_token="static-secret",

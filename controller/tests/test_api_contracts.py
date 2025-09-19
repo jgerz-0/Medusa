@@ -1,11 +1,15 @@
 from datetime import datetime, timedelta, timezone
 import uuid
-from typing import Tuple
+import uuid
+from typing import Generator, Tuple
 
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 import jwt
+import pytest
 from controller.db.models import (
     AuditLog,
     Base,
@@ -33,14 +37,6 @@ from controller.main import (
 )
 from controller.notifications import CriticalFindingNotification, NotificationService
 from controller.tests.conftest import InMemoryQueue
-
-
-class InMemoryQueue(QueueClient):
-    def __init__(self) -> None:
-        self.messages: list[Tuple[str, dict]] = []
-
-    def enqueue(self, channel: str, payload: dict) -> None:  # type: ignore[override]
-        self.messages.append((channel, payload))
 
 
 class DummyNotificationService(NotificationService):
@@ -78,7 +74,7 @@ def api_client() -> (
         nuclei_callback_token="callback-secret",
         zap_callback_token="zap-callback",
         sqlmap_callback_token="sqlmap-callback",
-        validator_callback_token="validator-callback",
+        validator_callback_token="validator-secret",
         enrichment_callback_token="enrichment-secret",
         binary_static_analysis_queue_channel="binary-static:test",
         binary_static_analysis_callback_token="binary-static-secret",
@@ -136,7 +132,6 @@ def api_client() -> (
     get_settings.cache_clear()  # type: ignore[attr-defined]
     Base.metadata.drop_all(engine)
     engine.dispose()
-)
 
 
 def auth_headers() -> dict[str, str]:

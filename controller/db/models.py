@@ -78,12 +78,18 @@ def _normalize_tags(value: Optional[Iterable[str]]) -> list[str]:
 def _normalize_status(value: Optional[str]) -> str:
     """Clamp finding workflow status to the supported vocabulary."""
 
-    allowed = {"open", "acknowledged", "resolved"}
+    allowed = {
+        "pending_validation",
+        "open",
+        "invalidated",
+        "acknowledged",
+        "resolved",
+    }
     if isinstance(value, str):
         lowered = value.strip().lower()
         if lowered in allowed:
             return lowered
-    return "open"
+    return "pending_validation"
 
 
 def _normalize_validation_status(value: Optional[str]) -> str:
@@ -188,18 +194,14 @@ class Finding(TimestampMixin, Base):
     validated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    validation_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    validation_status: Mapped[str] = mapped_column(
+        String(32), default="pending", nullable=False
+    )
     validation_metadata: Mapped[Dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False
     )
     assigned_to: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    validation_status: Mapped[str] = mapped_column(
-        String(32), default="pending", nullable=False
-    )
-    validated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
 
     scan: Mapped["Scan"] = relationship(back_populates="findings")
     audit_entries: Mapped[list["AuditLog"]] = relationship(

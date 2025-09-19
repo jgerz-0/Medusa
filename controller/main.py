@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple
 import jwt
 import requests
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
@@ -707,6 +708,7 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = Field(
         default=True,
         description="Whether to negotiate STARTTLS when delivering notification emails.",
+    )
     oidc_issuer: Optional[str] = Field(
         default=None,
         description=("OIDC issuer expected in validated bearer tokens."),
@@ -1236,7 +1238,7 @@ class ValidationResponse(BaseModel):
         return lowered
 
 
-class ValidationCallbackRequest(BaseModel):
+class LegacyValidationCallbackRequest(BaseModel):
     job_id: str = Field(..., min_length=1)
     finding_id: str = Field(..., min_length=1)
     status: str = Field(..., min_length=1, max_length=32)
@@ -1323,6 +1325,8 @@ class FindingResponse(BaseModel):
         FINDING_STATUS_PENDING_VALIDATION,
         FINDING_STATUS_OPEN,
         FINDING_STATUS_INVALIDATED,
+        "acknowledged",
+        "resolved",
     ]
     template_id: str
     evidence: Optional[str]
@@ -4025,18 +4029,23 @@ def sqlmap_callback(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@app.post(
-    "/internal/validator/callback",
-    status_code=status.HTTP_204_NO_CONTENT,
-    response_class=Response,
-)
+@app.post("/internal/validator/callback")
 def validator_callback(
-    payload: ValidatorCallbackRequest,
+    payload: ValidatorCallbackRequest | LegacyValidationCallbackRequest,
     principal: Principal = Depends(authenticate_validator_worker),
     db: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
     notification_service: NotificationService = Depends(get_notification_service),
 ) -> Response:
     """Promote or reject findings based on validator retests."""
+
+    if isinstance(payload, LegacyValidationCallbackRequest):
+        return _handle_legacy_validator_callback(
+            payload,
+            principal=principal,
+            db=db,
+            settings=settings,
+        )
 
     validation_results: List[Dict[str, Any]] = []
 
@@ -4122,6 +4131,8 @@ def validator_callback(
             detail="Failed to persist validator callback",
         ) from exc
 
+    metrics.record_worker_callback("validator", len(validation_results))
+
     notifications: List[CriticalFindingNotification] = []
     for item in validation_results:
         finding: Finding = item["finding"]
@@ -4173,6 +4184,108 @@ def validator_callback(
         notification_service.notify_critical_finding(notification)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _handle_legacy_validator_callback(
+    payload: LegacyValidationCallbackRequest,
+    *,
+    principal: Principal,
+    db: Session,
+    settings: Settings,
+) -> Response:
+    finding = (
+        db.query(Finding)
+        .options(
+            selectinload(Finding.validations),
+            selectinload(Finding.scan).selectinload(Scan.target),
+        )
+        .filter(Finding.id == payload.finding_id)
+        .one_or_none()
+    )
+    if finding is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Finding not found",
+        )
+
+    existing = (
+        db.query(FindingValidation)
+        .filter(FindingValidation.job_id == payload.job_id)
+        .one_or_none()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Validation already recorded",
+        )
+
+    executed_at = payload.executed_at.astimezone(timezone.utc)
+    normalized_status = payload.status.lower()
+    validation = FindingValidation(
+        finding_id=finding.id,
+        job_id=payload.job_id,
+        status=normalized_status,
+        validator=payload.validator,
+        executed_at=executed_at,
+        requested_by=payload.requested_by,
+        requested_at=payload.requested_at,
+        notes=payload.notes,
+        metadata_json=deepcopy(_normalize_payload(payload.metadata)),
+        evidence=deepcopy(_normalize_payload(payload.evidence)),
+        evidence_hash="",
+        metadata_hash="",
+    )
+    db.add(validation)
+
+    finding.validation_status = normalized_status
+    if normalized_status == "passed":
+        finding.status = FINDING_STATUS_OPEN
+        finding.validated_at = executed_at
+    else:
+        finding.status = FINDING_STATUS_INVALIDATED
+        finding.validated_at = None
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:  # pragma: no cover - defensive path
+        db.rollback()
+        LOGGER.exception(
+            "Failed to persist legacy validator callback",
+            extra={"job_id": payload.job_id, "finding_id": payload.finding_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist validator callback",
+        ) from exc
+
+    db.refresh(finding)
+    db.refresh(validation)
+
+    metrics.record_worker_callback("validator", 1)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="validator_callback",
+        resource_type="finding",
+        resource_id=str(finding.id),
+        finding_id=str(finding.id),
+        scan_id=str(finding.scan_id),
+        metadata={
+            "job_id": payload.job_id,
+            "status": normalized_status,
+            "validator": payload.validator,
+        },
+    )
+
+    if normalized_status == "passed":
+        _dispatch_validation_notifications(finding, validation, settings)
+
+    response = FindingItemResponse(data=serialize_finding(finding))
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=response.model_dump(mode="json"),
+    )
 
 
 @app.post(
@@ -4352,104 +4465,6 @@ def enrichment_callback(
     )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@app.post(
-    "/internal/validator/callback",
-    response_model=FindingItemResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def validator_callback(
-    payload: ValidationCallbackRequest,
-    request: Request,
-    db: Session = Depends(get_db_session),
-    settings: Settings = Depends(get_settings),
-) -> FindingItemResponse:
-    """Persist validator retest results before promoting findings."""
-
-    principal = _authenticate_callback_worker(
-        request,
-        expected_token=settings.validator_callback_token,
-        subject="validator-worker",
-        db=db,
-        resource_id=payload.job_id,
-    )
-
-    finding = (
-        db.query(Finding)
-        .options(
-            selectinload(Finding.validations),
-            selectinload(Finding.scan).selectinload(Scan.target),
-        )
-        .filter(Finding.id == payload.finding_id)
-        .one_or_none()
-    )
-    if finding is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Finding not found",
-        )
-
-    existing = (
-        db.query(FindingValidation)
-        .filter(FindingValidation.job_id == payload.job_id)
-        .one_or_none()
-    )
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Validation already recorded",
-        )
-
-    executed_at = payload.executed_at.astimezone(timezone.utc)
-    validation = FindingValidation(
-        finding_id=finding.id,
-        job_id=payload.job_id,
-        status=payload.status,
-        validator=payload.validator,
-        executed_at=executed_at,
-        requested_by=payload.requested_by,
-        requested_at=payload.requested_at,
-        notes=payload.notes,
-        metadata_json=deepcopy(_normalize_payload(payload.metadata)),
-        evidence=deepcopy(_normalize_payload(payload.evidence)),
-        evidence_hash="",
-        metadata_hash="",
-    )
-    db.add(validation)
-
-    normalized_status = payload.status.lower()
-    finding.validation_status = normalized_status
-    if normalized_status == "passed":
-        finding.validated_at = executed_at
-    elif normalized_status == "failed":
-        finding.validated_at = None
-
-    db.commit()
-    db.refresh(finding)
-    db.refresh(validation)
-
-    metrics.record_worker_callback("validator", 1)
-
-    record_audit_event(
-        db,
-        actor=principal,
-        action="validator_callback",
-        resource_type="finding",
-        resource_id=str(finding.id),
-        scan_id=finding.scan_id,
-        finding_id=finding.id,
-        metadata={
-            "job_id": payload.job_id,
-            "status": normalized_status,
-            "validator": payload.validator,
-        },
-    )
-
-    if normalized_status == "passed":
-        _dispatch_validation_notifications(finding, validation, settings)
-
-    return FindingItemResponse(data=serialize_finding(finding))
 
 
 def _retrieve_finding_records(
@@ -5135,7 +5150,7 @@ def assign_finding(
             detail="Assignee cannot be blank",
         )
     finding.assigned_to = sanitized_assignee
-    if finding.status == "open":
+    if finding.status in {FINDING_STATUS_OPEN, FINDING_STATUS_PENDING_VALIDATION}:
         finding.status = "acknowledged"
     db.add(finding)
     db.commit()
