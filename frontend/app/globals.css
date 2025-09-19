@@ -19,5 +19,5 @@ a {
 }
 
 .card {
-  @apply rounded-xl border border-surface-muted/60 bg-surface-default/60 backdrop-blur shadow-card;
+  @apply rounded-xl border border-gray-200 bg-white/60 backdrop-blur shadow-md;
 }
