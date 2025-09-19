@@ -42,6 +42,8 @@ def client():
         zap_callback_token="zap-secret",
         sqlmap_callback_token="sqlmap-secret",
         enrichment_callback_token="enrichment-secret",
+        validator_queue_channel="test-validator",
+        validator_callback_token="validator-secret",
         binary_static_analysis_callback_token="static-secret",
         binary_fuzzing_queue_channel="test-binary-fuzzing",
         binary_fuzzing_callback_token="fuzzing-secret",

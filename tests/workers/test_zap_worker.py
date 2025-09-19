@@ -31,6 +31,8 @@ def test_zap_worker_config_defaults(monkeypatch):
         zap_callback_token="zap-token",
         sqlmap_callback_token="sqlmap-token",
         enrichment_callback_token="enrichment-token",
+        validator_queue_channel="test-validator",
+        validator_callback_token="validator-secret",
         binary_static_analysis_callback_token="static-secret",
         binary_fuzzing_callback_token="fuzzing-secret",
     )

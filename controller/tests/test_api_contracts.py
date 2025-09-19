@@ -1533,6 +1533,7 @@ def test_principal_creation_validates_and_expands_roles(
             "targets:read",
             "enrich:enqueue",
             "report:export",
+            "finding:validate",
         ]
     )
 
@@ -1562,6 +1563,7 @@ def test_principal_creation_validates_and_expands_roles(
             "enrich:enqueue",
             "report:export",
             "ticket:create",
+            "finding:validate",
         ]
     )
 

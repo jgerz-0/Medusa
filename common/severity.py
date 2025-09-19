@@ -65,7 +65,7 @@ def normalize_severity(
         return severity_from_numeric(numeric_value, default=default)
 
     if isinstance(value, (int, float)):
-    return severity_from_numeric(float(value), default=default)
+        return severity_from_numeric(float(value), default=default)
 
     return default
 
