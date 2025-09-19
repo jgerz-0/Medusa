@@ -9,7 +9,7 @@ This guide covers the Phase 1 local Docker Compose environment. It stands up eve
 - 20 GB free disk space for container images, Postgres, MinIO, and Qdrant data directories
 
 ## Compose Manifests
-- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, and SQLMap workers, plus the Next.js frontend.
+- `infra/docker/docker-compose.yml` – boots Postgres, Redis, MinIO, Qdrant, the FastAPI controller, the nuclei, ZAP, SQLMap, and binary preprocess workers, plus the Next.js frontend.
 - `infra/docker/controller.Dockerfile` – Poetry-based image for the controller with Uvicorn hot reload enabled.
 - `infra/docker/frontend.Dockerfile` – Node 20 + pnpm image for the dashboard.
 - `infra/docker/.env.example` – sane defaults for development credentials and exposed ports.
@@ -39,10 +39,43 @@ following secrets are set before starting the stack:
 - `MEDUSA_NUCLEI_CALLBACK_TOKEN`
 - `MEDUSA_ZAP_CALLBACK_TOKEN`
 - `MEDUSA_SQLMAP_CALLBACK_TOKEN`
+- `BINARY_PREPROCESS_QUEUE_KEY`
+- `BINARY_PREPROCESS_DEAD_LETTER_KEY`
+- `BINARY_METADATA_BUCKET`
+- `BINARY_METADATA_PREFIX`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
+- `MEDUSA_ENRICHMENT_CALLBACK_TOKEN`
+
+The controller expects `MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL` to match the
+worker's `CVE_ENRICHMENT_QUEUE_KEY`, and the shared callback token is used to
+authenticate `cve-enrichment-worker` responses when they are published back to
+the controller.
 
 Each worker reads the corresponding token via `NUCLEI_CALLBACK_TOKEN`,
 `ZAP_CALLBACK_TOKEN`, or `SQLMAP_CALLBACK_TOKEN` so callbacks are rejected if a
 container is misconfigured.
+
+Binary preprocessing relies on two deterministic storage locations inside
+MinIO:
+
+- **Upload bucket** – analysts place raw samples in `binary-uploads/`
+  (customize via the controller request payload).
+- **Metadata bucket/prefix** – the worker writes normalized JSON records to
+  `binary-metadata/preprocess/metadata/` by default. Adjust the bucket and
+  prefix via `BINARY_METADATA_BUCKET` and `BINARY_METADATA_PREFIX`.
+
+Provision the buckets once after starting MinIO:
+
+```bash
+docker compose exec minio mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+docker compose exec minio mc mb -p local/binary-uploads
+docker compose exec minio mc mb -p local/binary-metadata
+```
+
+The preprocess worker enforces the prefix and fails closed if the metadata
+bucket is missing so operators do not accidentally leak artifacts to
+unauthorized paths.
 
 Set the optional `COMPOSE_BIN` environment variable if you prefer an alternate
 Compose implementation (for example `podman compose`). The smoke test script
@@ -84,6 +117,10 @@ Compose so the worker authenticates to the local Qdrant instance:
 | `CVE_ENRICHMENT_QDRANT_API_KEY` | Optional API key if Qdrant authentication is enabled. Leave blank for local development. |
 | `CVE_ENRICHMENT_QDRANT_TIMEOUT` | Request timeout in seconds for upsert operations. |
 | `CVE_ENRICHMENT_QDRANT_VECTOR_SIZE` | Deterministic embedding dimension emitted by the worker. |
+
+The controller mirrors the worker configuration via `MEDUSA_CVE_ENRICHMENT_QDRANT_URL`
+and `MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION` so `/enrich` responses can include
+links to the correct vector store.
 
 After the stack is running, create the collection (once) using Qdrant's API:
 

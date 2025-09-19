@@ -29,7 +29,9 @@ secrets:
     MEDUSA_DATABASE_URL: "postgresql+psycopg2://medusa:medusa@postgresql:5432/medusa"
     MEDUSA_REDIS_URL: "redis://redis-master:6379/0"
     MEDUSA_NUCLEI_QUEUE_CHANNEL: "queues:nuclei:jobs"
+    MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: "queues:binary:preprocess"
     MEDUSA_NUCLEI_CALLBACK_TOKEN: "change-me"
+    MEDUSA_ENRICHMENT_CALLBACK_TOKEN: "change-me"
     MEDUSA_JWT_SECRET: "change-me"
     MINIO_ROOT_USER: "medusaadmin"
     MINIO_ROOT_PASSWORD: "medusaadmin123"
@@ -39,7 +41,19 @@ secrets:
     NUCLEI_ARTIFACT_BUCKET: ""
     S3_ACCESS_KEY: "medusaadmin"
     S3_SECRET_KEY: "medusaadmin123"
+    S3_ACCESS_KEY_ID: "medusaadmin"
+    S3_SECRET_ACCESS_KEY: "medusaadmin123"
+    BINARY_PREPROCESS_DEAD_LETTER_KEY: "queues:binary:preprocess:dead"
+    BINARY_METADATA_BUCKET: "binary-metadata"
+    BINARY_METADATA_PREFIX: "preprocess/metadata/"
     MEDUSA_POSTGRES_PASSWORD: "change-me"
+    MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: "queues:enrichment:cve"
+    CVE_ENRICHMENT_QUEUE_KEY: "queues:enrichment:cve"
+    CVE_ENRICHMENT_RESULT_QUEUE_KEY: "queues:enrichment:cve:results"
+    CVE_ENRICHMENT_ERROR_QUEUE_KEY: "queues:enrichment:cve:errors"
+    CVE_ENRICHMENT_QDRANT_URL: "{{ printf \"http://%s-qdrant:%d\" (include \"medusa.fullname\" .) .Values.qdrant.service.httpPort }}"
+    CVE_ENRICHMENT_QDRANT_COLLECTION: "medusa-advisories"
+    CVE_ENRICHMENT_QDRANT_API_KEY: ""
   externalSecret:
     secretStoreKind: ClusterSecretStore
     secretStoreName: medusa-cluster-secrets
@@ -276,6 +290,113 @@ workers:
     command: []
     args: []
     env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        NUCLEI_QUEUE_KEY: MEDUSA_NUCLEI_QUEUE_CHANNEL
+        NUCLEI_CALLBACK_TOKEN: NUCLEI_CALLBACK_TOKEN
+        NUCLEI_ARTIFACT_BUCKET: NUCLEI_ARTIFACT_BUCKET
+        S3_ACCESS_KEY: S3_ACCESS_KEY
+        S3_SECRET_KEY: S3_SECRET_KEY
+      values:
+        S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+
+  binaryPreprocess:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-binary-preprocess
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: binary-preprocess-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        DATABASE_URL: MEDUSA_DATABASE_URL
+        BINARY_PREPROCESS_QUEUE_KEY: MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL
+        BINARY_PREPROCESS_DEAD_LETTER_KEY: BINARY_PREPROCESS_DEAD_LETTER_KEY
+        BINARY_METADATA_BUCKET: BINARY_METADATA_BUCKET
+        BINARY_METADATA_PREFIX: BINARY_METADATA_PREFIX
+        S3_ACCESS_KEY_ID: S3_ACCESS_KEY_ID
+        S3_SECRET_ACCESS_KEY: S3_SECRET_ACCESS_KEY
+      values:
+        S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
+        AWS_DEFAULT_REGION: "us-east-1"
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+  cveEnrichment:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-cve-enrichment
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: cve-enrichment-worker
+    command: []
+    args: []
+    env:
+      maxAttempts: 3
+      retryBackoffSeconds: 2
+      pollTimeout: 5
+      httpTimeout: 30
+      callbackTokenSecretKey: MEDUSA_ENRICHMENT_CALLBACK_TOKEN
+      queueSecretKey: CVE_ENRICHMENT_QUEUE_KEY
+      resultQueueSecretKey: CVE_ENRICHMENT_RESULT_QUEUE_KEY
+      errorQueueSecretKey: CVE_ENRICHMENT_ERROR_QUEUE_KEY
+      qdrant:
+        urlOverride: ""
+        urlSecretKey: CVE_ENRICHMENT_QDRANT_URL
+        collectionSecretKey: CVE_ENRICHMENT_QDRANT_COLLECTION
+        apiKeySecretKey: CVE_ENRICHMENT_QDRANT_API_KEY
+        timeoutSeconds: 5
+        vectorSize: 64
       extra: []
     resources:
       requests:

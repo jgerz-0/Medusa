@@ -25,6 +25,20 @@ The workflow is deterministic: scope validation happens in the controller, all
 policy decisions are recorded with reasons, and audit logs are emitted for every
 sensitive transition.
 
+### Storage Layout
+
+- **Upload bucket** – Operators provision a MinIO/S3 bucket (default:
+  `binary-uploads`) where analysts drop raw samples. The controller job request
+  references this bucket/key pair.
+- **Metadata bucket/prefix** – The preprocess worker emits normalized JSON
+  metadata under `binary-metadata/preprocess/metadata/` by default. Override the
+  bucket via `BINARY_METADATA_BUCKET` and adjust the prefix with
+  `BINARY_METADATA_PREFIX` to keep downstream agents scoped.
+
+Both locations must exist before enqueuing jobs. The worker fails closed if the
+metadata bucket or prefix is missing so artifacts never leak into implicit
+paths.
+
 ## Controller Usage
 
 `controller/main.py` exposes a new `POST /preprocess` endpoint. Required JSON
