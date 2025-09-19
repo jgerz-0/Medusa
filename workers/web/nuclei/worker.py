@@ -115,6 +115,11 @@ class NucleiJob:
     templates: List[str]
     scan_id: str
     callback_url: str
+    template_profile: Optional[str] = None
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    target_id: Optional[str] = None
+    target_name: Optional[str] = None
+    scanner: Optional[str] = None
     attempts: int = 0
     tags: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -130,49 +135,151 @@ class NucleiJob:
         if not isinstance(data, dict):
             raise FatalJobError("Job payload must be a JSON object")
 
-        job_id = data.get("job_id")
-        target = data.get("target")
-        callback_url = data.get("callback_url")
-        templates = data.get("templates")
         metadata_payload = data.get("metadata") or {}
-        if not job_id or not isinstance(job_id, str):
-            raise FatalJobError("Job payload missing 'job_id'")
-        if not target or not isinstance(target, str):
-            raise FatalJobError("Job payload missing 'target'")
-        if not callback_url or not isinstance(callback_url, str):
-            raise FatalJobError("Job payload missing 'callback_url'")
-        if isinstance(templates, str):
-            templates = [templates]
-        if not templates or not isinstance(templates, list):
-            raise FatalJobError("Job payload missing nuclei templates")
-        normalized_templates = [str(t) for t in templates]
         if not isinstance(metadata_payload, dict):
             raise FatalJobError("Job metadata must be a JSON object")
-        scan_id_value = data.get("scan_id")
-        if scan_id_value is None:
-            scan_id_value = metadata_payload.get("scan_id")
-        if scan_id_value is None:
+
+        job_id_value = data.get("job_id") or metadata_payload.get("job_id")
+        if job_id_value is None or isinstance(job_id_value, (dict, list)):
+            raise FatalJobError("Job payload missing 'job_id'")
+        job_id = str(job_id_value).strip()
+        if not job_id:
+            raise FatalJobError("Job payload missing 'job_id'")
+
+        scan_block = data.get("scan")
+        nested_scan_id = None
+        nested_parameters: Dict[str, Any] = {}
+        if isinstance(scan_block, dict):
+            nested_scan_id = scan_block.get("id") or scan_block.get("scan_id")
+            params = scan_block.get("parameters")
+            if isinstance(params, dict):
+                nested_parameters.update(params)
+
+        scan_id_value = (
+            data.get("scan_id")
+            or nested_scan_id
+            or metadata_payload.get("scan_id")
+        )
+        if scan_id_value is None or isinstance(scan_id_value, (dict, list)):
             raise FatalJobError("Job payload missing 'scan_id'")
-        if isinstance(scan_id_value, (dict, list)):
-            raise FatalJobError("Job payload contains invalid 'scan_id'")
         scan_id = str(scan_id_value).strip()
         if not scan_id:
-            raise FatalJobError("Job payload contains invalid 'scan_id'")
+            raise FatalJobError("Job payload missing 'scan_id'")
 
-        attempts = int(data.get("attempts", 0))
-        tags = data.get("tags") or []
-        metadata_payload = data.get("metadata") or {}
-        if not isinstance(metadata_payload, dict):
-            raise FatalJobError("Job metadata must be a JSON object")
-        scan_id_value = data.get("scan_id") or metadata_payload.get("scan_id")
-        scan_id_str = str(scan_id_value) if scan_id_value is not None else None
+        target_value = data.get("target")
+        if not target_value and isinstance(scan_block, dict):
+            target_value = scan_block.get("target_scope") or scan_block.get("target")
+        if not target_value:
+            target_value = (
+                data.get("target_scope")
+                or metadata_payload.get("target_scope")
+                or metadata_payload.get("target")
+            )
+        if not target_value or isinstance(target_value, (dict, list)):
+            raise FatalJobError("Job payload missing 'target'")
+        target = str(target_value).strip()
+        if not target:
+            raise FatalJobError("Job payload missing 'target'")
+
+        templates_value = data.get("templates")
+        if templates_value is None and isinstance(scan_block, dict):
+            templates_value = scan_block.get("templates")
+        if templates_value is None:
+            execution_block = data.get("execution")
+            if isinstance(execution_block, dict):
+                templates_value = execution_block.get("templates")
+        if isinstance(templates_value, str):
+            templates = [templates_value]
+        elif isinstance(templates_value, list):
+            templates = [str(item) for item in templates_value if item]
+        else:
+            raise FatalJobError("Job payload missing nuclei templates")
+        if not templates:
+            raise FatalJobError("Job payload missing nuclei templates")
+
+        callback_url_value = data.get("callback_url")
+        if not callback_url_value:
+            callback_block = data.get("callback")
+            if isinstance(callback_block, dict):
+                callback_url_value = callback_block.get("url")
+        if not callback_url_value or isinstance(callback_url_value, (dict, list)):
+            raise FatalJobError("Job payload missing 'callback_url'")
+        callback_url = str(callback_url_value).strip()
+        if not callback_url:
+            raise FatalJobError("Job payload missing 'callback_url'")
+
+        template_profile_value = (
+            data.get("template_profile")
+            or metadata_payload.get("template_profile")
+        )
+        if not template_profile_value and isinstance(scan_block, dict):
+            template_profile_value = scan_block.get("profile")
+        template_profile = (
+            str(template_profile_value).strip() if isinstance(template_profile_value, str) else None
+        )
+        if template_profile == "":
+            template_profile = None
+
+        parameters_payload: Dict[str, Any] = {}
+        top_level_parameters = data.get("parameters")
+        if isinstance(top_level_parameters, dict):
+            parameters_payload.update(top_level_parameters)
+        if nested_parameters:
+            parameters_payload.update(nested_parameters)
+        metadata_parameters = metadata_payload.get("parameters")
+        if isinstance(metadata_parameters, dict):
+            # Metadata captures the sanitized view from the controller; do not
+            # clobber explicitly provided keys.
+            for key, value in metadata_parameters.items():
+                parameters_payload.setdefault(key, value)
+
+        target_id_value = data.get("target_id")
+        if not target_id_value and isinstance(scan_block, dict):
+            target_id_value = scan_block.get("target_id")
+        if not target_id_value:
+            target_id_value = metadata_payload.get("target_id")
+        target_id = (
+            str(target_id_value) if target_id_value not in (None, "") else None
+        )
+
+        target_name_value = data.get("target_name") or metadata_payload.get("target_name")
+        target_name = (
+            str(target_name_value) if target_name_value not in (None, "") else None
+        )
+
+        scanner_value = data.get("scanner")
+        if not scanner_value and isinstance(scan_block, dict):
+            scanner_value = scan_block.get("scanner")
+        scanner = (
+            str(scanner_value) if scanner_value not in (None, "") else None
+        )
+
+        attempts_raw = data.get("attempts", 0)
+        try:
+            attempts = int(attempts_raw)
+        except (TypeError, ValueError):
+            attempts = 0
+
+        tags_payload = data.get("tags")
+        if not tags_payload and isinstance(scan_block, dict):
+            tags_payload = scan_block.get("tags")
+        if not tags_payload:
+            execution_block = data.get("execution")
+            if isinstance(execution_block, dict):
+                tags_payload = execution_block.get("tags")
+        tags = _coerce_tags(tags_payload)
 
         return cls(
             job_id=job_id,
             target=target,
             templates=[str(t) for t in templates],
-            scan_id=scan_id_str,
+            scan_id=scan_id,
             callback_url=callback_url,
+            template_profile=template_profile,
+            parameters=parameters_payload,
+            target_id=target_id,
+            target_name=target_name,
+            scanner=scanner,
             attempts=attempts,
             tags=tags,
             metadata=metadata_payload,
@@ -186,6 +293,11 @@ class NucleiJob:
             templates=list(self.templates),
             scan_id=self.scan_id,
             callback_url=self.callback_url,
+            template_profile=self.template_profile,
+            parameters=dict(self.parameters),
+            target_id=self.target_id,
+            target_name=self.target_name,
+            scanner=self.scanner,
             attempts=attempts,
             tags=list(self.tags),
             metadata=dict(self.metadata),
@@ -203,6 +315,11 @@ class NucleiJob:
                 "templates": self.templates,
                 "scan_id": self.scan_id,
                 "callback_url": self.callback_url,
+                "template_profile": self.template_profile,
+                "parameters": self.parameters,
+                "target_id": self.target_id,
+                "target_name": self.target_name,
+                "scanner": self.scanner,
                 "attempts": self.attempts,
                 "tags": self.tags,
                 "metadata": self.metadata,
@@ -544,6 +661,16 @@ def process_job(
         "tags": job.tags,
         "duration_seconds": scan.duration_seconds,
     }
+    if job.template_profile:
+        worker_metadata["template_profile"] = job.template_profile
+    if job.parameters:
+        worker_metadata["parameters"] = job.parameters
+    if job.target_id:
+        worker_metadata["target_id"] = job.target_id
+    if job.target_name:
+        worker_metadata["target_name"] = job.target_name
+    if job.scanner:
+        worker_metadata["scanner"] = job.scanner
     extra_metadata = {k: v for k, v in job.metadata.items() if k != "scan_id"} if job.metadata else {}
     if extra_metadata:
         worker_metadata["job_metadata"] = extra_metadata
@@ -577,6 +704,16 @@ def notify_failure(job: NucleiJob, config: WorkerConfig, reason: str, session: O
         "templates": job.templates,
         "tags": job.tags,
     }
+    if job.template_profile:
+        worker_metadata["template_profile"] = job.template_profile
+    if job.parameters:
+        worker_metadata["parameters"] = job.parameters
+    if job.target_id:
+        worker_metadata["target_id"] = job.target_id
+    if job.target_name:
+        worker_metadata["target_name"] = job.target_name
+    if job.scanner:
+        worker_metadata["scanner"] = job.scanner
       
     extra_metadata = {k: v for k, v in job.metadata.items() if k != "scan_id"} if job.metadata else {}
     if extra_metadata:

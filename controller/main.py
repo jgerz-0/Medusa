@@ -10,7 +10,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
@@ -87,6 +87,132 @@ DEFAULT_ADMIN_ROLES = [
 ]
 
 CALLBACK_TOKEN_HEADER = "X-Callback-Token"
+
+# Hardened nuclei configuration shared with workers.  Templates are pinned to
+# known-good nuclei definitions to avoid arbitrary execution of user-supplied
+# YAML.  Profiles may only reference templates within the approved prefixes and
+# default to a conservative "baseline" crawl.
+NUCLEI_BASELINE_TEMPLATES: Tuple[str, ...] = (
+    "http/exposures/configs/phpinfo-detect.yaml",
+    "http/exposed-panels/jenkins-login.yaml",
+    "network/dns/dns-zone-transfer.yaml",
+)
+
+NUCLEI_TEMPLATE_PROFILES: Dict[str, Tuple[str, ...]] = {
+    "baseline": NUCLEI_BASELINE_TEMPLATES,
+    "full": NUCLEI_BASELINE_TEMPLATES
+    + (
+        "http/cves/2023/CVE-2023-34362.yaml",
+        "http/cves/2023/CVE-2023-50164.yaml",
+        "network/exposed-services/ssh/weak-ciphers.yaml",
+    ),
+}
+
+DEFAULT_NUCLEI_TEMPLATE_PROFILE = "baseline"
+
+ALLOWED_NUCLEI_TEMPLATE_PREFIXES: Tuple[str, ...] = (
+    "cves/",
+    "http/",
+    "network/",
+    "dns/",
+    "ssl/",
+    "tcp/",
+    "udp/",
+)
+
+
+def _normalize_profile(requested_profile: Any) -> str:
+    if isinstance(requested_profile, str):
+        candidate = requested_profile.strip().lower()
+        if candidate in NUCLEI_TEMPLATE_PROFILES:
+            return candidate
+    return DEFAULT_NUCLEI_TEMPLATE_PROFILE
+
+
+def _sanitize_template_name(candidate: Any) -> Optional[str]:
+    if not isinstance(candidate, str):
+        return None
+    value = candidate.strip()
+    if not value:
+        return None
+    lowered = value.lower()
+    if ".." in lowered or lowered.startswith(("/", "\\")):
+        return None
+    if not any(lowered.startswith(prefix) for prefix in ALLOWED_NUCLEI_TEMPLATE_PREFIXES):
+        return None
+    return value
+
+
+def _sanitize_tags(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    normalized = []
+    for item in value:
+        if isinstance(item, str):
+            tag = item.strip().lower()
+            if tag:
+                normalized.append(tag)
+    return sorted(dict.fromkeys(normalized))
+
+
+def _merge_templates(
+    base_templates: Iterable[str], additional_templates: Iterable[str]
+) -> List[str]:
+    seen: set[str] = set()
+    merged: List[str] = []
+    for template in base_templates:
+        if template not in seen:
+            merged.append(template)
+            seen.add(template)
+    for template in additional_templates:
+        if template not in seen:
+            merged.append(template)
+            seen.add(template)
+    return merged
+
+
+def resolve_nuclei_job_configuration(
+    parameters: Optional[Dict[str, Any]]
+) -> Tuple[str, List[str], List[str], Dict[str, Any]]:
+    """Return a hardened nuclei profile, template list, tags, and parameters."""
+
+    raw_parameters: Dict[str, Any] = dict(parameters or {})
+
+    profile = _normalize_profile(raw_parameters.get("profile"))
+    base_templates = NUCLEI_TEMPLATE_PROFILES[profile]
+
+    requested_templates: List[str] = []
+    for key in ("extra_templates", "templates"):
+        value = raw_parameters.get(key)
+        if isinstance(value, list):
+            for item in value:
+                sanitized = _sanitize_template_name(item)
+                if sanitized:
+                    requested_templates.append(sanitized)
+
+    sanitized_requested = sorted(dict.fromkeys(requested_templates))
+    templates = _merge_templates(base_templates, sanitized_requested)
+
+    user_tags = _sanitize_tags(raw_parameters.get("tags"))
+    tags = sorted({*user_tags, f"profile:{profile}"})
+
+    sanitized_parameters: Dict[str, Any] = {"profile": profile}
+    if sanitized_requested:
+        sanitized_parameters["requested_templates"] = sanitized_requested
+    if user_tags:
+        sanitized_parameters["tags"] = user_tags
+
+    rate_limit = raw_parameters.get("rate_limit")
+    if isinstance(rate_limit, (int, float)):
+        sanitized_parameters["rate_limit"] = str(rate_limit)
+    elif isinstance(rate_limit, str) and rate_limit.strip():
+        sanitized_parameters["rate_limit"] = rate_limit.strip()
+
+    severity = raw_parameters.get("severity")
+    if isinstance(severity, str) and severity.strip():
+        sanitized_parameters["severity"] = severity.strip().lower()
+
+    return profile, templates, tags, sanitized_parameters
 
 class Settings(BaseSettings):
     """Runtime configuration for the controller service."""
@@ -1036,7 +1162,8 @@ def list_targets(
 
 @app.post("/scan", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED)
 def enqueue_scan(
-    request: ScanRequest,
+    scan_request: ScanRequest,
+    http_request: Request,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
     queue: QueueClient = Depends(get_queue_client),
@@ -1050,7 +1177,7 @@ def enqueue_scan(
         resource_id="/scan",
     )
 
-    target = db.get(Target, request.target_id)
+    target = db.get(Target, scan_request.target_id)
     if target is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Target not found"
@@ -1062,23 +1189,50 @@ def enqueue_scan(
             detail="Target is currently outside the authorized scope",
         )
 
+    profile, templates, tags, sanitized_parameters = resolve_nuclei_job_configuration(
+        scan_request.parameters
+    )
+
     scan = Scan(
         target_id=target.id,
-        scanner=request.scanner,
-        parameters=request.parameters,
+        scanner=scan_request.scanner,
+        parameters=sanitized_parameters,
         initiated_by=principal.subject,
     )
     db.add(scan)
     db.commit()
     db.refresh(scan)
 
+    submitted_at = datetime.now(tz=timezone.utc)
+    callback_url = str(http_request.url_for("nuclei_callback"))
+    job_id = str(uuid.uuid4())
+
     job_payload = {
-        "scan_id": scan.id,
-        "target_id": target.id,
+        "job_id": job_id,
+        "scan_id": str(scan.id),
+        "target": target.scope,
+        "target_id": str(target.id),
+        "target_name": target.name,
         "scanner": scan.scanner,
-        "parameters": scan.parameters,
+        "templates": templates,
+        "template_profile": profile,
+        "parameters": sanitized_parameters,
+        "callback_url": callback_url,
+        "attempts": 0,
+        "tags": tags,
         "initiated_by": principal.subject,
-        "submitted_at": datetime.now(tz=timezone.utc).isoformat(),
+        "submitted_at": submitted_at.isoformat(),
+        "metadata": {
+            "scan_id": str(scan.id),
+            "target_id": str(target.id),
+            "target_scope": target.scope,
+            "target_name": target.name,
+            "initiated_by": principal.subject,
+            "submitted_at": submitted_at.isoformat(),
+            "template_profile": profile,
+            "controller_callback_url": callback_url,
+            "parameters": sanitized_parameters,
+        },
     }
     queue.enqueue(settings.nuclei_queue_channel, job_payload)
 
@@ -1089,7 +1243,12 @@ def enqueue_scan(
         resource_type="scan",
         resource_id=scan.id,
         scan_id=scan.id,
-        metadata={"target_id": target.id, "scanner": scan.scanner},
+        metadata={
+            "target_id": target.id,
+            "scanner": scan.scanner,
+            "job_id": job_id,
+            "template_profile": profile,
+        },
     )
 
     return serialize_scan(scan)
