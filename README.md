@@ -100,6 +100,12 @@ These commands run entirely on the host using SQLite so you can iterate without 
 | API Deep Dive | `api-deep-dive` | `api.medusa.local` | Authenticated API sweeps with throttled rates. |
 | External Attack Surface | `external-attack-surface` | `www.medusa.local`, `portal.medusa.local` | Weekly external perimeter checks targeting high-signal templates. |
 
+Controller presets map directly to curated nuclei template bundles:
+
+- `web-baseline` executes hardened configuration, panel, and DNS transfer checks (`phpinfo-detect`, `jenkins-login`, `dns-zone-transfer`).
+- `api-deep-dive` layers in API documentation exposures to catch leaky Postman portals and Swagger consoles before authenticated sweeps.
+- `external-attack-surface` extends the baseline with high-signal CVE probes and weak SSH cipher enumeration for weekly perimeter sweeps.
+
 Status banners track optimistic queueing (`Queueing…`), success acknowledgements, and controller validation failures so analysts can move quickly without sacrificing auditability.
 
 ### Manage database migrations

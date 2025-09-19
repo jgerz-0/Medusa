@@ -111,17 +111,34 @@ NUCLEI_BASELINE_TEMPLATES: Tuple[str, ...] = (
     "network/dns/dns-zone-transfer.yaml",
 )
 
-NUCLEI_TEMPLATE_PROFILES: Dict[str, Tuple[str, ...]] = {
-    "baseline": NUCLEI_BASELINE_TEMPLATES,
-    "full": NUCLEI_BASELINE_TEMPLATES
+# Profiles expand the baseline with curated nuclei templates to keep behavior
+# deterministic.  Names align with the frontend presets so analysts can audit
+# exactly which template families execute for each queue request.
+NUCLEI_WEB_BASELINE_TEMPLATES: Tuple[str, ...] = NUCLEI_BASELINE_TEMPLATES
+
+NUCLEI_API_DEEP_DIVE_TEMPLATES: Tuple[str, ...] = NUCLEI_WEB_BASELINE_TEMPLATES + (
+    "http/exposed-panels/swagger-ui.yaml",
+    "http/exposures/apis/postman-documenter.yaml",
+)
+
+NUCLEI_EXTERNAL_ATTACK_SURFACE_TEMPLATES: Tuple[str, ...] = (
+    NUCLEI_WEB_BASELINE_TEMPLATES
     + (
         "http/cves/2023/CVE-2023-34362.yaml",
         "http/cves/2023/CVE-2023-50164.yaml",
         "network/exposed-services/ssh/weak-ciphers.yaml",
-    ),
+    )
+)
+
+NUCLEI_TEMPLATE_PROFILES: Dict[str, Tuple[str, ...]] = {
+    "baseline": NUCLEI_BASELINE_TEMPLATES,
+    "web-baseline": NUCLEI_WEB_BASELINE_TEMPLATES,
+    "api-deep-dive": NUCLEI_API_DEEP_DIVE_TEMPLATES,
+    "external-attack-surface": NUCLEI_EXTERNAL_ATTACK_SURFACE_TEMPLATES,
+    "full": NUCLEI_EXTERNAL_ATTACK_SURFACE_TEMPLATES,
 }
 
-DEFAULT_NUCLEI_TEMPLATE_PROFILE = "baseline"
+DEFAULT_NUCLEI_TEMPLATE_PROFILE = "web-baseline"
 
 ALLOWED_NUCLEI_TEMPLATE_PREFIXES: Tuple[str, ...] = (
     "cves/",
