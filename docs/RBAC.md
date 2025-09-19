@@ -64,8 +64,10 @@ requirement.
 - `GET /audit-log` – requires `admin`. This route exposes sensitive telemetry
   about every privileged operation and must stay locked down.
 
-Each RBAC decision is recorded via the audit logging pipeline, enabling
-post-incident review of every permitted or denied operation.
+Each RBAC decision—successful authorizations and explicit denials—is recorded
+via the audit logging pipeline. This ensures post-incident review includes both
+the sensitive operations that executed and the attempts that were blocked for
+missing roles or revoked credentials.
 
 ## Audit Log Access Workflow
 

@@ -270,6 +270,92 @@ def test_finding_contracts(
         assert any(entry.action == "get_finding" for entry in audit_entries)
 
 
+def test_rbac_denial_is_audited(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    analyst_key = "analyst-denied"
+    with session_factory() as session:
+        session.add(
+            PrincipalCredential(
+                subject="analyst-denied",
+                auth_method="api_key",
+                key_hash=_hash_secret(analyst_key),
+                roles=list(DEFAULT_ANALYST_ROLES),
+            )
+        )
+        session.commit()
+
+    with session_factory() as session:
+        before = session.query(AuditLog).count()
+
+    response = client.get("/principals", headers={"X-API-Key": analyst_key})
+    assert response.status_code == 403
+
+    with session_factory() as session:
+        after = session.query(AuditLog).count()
+        assert after == before + 1
+        entry = (
+            session.query(AuditLog)
+            .filter(AuditLog.actor == "analyst-denied")
+            .order_by(AuditLog.created_at.desc())
+            .first()
+        )
+
+    assert entry is not None
+    assert entry.action == "access_denied"
+    snapshot = entry.evidence_snapshot
+    assert snapshot["reason"] == "missing_required_roles"
+    assert snapshot["required_roles"] == ["admin"]
+    assert snapshot["missing_roles"] == ["admin"]
+    assert snapshot["granted_roles"] == sorted(set(DEFAULT_ANALYST_ROLES))
+    assert snapshot["auth_method"] == "api_key"
+
+
+def test_revoked_api_key_denial_is_audited(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    revoked_key = "revoked-key"
+    now = datetime.now(tz=timezone.utc)
+    with session_factory() as session:
+        credential = PrincipalCredential(
+            subject="revoked-user",
+            auth_method="api_key",
+            key_hash=_hash_secret(revoked_key),
+            roles=list(DEFAULT_ANALYST_ROLES),
+            revoked_at=now,
+        )
+        session.add(credential)
+        session.commit()
+
+    with session_factory() as session:
+        before = session.query(AuditLog).count()
+
+    response = client.get("/targets", headers={"X-API-Key": revoked_key})
+    assert response.status_code == 403
+
+    with session_factory() as session:
+        after = session.query(AuditLog).count()
+        assert after == before + 1
+        entry = (
+            session.query(AuditLog)
+            .filter(AuditLog.actor == "revoked-user")
+            .order_by(AuditLog.created_at.desc())
+            .first()
+        )
+
+    assert entry is not None
+    assert entry.action == "access_denied"
+    snapshot = entry.evidence_snapshot
+    assert snapshot["reason"] == "credential_revoked"
+    assert snapshot["required_roles"] == []
+    assert snapshot["granted_roles"] == sorted(set(DEFAULT_ANALYST_ROLES))
+    assert snapshot["auth_method"] == "api_key"
+    assert snapshot["credential_status"] == "revoked"
+
 def test_targets_listing_requires_read_role(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
