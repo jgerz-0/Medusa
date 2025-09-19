@@ -26,13 +26,49 @@ export class ControllerError extends Error {
   }
 }
 
+const validationFieldAliases: Record<string, string> = {
+  target_id: 'targetId',
+  'parameters.profile': 'profile',
+  'parameters.requested_hosts': 'requestedHosts'
+};
+
+function normalizeValidationField(field: string): string {
+  if (!field) {
+    return field;
+  }
+
+  for (const [rawField, normalizedField] of Object.entries(validationFieldAliases)) {
+    if (field === rawField) {
+      return normalizedField;
+    }
+
+    if (field.startsWith(`${rawField}.`)) {
+      return `${normalizedField}${field.slice(rawField.length)}`;
+    }
+  }
+
+  const segments = field.split('.');
+  const normalizedSegments = segments.map((segment) => {
+    if (!segment.includes('_')) {
+      return segment;
+    }
+
+    return segment.replace(/_([a-z])/g, (_, character: string) => character.toUpperCase());
+  });
+
+  return normalizedSegments.join('.');
+}
+
 export class ControllerValidationError extends ControllerError {
   issues: ValidationIssue[];
 
   constructor(message: string, status: number, issues: ValidationIssue[], details?: unknown) {
     super(message, status, details);
     this.name = 'ControllerValidationError';
-    this.issues = issues;
+    this.issues = issues.map((issue) => ({
+      ...issue,
+      field: normalizeValidationField(issue.field)
+    }));
   }
 }
 
@@ -79,7 +115,7 @@ function parseIssues(detail: unknown): ValidationIssue[] {
           .filter((segment) => typeof segment === 'string' && segment !== 'body')
           .join('.');
         if (path) {
-          field = path;
+          field = normalizeValidationField(path);
         }
       }
 
