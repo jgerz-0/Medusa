@@ -75,6 +75,118 @@ class HttpVerificationStep:
 
 
 @dataclass
+@dataclass
+class ValidationJob:
+    """Legacy validation job model kept for backwards compatibility with unit tests."""
+
+    job_id: str
+    finding_id: str
+    scan_id: str
+    severity: str
+    callback_url: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.job_id = str(self.job_id or "").strip()
+        self.finding_id = str(self.finding_id or "").strip()
+        self.scan_id = str(self.scan_id or "").strip()
+        self.severity = str(self.severity or "info").strip().lower()
+        self.callback_url = str(self.callback_url or "").strip()
+        if not self.job_id or not self.finding_id or not self.scan_id:
+            raise FatalJobError("Validation job missing required identifiers")
+        if not self.callback_url:
+            raise FatalJobError("Validation job missing callback URL")
+
+        if not isinstance(self.metadata, dict):
+            raise FatalJobError("Validation job metadata must be a JSON object")
+        if not isinstance(self.evidence, dict):
+            raise FatalJobError("Validation job evidence must be a JSON object")
+
+    @classmethod
+    def from_json(cls, payload: str) -> "ValidationJob":
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as exc:  # pragma: no cover - invalid payload guard
+            raise FatalJobError(f"Invalid validation job payload: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise FatalJobError("Validation job payload must be a JSON object")
+
+        return cls(
+            job_id=data.get("job_id"),
+            finding_id=data.get("finding_id"),
+            scan_id=data.get("scan_id"),
+            severity=data.get("severity", "info"),
+            callback_url=data.get("callback_url"),
+            metadata=data.get("metadata") or {},
+            evidence=data.get("evidence") or {},
+        )
+
+
+def _evaluate_job(job: ValidationJob) -> Dict[str, str]:
+    """Evaluate a legacy validation job using deterministic metadata checks."""
+
+    expected = job.metadata.get("expected_status")
+    observed = job.metadata.get("observed_status")
+
+    status = "passed"
+    notes: list[str] = []
+    if expected is not None and observed is not None and expected != observed:
+        status = "failed"
+        notes.append(f"Observed status {observed} did not match expected {expected}")
+
+    if not job.evidence:
+        notes.append("No evidence provided for validation")
+
+    if not notes:
+        notes.append("Validation checks passed")
+
+    return {"status": status, "notes": "; ".join(notes)}
+
+
+def process_job(
+    job: ValidationJob,
+    config: WorkerConfig,
+    *,
+    http_session: Optional[Session] = None,
+) -> Dict[str, Any]:
+    """Dispatch legacy validation results to the controller callback endpoint."""
+
+    if http_session is None:
+        if requests is None:  # pragma: no cover - runtime guard
+            raise RuntimeError("requests is required to process validation jobs")
+        http_session = requests.Session()
+
+    result = _evaluate_job(job)
+    executed_at = datetime.now(timezone.utc)
+    payload: Dict[str, Any] = {
+        "job_id": job.job_id,
+        "finding_id": job.finding_id,
+        "scan_id": job.scan_id,
+        "status": result["status"],
+        "notes": result["notes"],
+        "severity": job.severity,
+        "metadata": job.metadata,
+        "evidence": job.evidence,
+        "executed_at": executed_at.isoformat(),
+    }
+
+    headers: Dict[str, str] = {}
+    if config.callback_token:
+        headers["X-Callback-Token"] = config.callback_token
+
+    response = http_session.post(
+        job.callback_url,
+        json=payload,
+        headers=headers,
+        timeout=15,
+    )
+    response.raise_for_status()
+    return payload
+
+
+@dataclass
 class ValidatorJob:
     """Incoming validator job payload."""
 

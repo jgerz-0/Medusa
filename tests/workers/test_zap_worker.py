@@ -30,7 +30,6 @@ def test_zap_worker_config_defaults(monkeypatch):
         nuclei_callback_token="nuclei-token",
         zap_callback_token="zap-token",
         sqlmap_callback_token="sqlmap-token",
-        validator_callback_token="validator-token",
         enrichment_callback_token="enrichment-token",
         validator_callback_token="validator-secret",
         binary_static_analysis_callback_token="static-secret",
