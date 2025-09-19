@@ -102,6 +102,99 @@ variable "helm_repository_password" {
   sensitive   = true
 }
 
+variable "medusa_secret_strategy" {
+  description = "Secret delivery strategy for the Medusa Helm release (inline or externalSecret)."
+  type        = string
+  default     = "inline"
+
+  validation {
+    condition     = contains(["inline", "externalSecret"], var.medusa_secret_strategy)
+    error_message = "medusa_secret_strategy must be either 'inline' or 'externalSecret'."
+  }
+}
+
+variable "medusa_secret_name" {
+  description = "Name of the Kubernetes secret referenced by the Medusa chart."
+  type        = string
+  default     = "medusa-secrets"
+}
+
+variable "medusa_manage_inline_secret" {
+  description = "Allow Terraform to create the inline secret instead of Helm when using inline strategy."
+  type        = bool
+  default     = false
+}
+
+variable "medusa_manage_external_secret" {
+  description = "Allow Terraform to create the ExternalSecret manifest when using externalSecret strategy."
+  type        = bool
+  default     = false
+}
+
+variable "medusa_inline_secret_overrides" {
+  description = "Additional key/value pairs merged into the Medusa inline secret."
+  type        = map(string)
+  default     = {}
+}
+
+variable "medusa_external_secret_configuration" {
+  description = "ExternalSecret configuration passed to the Medusa module when using externalSecret strategy."
+  type = object({
+    secret_store_kind = string
+    secret_store_name = string
+    refresh_interval  = optional(string)
+    data = optional(list(object({
+      secretKey = string
+      remoteRef = map(string)
+    })))
+  })
+  default = null
+
+  validation {
+    condition     = var.medusa_secret_strategy != "externalSecret" || var.medusa_external_secret_configuration != null
+    error_message = "medusa_external_secret_configuration must be provided when medusa_secret_strategy is 'externalSecret'."
+  }
+}
+
+variable "medusa_controller_additional_env" {
+  description = "Additional environment variables injected into the Medusa controller deployment."
+  type = list(object({
+    name  = string
+    value = string
+  }))
+  default = []
+}
+
+variable "medusa_extra_values" {
+  description = "Extra Helm value documents appended to the Medusa release."
+  type        = list(any)
+  default     = []
+}
+
+variable "medusa_bucket_overrides" {
+  description = "Optional overrides for Medusa bucket mappings (artifact, fuzzing, metadata)."
+  type        = map(string)
+  default     = {}
+}
+
+variable "medusa_additional_labels" {
+  description = "Extra Kubernetes labels merged into Medusa-managed resources."
+  type        = map(string)
+  default     = {}
+}
+
+variable "medusa_render_operator_kubeconfig" {
+  description = "Render a kubeconfig snippet for the Medusa cluster in module outputs."
+  type        = bool
+  default     = false
+}
+
+variable "medusa_helm_timeout_seconds" {
+  description = "Timeout (in seconds) for the Medusa Helm release operations."
+  type        = number
+  default     = 600
+}
+
 variable "vpc_cidr" {
   description = "Primary CIDR range used for the Medusa EKS VPC."
   type        = string
