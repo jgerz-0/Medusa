@@ -25,6 +25,13 @@ export function ScansTable({ scans }: { scans: Scan[] }) {
           )
         },
         {
+          key: 'scanner',
+          header: 'Scanner',
+          render: (scan) => (
+            <span className="font-mono text-xs uppercase tracking-wide text-gray-300">{scan.scanner}</span>
+          )
+        },
+        {
           key: 'status',
           header: 'Status',
           render: (scan) => <StatusBadge value={scan.status} />

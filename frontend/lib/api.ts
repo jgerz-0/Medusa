@@ -29,7 +29,14 @@ export class ControllerError extends Error {
 const validationFieldAliases: Record<string, string> = {
   target_id: 'targetId',
   'parameters.profile': 'profile',
-  'parameters.requested_hosts': 'requestedHosts'
+  'parameters.requested_hosts': 'requestedHosts',
+  'parameters.policy': 'policy',
+  'parameters.mode': 'mode',
+  'parameters.rate_limit': 'rateLimit',
+  'parameters.ajax_spider': 'ajaxSpider',
+  'parameters.level': 'level',
+  'parameters.risk': 'risk',
+  'parameters.request_delay': 'requestDelay'
 };
 
 function normalizeValidationField(field: string): string {
