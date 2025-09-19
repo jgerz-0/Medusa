@@ -42,6 +42,39 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
           render: (finding) => <StatusBadge value={finding.status} />
         },
         {
+          key: 'enrichment',
+          header: 'Enrichment',
+          render: (finding) => {
+            const latest = finding.enrichments?.[0];
+            if (!latest) {
+              return <span className="text-xs text-gray-500">Not enriched</span>;
+            }
+            const advisoryCount = latest.advisories?.length ?? 0;
+            const errorCount = Object.keys(latest.errors ?? {}).length;
+            const enrichmentSummary =
+              advisoryCount > 0
+                ? `${advisoryCount} advisory${advisoryCount === 1 ? '' : 'ies'}`
+                : errorCount > 0
+                  ? `${errorCount} error${errorCount === 1 ? '' : 's'}`
+                  : 'No advisories';
+            const timestamp = latest.generated_at ?? latest.recorded_at;
+            return (
+              <div className="flex flex-col">
+                <span
+                  className={`text-xs ${errorCount > 0 ? 'text-red-400' : 'text-gray-200'}`}
+                >
+                  {enrichmentSummary}
+                </span>
+                {timestamp ? (
+                  <span className="text-xs text-gray-500" title={timestamp}>
+                    {relativeTime(timestamp)}
+                  </span>
+                ) : null}
+              </div>
+            );
+          }
+        },
+        {
           key: 'detected_at',
           header: 'Detected',
           render: (finding) => (

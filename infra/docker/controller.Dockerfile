@@ -26,6 +26,7 @@ COPY controller/ ./
 
 # Provide a non-root user for local dev parity with hardened deployments.
 RUN useradd --create-home --shell /bin/bash medusa
+RUN mkdir -p /var/lib/medusa && chown medusa:medusa /var/lib/medusa
 USER medusa
 
 EXPOSE 8000

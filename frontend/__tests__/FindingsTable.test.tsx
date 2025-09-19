@@ -27,7 +27,29 @@ describe('FindingsTable', () => {
         template_id: 'nuclei-tls-expired',
         detected_at: '2024-02-01T10:00:00Z',
         updated_at: '2024-02-01T11:30:00Z',
-        evidence: 'certificate expired 12 hours ago'
+        evidence: 'certificate expired 12 hours ago',
+        enrichments: [
+          {
+            id: 'enrichment-1',
+            job_id: 'job-1',
+            generated_at: '2024-02-01T09:55:00Z',
+            recorded_at: '2024-02-01T09:55:10Z',
+            advisories: [
+              {
+                source: 'nvd',
+                identifier: 'CVE-2024-1111',
+                references: [],
+                raw: {}
+              }
+            ],
+            advisories_hash: 'hash-a',
+            errors: {},
+            errors_hash: 'hash-b',
+            provenance: { worker_subject: 'worker:enrichment' },
+            provenance_hash: 'hash-c',
+            payload_hash: 'hash-d'
+          }
+        ]
       },
       {
         id: 'finding-002',
@@ -39,7 +61,8 @@ describe('FindingsTable', () => {
         status: 'acknowledged',
         template_id: 'nuclei-dir-listing',
         detected_at: '2024-01-31T16:00:00Z',
-        updated_at: '2024-01-31T18:00:00Z'
+        updated_at: '2024-01-31T18:00:00Z',
+        enrichments: []
       }
     ];
 
@@ -48,6 +71,8 @@ describe('FindingsTable', () => {
     expect(screen.getAllByTestId(/status-/i)).toHaveLength(4);
     expect(screen.getByText('TLS certificate expired')).toBeVisible();
     expect(screen.getByText('Directory listing enabled')).toBeVisible();
-    expect(screen.getAllByText(/ago$/i)).toHaveLength(4);
+    expect(screen.getAllByText(/ago$/i)).toHaveLength(5);
+    expect(screen.getByText('1 advisory')).toBeVisible();
+    expect(screen.getByText('Not enriched')).toBeVisible();
   });
 });

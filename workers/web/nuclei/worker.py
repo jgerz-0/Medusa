@@ -83,8 +83,12 @@ class WorkerConfig:
     """Runtime configuration pulled from environment variables."""
 
     redis_url: str = field(default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-    queue_key: str = field(default_factory=lambda: os.getenv("NUCLEI_QUEUE_KEY", "queue:web:nuclei"))
-    dead_letter_key: str = field(default_factory=lambda: os.getenv("NUCLEI_DEAD_LETTER_KEY", "queue:web:nuclei:dead"))
+    queue_key: str = field(
+        default_factory=lambda: os.getenv("NUCLEI_QUEUE_KEY", "queues:nuclei:jobs")
+    )
+    dead_letter_key: str = field(
+        default_factory=lambda: os.getenv("NUCLEI_DEAD_LETTER_KEY", "queues:nuclei:dead")
+    )
     max_retries: int = field(default_factory=lambda: int(os.getenv("NUCLEI_MAX_RETRIES", "3")))
     poll_timeout: int = field(default_factory=lambda: int(os.getenv("NUCLEI_POLL_TIMEOUT", "5")))
     nuclei_binary: str = field(default_factory=lambda: os.getenv("NUCLEI_BINARY", "nuclei"))
@@ -113,12 +117,11 @@ class NucleiJob:
     job_id: str
     target: str
     templates: List[str]
-    scan_id: int
+    scan_id: str
     callback_url: str
     attempts: int = 0
     tags: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    scan_id: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -128,12 +131,14 @@ class NucleiJob:
         except json.JSONDecodeError as exc:  # pragma: no cover - defensive.
             raise FatalJobError(f"Invalid job payload: {exc}") from exc
 
+        if not isinstance(data, dict):
+            raise FatalJobError("Job payload must be a JSON object")
+
         job_id = data.get("job_id")
         target = data.get("target")
         callback_url = data.get("callback_url")
         templates = data.get("templates")
-        metadata = data.get("metadata") or {}
-        scan_id_raw = data.get("scan_id", metadata.get("scan_id"))
+        metadata_payload = data.get("metadata") or {}
         if not job_id or not isinstance(job_id, str):
             raise FatalJobError("Job payload missing 'job_id'")
         if not target or not isinstance(target, str):
@@ -144,30 +149,37 @@ class NucleiJob:
             templates = [templates]
         if not templates or not isinstance(templates, list):
             raise FatalJobError("Job payload missing nuclei templates")
-        if scan_id_raw is None:
+        normalized_templates = [str(t) for t in templates]
+        if not isinstance(metadata_payload, dict):
+            raise FatalJobError("Job metadata must be a JSON object")
+        scan_id_value = data.get("scan_id")
+        if scan_id_value is None:
+            scan_id_value = metadata_payload.get("scan_id")
+        if scan_id_value is None:
             raise FatalJobError("Job payload missing 'scan_id'")
-        try:
-            scan_id = int(scan_id_raw)
-        except (TypeError, ValueError) as exc:
-            raise FatalJobError("Job payload contains invalid 'scan_id'") from exc
+        if isinstance(scan_id_value, (dict, list)):
+            raise FatalJobError("Job payload contains invalid 'scan_id'")
+        scan_id = str(scan_id_value).strip()
+        if not scan_id:
+            raise FatalJobError("Job payload contains invalid 'scan_id'")
 
         attempts = int(data.get("attempts", 0))
         tags = data.get("tags") or []
         metadata_payload = data.get("metadata") or {}
         if not isinstance(metadata_payload, dict):
             raise FatalJobError("Job metadata must be a JSON object")
-        scan_id = data.get("scan_id") or metadata_payload.get("scan_id")
+        scan_id_value = data.get("scan_id") or metadata_payload.get("scan_id")
+        scan_id_str = str(scan_id_value) if scan_id_value is not None else None
 
         return cls(
             job_id=job_id,
             target=target,
             templates=[str(t) for t in templates],
-            scan_id=scan_id,
+            scan_id=scan_id_str,
             callback_url=callback_url,
             attempts=attempts,
-            tags=[str(tag) for tag in tags],
+            tags=tags,
             metadata=metadata_payload,
-            scan_id=str(scan_id) if scan_id else None,
             raw=data,
         )
 
@@ -348,7 +360,7 @@ def _coerce_tags(value: Any) -> List[str]:
 
 def _coerce_cve(info: Dict[str, Any]) -> Optional[str]:
     candidates: List[str] = []
-    for key in ("cve", "cveID", "cveId"):
+    for key in ("cve", "cveID", "cveId", "cve-id"):
         value = info.get(key)
         if isinstance(value, str):
             return value
@@ -363,74 +375,69 @@ def _coerce_cve(info: Dict[str, Any]) -> Optional[str]:
 def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> List[Dict[str, Any]]:
     """Convert nuclei JSON records into the controller callback schema."""
 
-    severity_map = {"critical", "high", "medium", "low", "info"}
+    allowed_severities = {"critical", "high", "medium", "low", "info"}
     findings: List[Dict[str, Any]] = []
-    for record in records:
+    for index, record in enumerate(records):
         info = record.get("info") or {}
         template_id = record.get("templateID") or record.get("template-id")
+
         severity = str(info.get("severity") or "info").lower()
-        title = info.get("name") or template_id or f"nuclei finding for {job.target}"
-        description = info.get("description") or f"Template {template_id or title} matched {job.target}."
-        info_tags = _coerce_tags(info.get("tags"))
-        combined_tags = sorted({*job.tags, *info_tags})
+        if severity not in allowed_severities:
+            severity = "info"
+
+        title_value = info.get("name") or template_id or f"nuclei finding for {job.target}"
+        title = str(title_value)
+
         description_value = info.get("description")
-        description = str(description_value).strip() if description_value else ""
+        if isinstance(description_value, str):
+            description = description_value.strip()
+        else:
+            description = ""
         if not description:
             description = (
                 f"Nuclei template {template_id or 'unknown'} reported a {severity} finding "
                 f"for job {job.job_id} targeting {job.target}."
             )
 
-        classification = info.get("classification") or {}
-        cve_id = (
-            classification.get("cve-id")
-            or classification.get("cveId")
-            or info.get("cve")
-            or record.get("cve")
-        )
-
-        evidence = {
+        evidence_source = {
             "matched_at": record.get("matched-at") or record.get("matchedAt"),
             "extracted_results": record.get("extracted-results")
-            or record.get("extractedResults")
-            or [],
+            or record.get("extractedResults"),
             "curl_command": record.get("curl-command") or record.get("curlCommand"),
             "matcher_name": record.get("matcher-name") or record.get("matcherName"),
             "timestamp": record.get("timestamp"),
             "ip": record.get("ip"),
             "port": record.get("port"),
         }
+        evidence = {k: v for k, v in evidence_source.items() if v}
 
-        metadata = {
+        info_tags = _coerce_tags(info.get("tags"))
+        combined_tags = sorted({*job.tags, *info_tags})
+        metadata_source = {
             "job_id": job.job_id,
             "template_id": template_id,
             "template_path": record.get("template-path") or record.get("templatePath"),
-            "matcher_name": record.get("matcher-name") or record.get("matcherName"),
-            "matched_at": evidence["matched_at"],
+            "matcher_name": evidence.get("matcher_name"),
+            "matched_at": evidence.get("matched_at"),
             "host": record.get("host"),
-            "tags": info.get("tags") or job.tags,
+            "tags": combined_tags,
         }
+        metadata = {k: v for k, v in metadata_source.items() if v}
 
-        artifact_payload = {
-            "name": f"nuclei-record-{index}",
-            "artifact_type": "nuclei-json",
-            "content_type": "application/json",
-            "data": json.dumps(record, sort_keys=True),
-            "metadata": {"template_id": template_id},
-        }
+        classification = info.get("classification") or {}
+        cve_id = (
+            _coerce_cve(classification)
+            or _coerce_cve(info)
+            or record.get("cve")
+        )
+        if isinstance(cve_id, list):
+            cve_id = next((str(item) for item in cve_id if item), None)
+        elif cve_id is not None:
+            cve_id = str(cve_id)
 
-        finding = {
-            "title": title,
-            "severity": severity,
-            "description": description,
-            "cve_id": cve_id,
-            "metadata": metadata,
-            "evidence": {k: v for k, v in evidence.items() if v},
-            "artifacts": [artifact_payload],
-        }
         findings.append(
             {
-                "title": str(title),
+                "title": title,
                 "severity": severity,
                 "description": str(description),
                 "cve_id": _coerce_cve(info),
@@ -497,9 +504,6 @@ def post_callback(
     if config.callback_token:
         headers["X-Callback-Token"] = config.callback_token
     try:
-        headers = {}
-        if config.callback_token:
-            headers["X-Callback-Token"] = config.callback_token
         response = session.post(
             job.callback_url,
             json=payload,
@@ -524,16 +528,19 @@ def process_job(
 ) -> None:
     """Execute a single job lifecycle."""
 
-    scan_id = job.scan_id or job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    scan_id = job.scan_id or (
+        job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    )
     if not scan_id:
         raise FatalJobError("Job payload missing 'scan_id' required for callback")
+    normalized_scan_id = str(scan_id)
 
     scan = run_scan(job, config)
     if scan.exit_code != 0:
         raise RetryableJobError(f"nuclei exited with code {scan.exit_code}")
 
     findings = normalize_findings(scan.records, job)
-    artifacts = upload_artifacts(scan, job, config, s3_client)
+    artifact_locations = upload_artifacts(scan, job, config, s3_client)
     worker_metadata: Dict[str, Any] = {
         "job_id": job.job_id,
         "target": job.target,
@@ -544,28 +551,26 @@ def process_job(
     extra_metadata = {k: v for k, v in job.metadata.items() if k != "scan_id"} if job.metadata else {}
     if extra_metadata:
         worker_metadata["job_metadata"] = extra_metadata
-    if artifacts:
-        worker_metadata["artifacts"] = artifacts
+    if artifact_locations:
+        worker_metadata["artifacts"] = artifact_locations
 
-    payload = {
-        "scan_id": scan_id,
-        "artifact_locations": artifact_locations,
-    }
     worker_metadata.update(job.metadata)
     payload = {
-        "scan_id": job.scan_id,
+        "scan_id": normalized_scan_id,
         "status": "completed",
         "findings": findings,
         "worker_metadata": worker_metadata,
         "error": None,
         "completed_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+    if artifact_locations:
+        payload["artifact_locations"] = artifact_locations
     post_callback(job, config, payload, session=session)
     LOG.info("Job %s completed successfully", job.job_id)
 
 
 def notify_failure(job: NucleiJob, config: WorkerConfig, reason: str, session: Optional[Session] = None) -> None:
-    scan_id = job.scan_id or job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    scan_id = job.scan_id
     if not scan_id:
         LOG.error("Cannot notify controller for job %s without scan_id", job.job_id)
         return

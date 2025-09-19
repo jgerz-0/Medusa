@@ -23,6 +23,8 @@ Phase 1 establishes the local development baseline that every later milestone bu
 
 Progress on these items should be tracked through issues mapped to the roadmap phases in `ROADMAP.md`.
 
+The Minimal Next.js UI now redirects the root route to `/scans`, exposes a `/scans` dashboard with manual nuclei launch controls, and provides a `/findings` view with filtering for severity, status, and scan context.
+
 ## Quickstart (Local Development)
 
 ### Prerequisites

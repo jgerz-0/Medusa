@@ -11,8 +11,8 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 - ✅ FastAPI controller exposing `/scan`, `/targets`, `/findings` endpoints with scope validation.
 - ✅ Redis-backed nuclei worker returning normalized JSON findings.
 - ✅ Postgres schema (targets, scans, findings, audit_log) and Alembic migrations.
-- ☐ Minimal Next.js dashboard listing scans, drill-down for findings, manual scan trigger.
-  - _Follow-up:_ Build authenticated `/scans` and `/findings` pages that call the controller APIs and wire up a manual scan action from the UI (coordinate with `frontend/README.md`).
+- ✅ Minimal Next.js dashboard listing scans, drill-down for findings, manual scan trigger.
+  - _Follow-up:_ Polish loading states, RBAC indicators, and pagination on `/scans` and `/findings` now that the manual nuclei launch flow is live.
 - ☐ Baseline RBAC model (admin vs. analyst), API key issuance, and audit logging.
   - _Follow-up:_ Extend the controller's auth layer with role checks and API key lifecycle management, then document rotation procedures in `docs/CONTRIBUTING.md`.
 
@@ -20,6 +20,7 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 
 ## Phase 2 – Enrichment (Weeks 3–4)
 - NVD + CIRCL CVE lookups with deterministic confidence scoring.
+- Controller `/enrich` endpoint queues CVE enrichment jobs onto a dedicated worker channel.
 - Qdrant vector ingestion of scanner fingerprints and advisories.
 - Enrichment Agent attaches CVE metadata, exploitability hints, and remediation summaries.
 - UI highlights enriched findings and displays provenance of enrichment data.

@@ -6,6 +6,8 @@ import hashlib
 import json
 import logging
 import secrets
+import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional
@@ -32,6 +34,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from controller.db.models import AuditLog, Finding, PrincipalCredential, Scan, Target
 from controller.db.session import SessionLocal
+from workers.enrichment.cve.schemas import CVEEnrichmentResult
 
 
 LOGGER = logging.getLogger("medusa.controller")
@@ -44,6 +47,7 @@ ROLE_SCANS_READ = "scans:read"
 ROLE_SCAN_ENQUEUE = "scan:enqueue"
 ROLE_TARGETS_READ = "targets:read"
 ROLE_TARGETS_WRITE = "targets:write"
+ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
 
 ALLOWED_ROLES = {
     ROLE_ADMIN,
@@ -53,6 +57,7 @@ ALLOWED_ROLES = {
     ROLE_SCAN_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
+    ROLE_ENRICHMENT_ENQUEUE,
 }
 
 DEFAULT_ANALYST_ROLES = [
@@ -61,6 +66,7 @@ DEFAULT_ANALYST_ROLES = [
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
     ROLE_TARGETS_READ,
+    ROLE_ENRICHMENT_ENQUEUE,
 ]
 
 DEFAULT_ADMIN_ROLES = [
@@ -70,8 +76,10 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_SCAN_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
+    ROLE_ENRICHMENT_ENQUEUE,
 ]
 
+CALLBACK_TOKEN_HEADER = "X-Callback-Token"
 
 class Settings(BaseSettings):
     """Runtime configuration for the controller service."""
@@ -94,8 +102,15 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Static API keys for service accounts granted admin roles by default.",
     )
+    cve_enrichment_queue_channel: str = Field(
+        "queues:enrichment:cve",
+        description="Redis list channel for CVE enrichment jobs.",
+    )
     nuclei_callback_token: str = Field(
         ..., description="Shared secret token required for nuclei worker callbacks."
+    )
+    enrichment_callback_token: str = Field(
+        ..., description="Shared secret required for enrichment worker callbacks."
     )
 
     model_config = ConfigDict(env_prefix="MEDUSA_", case_sensitive=False)
@@ -107,7 +122,6 @@ def get_settings() -> Settings:
 
     return Settings()
 
-
 security_scheme = HTTPBearer(auto_error=False)
 
 
@@ -118,11 +132,97 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {}
     return payload
 
+Network = Union[IPv4Network, IPv6Network]
+
+security_scheme = HTTPBearer(auto_error=False)
+
+def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ensure JSON payloads are deterministic dictionaries."""
+    
+def _normalize_hostname(value: str) -> str:
+    """Return a lowercase hostname without trailing dots or wildcard prefixes."""
+
+    normalized = value.strip().lower().rstrip(".")
+    if normalized.startswith("*."):
+        normalized = normalized[2:]
+    return normalized
+
+    if payload is None:
+        return {}
+    return payload
 
 def _hash_secret(secret: str) -> str:
     """Return a SHA-256 hash of the provided secret."""
 
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+def _scope_to_network(scope: str) -> Optional[Network]:
+    """Attempt to parse the target scope as an IP network."""
+
+    try:
+        return ip_network(scope, strict=False)
+    except ValueError:
+        return None
+
+
+def _coerce_requested_hosts(value: Any) -> List[str]:
+    """Normalize arbitrary iterables into a list of host strings."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray, dict)):
+        return [str(item) for item in value]
+    raise TypeError("requested_hosts must be an iterable of host strings")
+
+
+def _filter_hosts_for_scope(scope: str, requested_hosts: Iterable[str]) -> Tuple[List[str], List[str]]:
+    """Return hosts within scope alongside those rejected."""
+
+    network = _scope_to_network(scope)
+    normalized_scope = _normalize_hostname(scope) if network is None else ""
+
+    allowed: List[str] = []
+    rejected: List[str] = []
+    allowed_seen: set[str] = set()
+    rejected_seen: set[str] = set()
+
+    for raw in requested_hosts:
+        candidate = _normalize_hostname(str(raw))
+        if not candidate:
+            continue
+
+        if network is not None:
+            try:
+                ip_value = ip_address(candidate)
+            except ValueError:
+                if candidate not in rejected_seen:
+                    rejected.append(candidate)
+                    rejected_seen.add(candidate)
+                continue
+
+            canonical = str(ip_value)
+            if ip_value in network:
+                if canonical not in allowed_seen:
+                    allowed.append(canonical)
+                    allowed_seen.add(canonical)
+            else:
+                if canonical not in rejected_seen:
+                    rejected.append(canonical)
+                    rejected_seen.add(canonical)
+            continue
+
+        if candidate == normalized_scope or candidate.endswith(f".{normalized_scope}"):
+            if candidate not in allowed_seen:
+                allowed.append(candidate)
+                allowed_seen.add(candidate)
+        else:
+            if candidate not in rejected_seen:
+                rejected.append(candidate)
+                rejected_seen.add(candidate)
+
+    return allowed, rejected
 
 
 class TargetCreateRequest(BaseModel):
@@ -155,7 +255,7 @@ class TargetResponse(BaseModel):
 class TargetCollectionResponse(BaseModel):
     data: List[TargetResponse]
 
-
+      
 class ScanRequest(BaseModel):
     target_id: str
     scanner: str = Field(
@@ -186,6 +286,81 @@ class ScanCollectionResponse(BaseModel):
     data: List[ScanResponse]
 
 
+class AuditLogResponse(BaseModel):
+    id: str
+    actor: str
+    action: str
+    message: Optional[str]
+    scan_id: Optional[str]
+    finding_id: Optional[str]
+    evidence_snapshot: Dict[str, Any]
+    evidence_hash: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaginationMetadata(BaseModel):
+    total: int
+    limit: int
+    offset: int
+
+
+class AuditLogCollectionResponse(BaseModel):
+    data: List[AuditLogResponse]
+    meta: PaginationMetadata
+
+
+SUPPORTED_ENRICHMENT_SOURCES = {"nvd", "circl"}
+DEFAULT_ENRICHMENT_SOURCES = ["nvd", "circl"]
+
+
+class EnrichmentRequest(BaseModel):
+    finding_id: str = Field(
+        ..., description="Identifier of the finding requiring CVE enrichment"
+    )
+    sources: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_ENRICHMENT_SOURCES),
+        description="Deterministic advisory feeds to consult",
+    )
+
+    @field_validator("sources", mode="before")
+    @classmethod
+    def _normalize_sources(cls, value: Any) -> List[str]:
+        if value is None:
+            return list(DEFAULT_ENRICHMENT_SOURCES)
+        if isinstance(value, str):
+            value = [value]
+        normalized: List[str] = []
+        for source in value:
+            source_str = str(source).lower()
+            if source_str not in SUPPORTED_ENRICHMENT_SOURCES:
+                raise ValueError(f"Unsupported enrichment source: {source}")
+            if source_str not in normalized:
+                normalized.append(source_str)
+        return normalized
+
+
+class EnrichmentResponse(BaseModel):
+    job_id: str
+    finding_id: str
+    queued_at: datetime
+    sources: List[str] = Field(default_factory=list)
+
+
+class FindingEnrichmentSummary(BaseModel):
+    id: str
+    job_id: str
+    generated_at: datetime
+    recorded_at: datetime
+    advisories: List[Dict[str, Any]] = Field(default_factory=list)
+    advisories_hash: str
+    errors: Dict[str, str] = Field(default_factory=dict)
+    errors_hash: str
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+    provenance_hash: str
+    payload_hash: str
+      
 class FindingResponse(BaseModel):
     id: str
     scan_id: str
@@ -199,8 +374,7 @@ class FindingResponse(BaseModel):
     template_id: str
     evidence: Optional[str]
     remediation: Optional[str]
-
-    model_config = ConfigDict(from_attributes=True)
+    enrichments: List[FindingEnrichmentSummary] = Field(default_factory=list)
 
 
 class FindingCollectionResponse(BaseModel):
@@ -356,6 +530,20 @@ def get_db_session() -> Iterator[Session]:
 def get_queue_client(settings: Settings = Depends(get_settings)) -> QueueClient:
     return RedisQueueClient(settings.redis_url)
 
+def _authenticate_callback_worker(
+    request: Request,
+    *,
+    expected_token: str,
+    subject: str,
+) -> Principal:
+    token = request.headers.get(CALLBACK_TOKEN_HEADER)
+    if not token or not secrets.compare_digest(token, expected_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid callback token",
+        )
+    return Principal(subject=subject, auth_method="shared_secret")
+
 
 def authenticate(
     request: Request,
@@ -376,6 +564,46 @@ def authenticate(
             auth_method="api_key",
             roles=list(DEFAULT_ADMIN_ROLES),
         )
+        if active_credential:
+            roles = list(active_credential.roles or [])
+            return Principal(
+                subject=active_credential.subject,
+                auth_method="api_key",
+                roles=roles,
+            )
+
+        revoked_credential = (
+            db.query(PrincipalCredential)
+            .filter(
+                PrincipalCredential.auth_method == "api_key",
+                PrincipalCredential.key_hash == api_key_hash,
+                PrincipalCredential.revoked_at.isnot(None),
+            )
+            .first()
+        )
+        if revoked_credential:
+            LOGGER.warning(
+                "Rejected revoked API key",
+                extra={"subject": revoked_credential.subject},
+            )
+            revoked_principal = Principal(
+                subject=revoked_credential.subject,
+                auth_method="api_key",
+                roles=list(revoked_credential.roles or []),
+            )
+            log_access_denied(
+                db,
+                principal=revoked_principal,
+                required_roles=[],
+                resource_type="principal_credential",
+                resource_id=str(revoked_credential.id),
+                reason="credential_revoked",
+                detail="API key revoked",
+                extra_metadata={
+                    "credential_id": str(revoked_credential.id),
+                    "credential_status": "revoked",
+                },
+            )
 
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
@@ -418,17 +646,44 @@ def authenticate(
 def authenticate_worker(
     request: Request,
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
 ) -> Principal:
     """Authenticate nuclei worker callbacks using a shared secret header."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.nuclei_callback_token,
+        subject="worker:nuclei",
+    )
 
     token = request.headers.get("X-Callback-Token")
     if not token or token != settings.nuclei_callback_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid callback token"
+          
+        worker_principal = Principal(
+            subject="worker:nuclei",
+            auth_method="shared_secret",
+            roles=[],
+        )
+        log_access_denied(
+            db,
+            principal=worker_principal,
+            required_roles=[],
+            resource_type="worker_callback",
+            resource_id="nuclei",
+            reason="invalid_callback_token",
+            detail="Invalid callback token",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata={"token_provided": bool(token)},
         )
 
-    return Principal(subject="worker:nuclei", auth_method="shared_secret")
 
+def authenticate_enrichment_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> Principal:
+    """Authenticate enrichment worker callbacks using a dedicated shared secret."""
 
 def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
     if principal.has_role(ROLE_ADMIN):
@@ -437,6 +692,75 @@ def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Insufficient role for this operation",
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.enrichment_callback_token,
+        subject="worker:enrichment",
+    )
+
+
+def log_access_denied(
+    session: Session,
+    *,
+    principal: Principal,
+    required_roles: Iterable[str],
+    resource_type: str = "endpoint",
+    resource_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    detail: str = "Insufficient role for this operation",
+    status_code: int = status.HTTP_403_FORBIDDEN,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record an audit trail for denied access before raising an error."""
+
+    required_list = sorted({role for role in required_roles if role})
+    granted_list = sorted({role for role in principal.roles})
+    granted_set = set(granted_list)
+    missing_roles = [role for role in required_list if role not in granted_set]
+
+    metadata: Dict[str, Any] = {
+        "required_roles": required_list,
+        "granted_roles": granted_list,
+        "auth_method": principal.auth_method,
+    }
+    if missing_roles:
+        metadata["missing_roles"] = missing_roles
+    if reason:
+        metadata["reason"] = reason
+    if extra_metadata:
+        metadata.update(extra_metadata)
+
+    record_audit_event(
+        session,
+        actor=principal,
+        action="access_denied",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        metadata=metadata,
+    )
+
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+def enforce_roles(
+    principal: Principal,
+    required_roles: Iterable[str],
+    session: Session,
+    *,
+    resource_type: str = "endpoint",
+    resource_id: Optional[str] = None,
+) -> None:
+    normalized_roles = list(dict.fromkeys(required_roles))
+    if principal.has_role(ROLE_ADMIN):
+        return
+    if not principal.has_any_role(normalized_roles):
+        log_access_denied(
+            session,
+            principal=principal,
+            required_roles=normalized_roles,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            reason="missing_required_roles",
         )
 
 
@@ -506,7 +830,13 @@ def list_principals(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> PrincipalCredentialCollectionResponse:
-    enforce_roles(principal, ["admin"])
+    enforce_roles(
+        principal,
+        ["admin"],
+        db,
+        resource_type="endpoint",
+        resource_id="/principals",
+    )
     records = (
         db.query(PrincipalCredential)
         .order_by(PrincipalCredential.created_at.desc())
@@ -529,6 +859,75 @@ def list_principals(
     return PrincipalCredentialCollectionResponse(data=response_items)
 
 
+@app.get("/audit-log", response_model=AuditLogCollectionResponse)
+def list_audit_log(
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    scan_id: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> AuditLogCollectionResponse:
+    """Return audit log entries for administrative review."""
+
+    enforce_roles(
+        principal,
+        [ROLE_ADMIN],
+        db,
+        resource_type="endpoint",
+        resource_id="/audit-log",
+    )
+
+    query = db.query(AuditLog)
+    applied_filters: Dict[str, Any] = {}
+
+    if actor:
+        query = query.filter(AuditLog.actor == actor)
+        applied_filters["actor"] = actor
+    if action:
+        query = query.filter(AuditLog.action == action)
+        applied_filters["action"] = action
+    if scan_id:
+        query = query.filter(AuditLog.scan_id == scan_id)
+        applied_filters["scan_id"] = scan_id
+
+    total = query.count()
+    records = (
+        query.order_by(AuditLog.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    response_items = [
+        AuditLogResponse.model_validate(record, from_attributes=True)
+        for record in records
+    ]
+
+    metadata: Dict[str, Any] = {
+        "limit": limit,
+        "offset": offset,
+        "returned": len(response_items),
+    }
+    if applied_filters:
+        metadata["filters"] = applied_filters
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="list_audit_log",
+        resource_type="audit_log",
+        resource_id=None,
+        metadata=metadata,
+    )
+
+    return AuditLogCollectionResponse(
+        data=response_items,
+        meta=PaginationMetadata(total=total, limit=limit, offset=offset),
+    )
+
+
 @app.post(
     "/principals",
     response_model=PrincipalCredentialCreatedResponse,
@@ -539,11 +938,18 @@ def create_principal_credential(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> PrincipalCredentialCreatedResponse:
-    enforce_roles(principal, ["admin"])
+    enforce_roles(
+        principal,
+        ["admin"],
+        db,
+        resource_type="endpoint",
+        resource_id="/principals",
+    )
 
     existing = (
         db.query(PrincipalCredential)
         .filter(PrincipalCredential.subject == request.subject)
+        .filter(PrincipalCredential.revoked_at.is_(None))
         .first()
     )
     if existing:
@@ -612,7 +1018,13 @@ def revoke_principal_credential(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> PrincipalCredentialResponse:
-    enforce_roles(principal, ["admin"])
+    enforce_roles(
+        principal,
+        ["admin"],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/principals/{credential_id}/revoke",
+    )
 
     credential = db.get(PrincipalCredential, credential_id)
     if credential is None:
@@ -680,7 +1092,6 @@ def create_target(
 
     return TargetResponse.model_validate(target, from_attributes=True)
 
-
 @app.get("/targets", response_model=TargetCollectionResponse)
 def list_targets(
     principal: Principal = Depends(authenticate),
@@ -725,10 +1136,34 @@ def enqueue_scan(
             detail="Target is currently outside the authorized scope",
         )
 
+    sanitized_parameters = deepcopy(request.parameters)
+    rejected_hosts: List[str] = []
+    if "requested_hosts" in sanitized_parameters:
+        try:
+            requested_hosts = _coerce_requested_hosts(
+                sanitized_parameters["requested_hosts"]
+            )
+        except TypeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="parameters.requested_hosts must be an array of host strings",
+            ) from exc
+
+        allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
+            target.scope, requested_hosts
+        )
+        sanitized_parameters["requested_hosts"] = allowed_hosts
+
+        if requested_hosts and not allowed_hosts and rejected_hosts:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No requested hosts remain within the authorized target scope",
+            )
+
     scan = Scan(
         target_id=target.id,
         scanner=request.scanner,
-        parameters=request.parameters,
+        parameters=sanitized_parameters,
         initiated_by=principal.subject,
     )
     db.add(scan)
@@ -752,11 +1187,84 @@ def enqueue_scan(
         resource_type="scan",
         resource_id=scan.id,
         scan_id=scan.id,
-        metadata={"target_id": target.id, "scanner": scan.scanner},
+        metadata={
+            "target_id": target.id,
+            "scanner": scan.scanner,
+            **(
+                {
+                    "requested_hosts": sanitized_parameters.get("requested_hosts", []),
+                    **(
+                        {"rejected_hosts": rejected_hosts}
+                        if rejected_hosts
+                        else {}
+                    ),
+                }
+                if "requested_hosts" in sanitized_parameters
+                else {}
+            ),
+        },
     )
 
     return serialize_scan(scan)
 
+@app.post("/enrich", response_model=EnrichmentResponse, status_code=status.HTTP_202_ACCEPTED)
+def enqueue_enrichment(
+    request: EnrichmentRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
+) -> EnrichmentResponse:
+    """Queue a CVE enrichment job for the specified finding."""
+
+    enforce_roles(
+        principal,
+        [ROLE_ENRICHMENT_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/enrich",
+    )
+
+    finding = db.get(Finding, request.finding_id)
+    if finding is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Finding not found",
+        )
+
+    job_id = str(uuid.uuid4())
+    queued_at = datetime.now(tz=timezone.utc)
+    job_payload = {
+        "job_id": job_id,
+        "finding_id": finding.id,
+        "scan_id": finding.scan_id,
+        "cve_id": finding.cve_id,
+        "title": finding.title,
+        "severity": finding.severity,
+        "metadata": finding.metadata_json,
+        "sources": request.sources,
+        "requested_by": principal.subject,
+        "requested_at": queued_at.isoformat(),
+    }
+    queue.enqueue(settings.cve_enrichment_queue_channel, job_payload)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enqueue_enrichment",
+        resource_type="finding",
+        resource_id=finding.id,
+        scan_id=finding.scan_id,
+        finding_id=finding.id,
+        metadata={"job_id": job_id, "sources": request.sources},
+    )
+
+    return EnrichmentResponse(
+        job_id=job_id,
+        finding_id=finding.id,
+        queued_at=queued_at,
+        sources=list(request.sources),
+    )
 
 app.add_api_route(
     "/scans",
@@ -765,7 +1273,6 @@ app.add_api_route(
     response_model=ScanResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-
 
 @app.get("/scans", response_model=ScanCollectionResponse)
 def list_scans(
@@ -876,6 +1383,107 @@ def nuclei_callback(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@app.post(
+    "/internal/enrich/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def enrichment_callback(
+    payload: CVEEnrichmentResult,
+    principal: Principal = Depends(authenticate_enrichment_worker),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Persist deterministic enrichment payloads emitted by the CVE worker."""
+
+    finding = (
+        db.query(Finding)
+        .options(selectinload(Finding.enrichments))
+        .filter(Finding.id == payload.finding_id)
+        .first()
+    )
+    if finding is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+        )
+
+    existing = (
+        db.query(FindingEnrichment)
+        .filter(FindingEnrichment.job_id == payload.job_id)
+        .first()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Enrichment already recorded",
+        )
+
+    advisories = [advisory.model_dump(mode="json") for advisory in payload.advisories]
+    errors = {str(source): str(message) for source, message in payload.errors.items()}
+    generated_at = payload.generated_at.astimezone(timezone.utc)
+    received_at = datetime.now(tz=timezone.utc)
+    provenance: Dict[str, Any] = {
+        "job_id": payload.job_id,
+        "worker_subject": principal.subject,
+        "generated_at": generated_at.isoformat(),
+        "received_at": received_at.isoformat(),
+    }
+    if advisories:
+        provenance["sources"] = sorted(
+            {
+                entry.get("source")
+                for entry in advisories
+                if isinstance(entry, dict) and entry.get("source")
+            }
+        )
+    if errors:
+        provenance["error_sources"] = sorted(errors.keys())
+
+    enrichment = FindingEnrichment(
+        finding_id=finding.id,
+        job_id=payload.job_id,
+        generated_at=generated_at,
+        advisories=advisories,
+        advisories_hash="",
+        errors=errors,
+        errors_hash="",
+        provenance=provenance,
+        provenance_hash="",
+        payload_hash="",
+    )
+    db.add(enrichment)
+
+    try:
+        db.commit()
+        db.refresh(enrichment)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        LOGGER.exception(
+            "Failed to persist enrichment callback",
+            extra={"job_id": payload.job_id, "finding_id": payload.finding_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist enrichment",
+        ) from exc
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enrichment_callback",
+        resource_type="finding",
+        resource_id=str(finding.id),
+        scan_id=finding.scan_id,
+        finding_id=finding.id,
+        metadata={
+            "job_id": payload.job_id,
+            "advisory_count": len(advisories),
+            "error_sources": sorted(errors.keys()),
+        },
+    )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.get("/findings", response_model=FindingCollectionResponse)
 def list_findings(
     target_id: Optional[str] = None,
@@ -969,6 +1577,33 @@ def serialize_finding(finding: Finding) -> FindingResponse:
 
     template_id = finding.cve_id or "nuclei:unspecified"
 
+    enrichments_payload: List[FindingEnrichmentSummary] = []
+    if hasattr(finding, "enrichments") and finding.enrichments:
+        ordered = sorted(
+            finding.enrichments,
+            key=lambda record: record.created_at,
+            reverse=True,
+        )
+        for enrichment in ordered:
+            advisories = deepcopy(enrichment.advisories or [])
+            errors = deepcopy(enrichment.errors or {})
+            provenance = deepcopy(enrichment.provenance or {})
+            enrichments_payload.append(
+                FindingEnrichmentSummary(
+                    id=str(enrichment.id),
+                    job_id=enrichment.job_id,
+                    generated_at=enrichment.generated_at,
+                    recorded_at=enrichment.created_at,
+                    advisories=advisories,
+                    advisories_hash=enrichment.advisories_hash,
+                    errors=errors,
+                    errors_hash=enrichment.errors_hash,
+                    provenance=provenance,
+                    provenance_hash=enrichment.provenance_hash,
+                    payload_hash=enrichment.payload_hash,
+                )
+            )
+
     return FindingResponse(
         id=str(finding.id),
         scan_id=str(finding.scan_id),
@@ -982,6 +1617,7 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         template_id=template_id,
         evidence=evidence_text,
         remediation=None,
+        enrichments=enrichments_payload,
     )
 
 
@@ -992,11 +1628,13 @@ __all__ = [
     "Target",
     "Scan",
     "Finding",
+    "FindingEnrichment",
     "AuditLog",
     "ScanResponse",
     "ScanCollectionResponse",
     "TargetCollectionResponse",
     "FindingResponse",
+    "FindingEnrichmentSummary",
     "FindingCollectionResponse",
     "FindingItemResponse",
     "get_db_session",
@@ -1008,4 +1646,6 @@ __all__ = [
     "serialize_finding",
     "record_audit_event",
     "authenticate",
+    "authenticate_worker",
+    "authenticate_enrichment_worker",
 ]

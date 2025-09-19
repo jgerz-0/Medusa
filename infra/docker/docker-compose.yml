@@ -83,7 +83,6 @@ services:
       MEDUSA_NUCLEI_QUEUE_CHANNEL: ${MEDUSA_NUCLEI_QUEUE_CHANNEL:-queues:nuclei:jobs}
       MEDUSA_NUCLEI_CALLBACK_TOKEN: ${MEDUSA_NUCLEI_CALLBACK_TOKEN:-local-dev-nuclei-callback}
       MEDUSA_JWT_SECRET: ${MEDUSA_JWT_SECRET:-change-this-in-production}
-      MEDUSA_API_KEYS: ${MEDUSA_API_KEYS:-frontend-dev-key,nuclei-smoke-key}
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,6 +96,15 @@ services:
       - "${MEDUSA_CONTROLLER_PORT:-8000}:8000"
     volumes:
       - ../../controller:/app/controller:delegated
+      - principal_secrets:/var/lib/medusa
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        poetry run alembic upgrade head
+        poetry run python scripts/seed_principals.py --env-file /var/lib/medusa/principal_credentials.env
+        uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
       interval: 10s
@@ -113,7 +121,6 @@ services:
       - .env
     environment:
       CONTROLLER_API_BASE_URL: ${CONTROLLER_API_BASE_URL:-http://controller:8000}
-      CONTROLLER_API_KEY: ${CONTROLLER_API_KEY:-frontend-dev-key}
       CONTROLLER_JWT: ${CONTROLLER_JWT:-}
       DASHBOARD_BASIC_USER: ${DASHBOARD_BASIC_USER:-analyst}
       DASHBOARD_BASIC_PASSWORD: ${DASHBOARD_BASIC_PASSWORD:-analyst}
@@ -128,7 +135,22 @@ services:
       - ../../frontend:/app/frontend:delegated
       - frontend_node_modules:/app/frontend/node_modules
       - frontend_next_cache:/app/frontend/.next
-    command: ["/bin/sh", "-c", "pnpm install --prefer-offline --ignore-scripts && pnpm dev --hostname 0.0.0.0 --port 3000"]
+      - principal_secrets:/var/lib/medusa:ro
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        if [ -f /var/lib/medusa/principal_credentials.env ]; then
+          set -a
+          . /var/lib/medusa/principal_credentials.env
+          set +a
+        fi
+        if [ -z "${CONTROLLER_API_KEY}" ] && [ -n "${MEDUSA_ANALYST_API_KEY}" ]; then
+          export CONTROLLER_API_KEY="${MEDUSA_ANALYST_API_KEY}"
+        fi
+        pnpm install --prefer-offline --ignore-scripts
+        pnpm dev --hostname 0.0.0.0 --port 3000
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 15s
@@ -167,3 +189,4 @@ services:
 volumes:
   frontend_node_modules:
   frontend_next_cache:
+  principal_secrets:

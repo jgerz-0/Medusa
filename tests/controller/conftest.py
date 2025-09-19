@@ -4,14 +4,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from controller.db.models import Base, PrincipalCredential
 from controller.main import (
-    Base,
-    PrincipalCredential,
+    DEFAULT_ADMIN_ROLES,
+    DEFAULT_ANALYST_ROLES,
     QueueClient,
     Settings,
-    _engine_from_url,
     _hash_secret,
-    _session_factory_from_url,
     app,
     get_db_session,
     get_queue_client,
@@ -30,16 +29,15 @@ class FakeQueueClient(QueueClient):
 @pytest.fixture()
 def client():
     get_settings.cache_clear()  # type: ignore[attr-defined]
-    _engine_from_url.cache_clear()  # type: ignore[attr-defined]
-    _session_factory_from_url.cache_clear()  # type: ignore[attr-defined]
 
     settings = Settings(
         database_url="sqlite+pysqlite:///:memory:",
         redis_url="redis://localhost:6379/0",
         nuclei_queue_channel="test-nuclei",
+        cve_enrichment_queue_channel="test-enrichment",
         jwt_secret="unit-test-secret",
-        api_keys=["legacy-key"],
         nuclei_callback_token="callback-secret",
+        enrichment_callback_token="enrichment-secret",
     )
 
     engine = create_engine(
@@ -58,14 +56,14 @@ def client():
                     subject="svc-admin",
                     auth_method="api_key",
                     key_hash=_hash_secret("test-key"),
-                    roles=["admin", "scan:enqueue", "targets:write"],
+                    roles=list(DEFAULT_ADMIN_ROLES),
                     description="Controller admin",
                 ),
                 PrincipalCredential(
                     subject="svc-analyst",
                     auth_method="api_key",
                     key_hash=_hash_secret("analyst-key"),
-                    roles=["analyst", "findings:read"],
+                    roles=list(DEFAULT_ANALYST_ROLES),
                     description="Read-only analyst",
                 ),
                 PrincipalCredential(
@@ -104,9 +102,7 @@ def client():
     app.dependency_overrides[get_queue_client] = override_queue
 
     with TestClient(app) as test_client:
-        yield test_client, settings, TestingSessionLocal
+        yield test_client, settings, TestingSessionLocal, queue
 
     app.dependency_overrides.clear()
     get_settings.cache_clear()  # type: ignore[attr-defined]
-    _session_factory_from_url.cache_clear()  # type: ignore[attr-defined]
-    _engine_from_url.cache_clear()  # type: ignore[attr-defined]

@@ -20,6 +20,21 @@ TEMPLATE_PATH=${SMOKE_TEST_TEMPLATE_PATH:-/app/templates/smoke-test.yaml}
 TARGET_URL=${SMOKE_TEST_TARGET_URL:-http://controller:8000}
 CALLBACK_URL=${SMOKE_TEST_CALLBACK_URL:-http://controller:8000/internal/nuclei/callback}
 
+echo "[+] Fetching generated principal API keys"
+PRINCIPAL_ENV=$(${COMPOSE_BIN} exec -T controller sh -c 'if [ -f /var/lib/medusa/principal_credentials.env ]; then cat /var/lib/medusa/principal_credentials.env; fi')
+ADMIN_KEY=$(printf '%s\n' "$PRINCIPAL_ENV" | awk -F'=' '/MEDUSA_ADMIN_API_KEY/ {print $2}' | tail -n1)
+ANALYST_KEY=$(printf '%s\n' "$PRINCIPAL_ENV" | awk -F'=' '/MEDUSA_ANALYST_API_KEY/ {print $2}' | tail -n1)
+if [[ -n "$ADMIN_KEY" ]]; then
+  echo "    admin: ${ADMIN_KEY}"
+else
+  echo "    admin: [missing]" >&2
+fi
+if [[ -n "$ANALYST_KEY" ]]; then
+  echo "    analyst: ${ANALYST_KEY}"
+else
+  echo "    analyst: [missing]" >&2
+fi
+
 echo "[+] Running database migrations"
 ${COMPOSE_BIN} exec -T controller poetry run alembic upgrade head
 
