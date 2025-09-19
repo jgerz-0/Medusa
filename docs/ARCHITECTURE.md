@@ -31,6 +31,7 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
   - Containerized wrappers around scanners (nuclei, ZAP, SQLMap, AFL, angr).
   - Normalize output into the shared JSON Finding schema.
   - Upload heavy artifacts (pcaps, binaries, logs) to MinIO.
+  - **CVE Enrichment Worker** – fetches deterministic advisories from NVD and CIRCL and emits structured metadata for findings.
 - **Agents**
   - **Recon Agent** – Discovers assets from authorized inventory feeds.
   - **Preprocess Agent** – Classifies binaries, extracts metadata, enforces triage rules.
@@ -50,6 +51,12 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
 3. Worker pulls the job, executes the scanner within an ephemeral container, and posts results back through the controller callback API.
 4. Findings persist to Postgres; artifacts (scan logs, templates) land in MinIO.
 5. UI polls `/scans` and `/findings` to display state transitions.
+
+### Phase 2 Enrichment Extension
+1. Analyst (or automation) calls `/enrich` with a finding identifier and optional advisory sources.
+2. The controller enqueues a CVE enrichment job on `queues:enrichment:cve` and records an audit event.
+3. The CVE worker fetches NVD + CIRCL advisories with pinned user-agent headers, normalizes the payload, and prepares metadata for controller ingestion.
+4. The enriched metadata attaches to the original finding without mutating stored evidence, enabling deterministic provenance for remediation guidance.
 
 ## Security Controls
 - All inter-service communication authenticated with mTLS (planned) or signed JWTs (Phase 1).

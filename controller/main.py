@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import secrets
+import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional
@@ -44,6 +45,7 @@ ROLE_SCANS_READ = "scans:read"
 ROLE_SCAN_ENQUEUE = "scan:enqueue"
 ROLE_TARGETS_READ = "targets:read"
 ROLE_TARGETS_WRITE = "targets:write"
+ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
 
 ALLOWED_ROLES = {
     ROLE_ADMIN,
@@ -53,6 +55,7 @@ ALLOWED_ROLES = {
     ROLE_SCAN_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
+    ROLE_ENRICHMENT_ENQUEUE,
 }
 
 DEFAULT_ANALYST_ROLES = [
@@ -61,6 +64,7 @@ DEFAULT_ANALYST_ROLES = [
     ROLE_SCANS_READ,
     ROLE_SCAN_ENQUEUE,
     ROLE_TARGETS_READ,
+    ROLE_ENRICHMENT_ENQUEUE,
 ]
 
 DEFAULT_ADMIN_ROLES = [
@@ -70,6 +74,7 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_SCAN_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
+    ROLE_ENRICHMENT_ENQUEUE,
 ]
 
 class Settings(BaseSettings):
@@ -85,6 +90,10 @@ class Settings(BaseSettings):
     )
     nuclei_queue_channel: str = Field(
         "queues:nuclei:jobs", description="Redis list channel for nuclei scan jobs."
+    )
+    cve_enrichment_queue_channel: str = Field(
+        "queues:enrichment:cve",
+        description="Redis list channel for CVE enrichment jobs.",
     )
     jwt_secret: str = Field(
         ..., description="JWT secret used to validate bearer tokens."
@@ -182,6 +191,43 @@ class ScanResponse(BaseModel):
 
 class ScanCollectionResponse(BaseModel):
     data: List[ScanResponse]
+
+
+SUPPORTED_ENRICHMENT_SOURCES = {"nvd", "circl"}
+DEFAULT_ENRICHMENT_SOURCES = ["nvd", "circl"]
+
+
+class EnrichmentRequest(BaseModel):
+    finding_id: str = Field(
+        ..., description="Identifier of the finding requiring CVE enrichment"
+    )
+    sources: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_ENRICHMENT_SOURCES),
+        description="Deterministic advisory feeds to consult",
+    )
+
+    @field_validator("sources", mode="before")
+    @classmethod
+    def _normalize_sources(cls, value: Any) -> List[str]:
+        if value is None:
+            return list(DEFAULT_ENRICHMENT_SOURCES)
+        if isinstance(value, str):
+            value = [value]
+        normalized: List[str] = []
+        for source in value:
+            source_str = str(source).lower()
+            if source_str not in SUPPORTED_ENRICHMENT_SOURCES:
+                raise ValueError(f"Unsupported enrichment source: {source}")
+            if source_str not in normalized:
+                normalized.append(source_str)
+        return normalized
+
+
+class EnrichmentResponse(BaseModel):
+    job_id: str
+    finding_id: str
+    queued_at: datetime
+    sources: List[str] = Field(default_factory=list)
 
 
 class FindingResponse(BaseModel):
@@ -811,6 +857,61 @@ def enqueue_scan(
     )
 
     return serialize_scan(scan)
+
+
+@app.post("/enrich", response_model=EnrichmentResponse, status_code=status.HTTP_202_ACCEPTED)
+def enqueue_enrichment(
+    request: EnrichmentRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
+) -> EnrichmentResponse:
+    """Queue a CVE enrichment job for the specified finding."""
+
+    enforce_roles(principal, [ROLE_ENRICHMENT_ENQUEUE])
+
+    finding = db.get(Finding, request.finding_id)
+    if finding is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Finding not found",
+        )
+
+    job_id = str(uuid.uuid4())
+    queued_at = datetime.now(tz=timezone.utc)
+    job_payload = {
+        "job_id": job_id,
+        "finding_id": finding.id,
+        "scan_id": finding.scan_id,
+        "cve_id": finding.cve_id,
+        "title": finding.title,
+        "severity": finding.severity,
+        "metadata": finding.metadata_json,
+        "sources": request.sources,
+        "requested_by": principal.subject,
+        "requested_at": queued_at.isoformat(),
+    }
+    queue.enqueue(settings.cve_enrichment_queue_channel, job_payload)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enqueue_enrichment",
+        resource_type="finding",
+        resource_id=finding.id,
+        scan_id=finding.scan_id,
+        finding_id=finding.id,
+        metadata={"job_id": job_id, "sources": request.sources},
+    )
+
+    return EnrichmentResponse(
+        job_id=job_id,
+        finding_id=finding.id,
+        queued_at=queued_at,
+        sources=list(request.sources),
+    )
+
 
 app.add_api_route(
     "/scans",

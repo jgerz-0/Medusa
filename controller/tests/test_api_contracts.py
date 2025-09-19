@@ -332,6 +332,7 @@ def test_principal_creation_validates_and_expands_roles(
             "scan:enqueue",
             "scans:read",
             "targets:read",
+            "enrich:enqueue",
         ]
     )
 
@@ -355,6 +356,7 @@ def test_principal_creation_validates_and_expands_roles(
             "scans:read",
             "targets:read",
             "targets:write",
+            "enrich:enqueue",
         ]
     )
 

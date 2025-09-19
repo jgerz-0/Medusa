@@ -32,6 +32,7 @@ def client():
         database_url="sqlite+pysqlite:///:memory:",
         redis_url="redis://localhost:6379/0",
         nuclei_queue_channel="test-nuclei",
+        cve_enrichment_queue_channel="test-enrichment",
         jwt_secret="unit-test-secret",
         api_keys=["legacy-key"],
         nuclei_callback_token="callback-secret",
@@ -99,7 +100,7 @@ def client():
     app.dependency_overrides[get_queue_client] = override_queue
 
     with TestClient(app) as test_client:
-        yield test_client, settings, TestingSessionLocal
+        yield test_client, settings, TestingSessionLocal, queue
 
     app.dependency_overrides.clear()
     get_settings.cache_clear()  # type: ignore[attr-defined]

@@ -159,13 +159,6 @@ class NucleiJob:
         if not scan_id:
             raise FatalJobError("Job payload contains invalid 'scan_id'")
 
-        try:
-            int(scan_id_raw)
-        except (TypeError, ValueError):
-            # `scan_id` may be a UUID string when provided through metadata.
-            if not isinstance(scan_id_raw, str) or not scan_id_raw.strip():
-                raise FatalJobError("Job payload contains invalid 'scan_id'")
-
         attempts = int(data.get("attempts", 0))
         tags = data.get("tags") or []
         metadata_payload = data.get("metadata") or {}
@@ -446,7 +439,7 @@ def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> Lis
                 "cve_id": _coerce_cve(info),
                 "metadata": {k: v for k, v in metadata.items() if v},
                 "evidence": {k: v for k, v in evidence.items() if v},
-                "artifacts": [artifact_payload],
+                "artifacts": [],
             }
         )
     return findings

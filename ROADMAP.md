@@ -20,6 +20,7 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 
 ## Phase 2 – Enrichment (Weeks 3–4)
 - NVD + CIRCL CVE lookups with deterministic confidence scoring.
+- Controller `/enrich` endpoint queues CVE enrichment jobs onto a dedicated worker channel.
 - Qdrant vector ingestion of scanner fingerprints and advisories.
 - Enrichment Agent attaches CVE metadata, exploitability hints, and remediation summaries.
 - UI highlights enriched findings and displays provenance of enrichment data.
