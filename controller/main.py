@@ -7,8 +7,8 @@ import hashlib
 import json
 import logging
 import secrets
+import time
 import uuid
-from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from copy import deepcopy
 from datetime import datetime, timezone, date
 from io import BytesIO
@@ -39,6 +39,7 @@ from redis import Redis
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
+from controller import metrics
 from controller.db.models import (
     AuditLog,
     BinaryFuzzingFinding,
@@ -1793,10 +1794,43 @@ def record_audit_event(
         },
     )
 
+    metrics.record_audit_event(action)
+
     return entry
 
 
 app = FastAPI(title="Medusa Controller", version="0.1.0")
+
+
+@app.middleware("http")
+async def record_metrics_middleware(request: Request, call_next):
+    """Capture request metrics for Prometheus."""
+
+    start_time = time.perf_counter()
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        duration = time.perf_counter() - start_time
+        route = request.scope.get("route")
+        endpoint = getattr(route, "path", request.url.path)
+        metrics.observe_http_request(
+            method=request.method,
+            endpoint=endpoint,
+            status_code=status_code,
+            duration_seconds=duration,
+        )
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics_endpoint() -> Response:
+    """Expose controller metrics in Prometheus text format."""
+
+    return Response(
+        content=metrics.render_latest(), media_type=metrics.CONTENT_TYPE_LATEST
+    )
 
 
 @app.get("/principals", response_model=PrincipalCredentialCollectionResponse)
@@ -2348,6 +2382,8 @@ def enqueue_scan(
 
     queue.enqueue(queue_channel, job_payload)
 
+    metrics.record_job_enqueued(scan.scanner)
+
     record_audit_event(
         db,
         actor=principal,
@@ -2462,6 +2498,8 @@ def enqueue_binary_preprocess(
     }
 
     queue.enqueue(settings.binary_preprocess_queue_channel, job_payload)
+
+    metrics.record_job_enqueued("binary_preprocess")
 
     record_audit_event(
         db,
@@ -2580,6 +2618,8 @@ def enqueue_binary_static_analysis(
     }
 
     queue.enqueue(settings.binary_static_analysis_queue_channel, job_payload)
+
+    metrics.record_job_enqueued(SCAN_TYPE_BINARY_STATIC)
 
     record_audit_event(
         db,
@@ -2704,6 +2744,8 @@ def enqueue_binary_fuzzing(
 
     queue.enqueue(settings.binary_fuzzing_queue_channel, job_payload)
 
+    metrics.record_job_enqueued(SCAN_TYPE_BINARY_FUZZING)
+
     record_audit_event(
         db,
         actor=principal,
@@ -2765,6 +2807,8 @@ def enqueue_enrichment(
         "requested_at": queued_at.isoformat(),
     }
     queue.enqueue(settings.cve_enrichment_queue_channel, job_payload)
+
+    metrics.record_job_enqueued("enrichment_cve")
 
     record_audit_event(
         db,
@@ -3110,6 +3154,8 @@ def nuclei_callback(
         worker_name=SCAN_TYPE_NUCLEI,
     )
 
+    metrics.record_worker_callback(SCAN_TYPE_NUCLEI, findings_persisted)
+
     record_audit_event(
         db,
         actor=principal,
@@ -3144,6 +3190,8 @@ def zap_callback(
         principal=principal,
         worker_name=SCAN_TYPE_ZAP,
     )
+
+    metrics.record_worker_callback(SCAN_TYPE_ZAP, findings_persisted)
 
     record_audit_event(
         db,
@@ -3180,6 +3228,8 @@ def sqlmap_callback(
         worker_name=SCAN_TYPE_SQLMAP,
     )
 
+    metrics.record_worker_callback(SCAN_TYPE_SQLMAP, findings_persisted)
+
     record_audit_event(
         db,
         actor=principal,
@@ -3212,6 +3262,8 @@ def binary_static_analysis_callback(
         db=db,
         payload=payload,
     )
+
+    metrics.record_worker_callback(SCAN_TYPE_BINARY_STATIC, findings_persisted)
 
     record_audit_event(
         db,
@@ -3248,6 +3300,8 @@ def binary_fuzzing_callback(
         db=db,
         payload=payload,
     )
+
+    metrics.record_worker_callback(SCAN_TYPE_BINARY_FUZZING, findings_persisted)
 
     record_audit_event(
         db,
@@ -3350,6 +3404,8 @@ def enrichment_callback(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to persist enrichment",
         ) from exc
+
+    metrics.record_worker_callback("enrichment", len(advisories))
 
     record_audit_event(
         db,
