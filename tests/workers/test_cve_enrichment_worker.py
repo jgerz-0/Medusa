@@ -1,4 +1,5 @@
 import json
+from collections import deque
 from datetime import datetime, timezone
 
 import pytest
@@ -10,7 +11,11 @@ from workers.enrichment.cve.schemas import (
     CVEEnrichmentResult,
     CVESource,
 )
-from workers.enrichment.cve.sources import AdvisorySourceError, fetch_circl_advisory, fetch_nvd_advisory
+from workers.enrichment.cve.sources import (
+    AdvisorySourceError,
+    fetch_circl_advisory,
+    fetch_nvd_advisory,
+)
 
 
 class DummyResponse:
@@ -30,7 +35,9 @@ class DummySession:
         self.calls = []
 
     def get(self, url, params=None, timeout=None, headers=None):
-        self.calls.append({"url": url, "params": params, "timeout": timeout, "headers": headers})
+        self.calls.append(
+            {"url": url, "params": params, "timeout": timeout, "headers": headers}
+        )
         return DummyResponse(self.payload)
 
 
@@ -62,7 +69,9 @@ def test_fetch_nvd_advisory_normalizes_payload():
         ]
     }
     session = DummySession(payload)
-    advisory = fetch_nvd_advisory("CVE-2023-0001", session=session, user_agent="test-agent")
+    advisory = fetch_nvd_advisory(
+        "CVE-2023-0001", session=session, user_agent="test-agent"
+    )
 
     assert advisory["identifier"] == "CVE-2023-0001"
     assert advisory["severity"] == "CRITICAL"
@@ -209,8 +218,12 @@ def test_main_serializes_result(tmp_path, monkeypatch, capsys):
         generated_at=datetime.now(timezone.utc),
     )
 
-    monkeypatch.setattr(worker.WorkerConfig, "load", classmethod(lambda cls: worker.WorkerConfig()))
-    monkeypatch.setattr(worker, "collect_advisories", lambda job, config, session=None: fake_result)
+    monkeypatch.setattr(
+        worker.WorkerConfig, "load", classmethod(lambda cls: worker.WorkerConfig())
+    )
+    monkeypatch.setattr(
+        worker, "collect_advisories", lambda job, config, session=None: fake_result
+    )
     monkeypatch.setattr(worker, "Session", object)
 
     exit_code = worker.main(["--job-file", str(job_file), "--log-level", "DEBUG"])
@@ -221,3 +234,156 @@ def test_main_serializes_result(tmp_path, monkeypatch, capsys):
     assert payload["job_id"] == job.job_id
     assert payload["advisories"][0]["identifier"] == "CVE-2023-2000"
 
+
+class FakeRedisConnection:
+    def __init__(self, job_key: str, result_key: str, error_key: str):
+        self.job_key = job_key
+        self.result_key = result_key
+        self.error_key = error_key
+        self.queues = {
+            job_key: deque(),
+            result_key: deque(),
+            error_key: deque(),
+        }
+        self.push_log: list[tuple[str, str]] = []
+
+    def preload(self, key: str, value: str) -> None:
+        self.queues.setdefault(key, deque()).append(value)
+
+    def blpop(self, key: str, timeout=None):
+        queue = self.queues.setdefault(key, deque())
+        if queue:
+            return key, queue.popleft()
+        return None
+
+    def rpush(self, key: str, value: str) -> None:
+        self.push_log.append((key, value))
+        self.queues.setdefault(key, deque()).append(value)
+
+
+def _make_worker_config(**overrides):
+    base = dict(
+        redis_url="redis://test",
+        queue_key="queues:jobs",
+        result_queue_key="queues:results",
+        error_queue_key="queues:errors",
+    )
+    base.update(overrides)
+    return worker.WorkerConfig(**base)
+
+
+def _dequeue_json(fake_conn: FakeRedisConnection, key: str):
+    queue = fake_conn.queues[key]
+    assert queue, f"expected payload on {key}"
+    return json.loads(queue[0])
+
+
+def _raise_runtime_error(message: str):
+    def _raiser(*_args, **_kwargs):
+        raise RuntimeError(message)
+
+    return _raiser
+
+
+def test_process_queue_once_publishes_results(monkeypatch):
+    config = _make_worker_config()
+    fake_conn = FakeRedisConnection(
+        config.queue_key, config.result_queue_key, config.error_queue_key
+    )
+    job = worker.build_job_from_finding(
+        finding_id="finding-queue-1",
+        scan_id="scan-queue-1",
+        title="Example",
+        severity="medium",
+        metadata={},
+        cve_id="CVE-2023-3000",
+        requested_by="svc-analyst",
+    )
+    fake_conn.preload(config.queue_key, job.json())
+    queue = worker.RedisJobQueue(config, connection=fake_conn)
+
+    fake_result = worker.CVEEnrichmentResult(
+        job_id=job.job_id,
+        finding_id=job.finding_id,
+        advisories=[],
+        errors={},
+    )
+    monkeypatch.setattr(
+        worker,
+        "collect_advisories",
+        lambda queued_job, config, session=None: fake_result,
+    )
+
+    processed = worker.process_queue_once(config, queue=queue, session=None)
+    assert processed is True
+
+    result_payload = _dequeue_json(fake_conn, config.result_queue_key)
+    assert result_payload["status"] == "completed"
+    assert result_payload["job"]["job_id"] == job.job_id
+    assert result_payload["result"]["job_id"] == job.job_id
+    assert not fake_conn.queues[config.queue_key]
+
+
+def test_process_queue_once_requeues_on_error(monkeypatch):
+    config = _make_worker_config(max_attempts=3, retry_backoff_seconds=0.0)
+    fake_conn = FakeRedisConnection(
+        config.queue_key, config.result_queue_key, config.error_queue_key
+    )
+    job = worker.build_job_from_finding(
+        finding_id="finding-queue-2",
+        scan_id="scan-queue-2",
+        title="Example",
+        severity="medium",
+        metadata={},
+        cve_id="CVE-2023-3001",
+        requested_by="svc-analyst",
+    )
+    fake_conn.preload(config.queue_key, job.json())
+    queue = worker.RedisJobQueue(config, connection=fake_conn)
+
+    monkeypatch.setattr(worker, "collect_advisories", _raise_runtime_error("boom"))
+    monkeypatch.setattr(worker.time, "sleep", lambda *_args, **_kwargs: None)
+
+    processed = worker.process_queue_once(config, queue=queue, session=None)
+    assert processed is True
+
+    retry_payload = _dequeue_json(fake_conn, config.queue_key)
+    assert retry_payload["attempts"] == 1
+    assert retry_payload["last_error"]["message"] == "boom"
+
+    status_payload = _dequeue_json(fake_conn, config.result_queue_key)
+    assert status_payload["status"] == "retrying"
+    assert status_payload["error"]["message"] == "boom"
+    assert not fake_conn.queues[config.error_queue_key]
+
+
+def test_process_queue_once_dead_letters(monkeypatch):
+    config = _make_worker_config(max_attempts=1)
+    fake_conn = FakeRedisConnection(
+        config.queue_key, config.result_queue_key, config.error_queue_key
+    )
+    job = worker.build_job_from_finding(
+        finding_id="finding-queue-3",
+        scan_id="scan-queue-3",
+        title="Example",
+        severity="medium",
+        metadata={},
+        cve_id="CVE-2023-3002",
+        requested_by="svc-analyst",
+    )
+    fake_conn.preload(config.queue_key, job.json())
+    queue = worker.RedisJobQueue(config, connection=fake_conn)
+
+    monkeypatch.setattr(worker, "collect_advisories", _raise_runtime_error("fail"))
+
+    processed = worker.process_queue_once(config, queue=queue, session=None)
+    assert processed is True
+
+    assert not fake_conn.queues[config.queue_key]
+    result_payload = _dequeue_json(fake_conn, config.result_queue_key)
+    assert result_payload["status"] == "failed"
+    assert result_payload["error"]["message"] == "fail"
+
+    error_payload = _dequeue_json(fake_conn, config.error_queue_key)
+    assert error_payload["status"] == "failed"
+    assert error_payload["error"]["message"] == "fail"
