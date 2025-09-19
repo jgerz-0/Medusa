@@ -10,10 +10,11 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, Union
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -32,7 +33,14 @@ from redis import Redis
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
-from controller.db.models import AuditLog, Finding, PrincipalCredential, Scan, Target
+from controller.db.models import (
+    AuditLog,
+    Finding,
+    FindingEnrichment,
+    PrincipalCredential,
+    Scan,
+    Target,
+)
 from controller.db.session import SessionLocal
 from workers.enrichment.cve.schemas import CVEEnrichmentResult
 
@@ -260,11 +268,7 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 Network = Union[IPv4Network, IPv6Network]
 
-security_scheme = HTTPBearer(auto_error=False)
 
-def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Ensure JSON payloads are deterministic dictionaries."""
-    
 def _normalize_hostname(value: str) -> str:
     """Return a lowercase hostname without trailing dots or wildcard prefixes."""
 
@@ -273,14 +277,21 @@ def _normalize_hostname(value: str) -> str:
         normalized = normalized[2:]
     return normalized
 
-    if payload is None:
-        return {}
-    return payload
-
 def _hash_secret(secret: str) -> str:
     """Return a SHA-256 hash of the provided secret."""
 
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+KEY_FINGERPRINT_LENGTH = 12
+
+
+def _fingerprint_from_hash(key_hash: Optional[str]) -> Optional[str]:
+    """Return a short fingerprint derived from a credential hash."""
+
+    if not key_hash:
+        return None
+    return key_hash[:KEY_FINGERPRINT_LENGTH]
 
 def _scope_to_network(scope: str) -> Optional[Network]:
     """Attempt to parse the target scope as an IP network."""
@@ -596,6 +607,13 @@ class PrincipalCredentialResponse(BaseModel):
     description: Optional[str]
     created_at: datetime
     revoked_at: Optional[datetime]
+    key_fingerprint: Optional[str] = Field(
+        default=None,
+        description=(
+            "Non-secret identifier derived from the credential hash to assist with"
+            " rotation tracking."
+        ),
+    )
 
     @field_validator("roles", mode="before")
     @classmethod
@@ -611,6 +629,18 @@ class PrincipalCredentialCollectionResponse(BaseModel):
 
 class PrincipalCredentialCreatedResponse(PrincipalCredentialResponse):
     secret: Optional[str] = None
+
+
+def _serialize_principal_credential(
+    credential: PrincipalCredential,
+) -> PrincipalCredentialResponse:
+    """Return a response model populated with safe credential metadata."""
+
+    fingerprint = _fingerprint_from_hash(credential.key_hash)
+    base_response = PrincipalCredentialResponse.model_validate(
+        credential, from_attributes=True
+    )
+    return base_response.model_copy(update={"key_fingerprint": fingerprint})
 
 
 class QueueClient:
@@ -661,94 +691,173 @@ def _authenticate_callback_worker(
     *,
     expected_token: str,
     subject: str,
+    db: Session,
+    resource_id: str,
 ) -> Principal:
     token = request.headers.get(CALLBACK_TOKEN_HEADER)
     if not token or not secrets.compare_digest(token, expected_token):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+        worker_principal = Principal(subject=subject, auth_method="shared_secret")
+        log_access_denied(
+            db,
+            principal=worker_principal,
+            required_roles=[],
+            resource_type="worker_callback",
+            resource_id=resource_id,
+            reason="invalid_callback_token",
             detail="Invalid callback token",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata={"token_provided": bool(token)},
         )
     return Principal(subject=subject, auth_method="shared_secret")
 
 
-def authenticate(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
-    settings: Settings = Depends(get_settings),
-    db: Session = Depends(get_db_session),
-) -> Principal:
-    """Authenticate caller via JWT bearer token or API key headers."""
+def _authenticate_api_key(
+    candidate_api_key: str,
+    *,
+    db: Session,
+    settings: Settings,
+    source: str,
+    silent: bool = False,
+) -> Optional[Principal]:
+    """Authenticate an API key against the credential store."""
 
-    api_key_header = request.headers.get("X-API-Key")
-    bearer_token = credentials.credentials if credentials else None
+    api_key_hash = _hash_secret(candidate_api_key)
+    fingerprint = _fingerprint_from_hash(api_key_hash)
 
-    candidate_api_key = api_key_header or bearer_token
-    if candidate_api_key and candidate_api_key in settings.api_keys:
-        subject_hash = _hash_secret(candidate_api_key)
+    active_credential = (
+        db.query(PrincipalCredential)
+        .filter(
+            PrincipalCredential.auth_method == "api_key",
+            PrincipalCredential.key_hash == api_key_hash,
+            PrincipalCredential.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if active_credential:
+        roles = list(active_credential.roles or [])
         return Principal(
-            subject=f"apikey:{subject_hash}",
+            subject=active_credential.subject,
             auth_method="api_key",
-            roles=list(DEFAULT_ADMIN_ROLES),
+            roles=roles,
         )
-        if active_credential:
-            roles = list(active_credential.roles or [])
+
+    revoked_credential = (
+        db.query(PrincipalCredential)
+        .filter(
+            PrincipalCredential.auth_method == "api_key",
+            PrincipalCredential.key_hash == api_key_hash,
+            PrincipalCredential.revoked_at.isnot(None),
+        )
+        .first()
+    )
+    if revoked_credential:
+        LOGGER.warning(
+            "Rejected revoked API key",
+            extra={"subject": revoked_credential.subject},
+        )
+        revoked_principal = Principal(
+            subject=revoked_credential.subject,
+            auth_method="api_key",
+            roles=list(revoked_credential.roles or []),
+        )
+        log_access_denied(
+            db,
+            principal=revoked_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=str(revoked_credential.id),
+            reason="credential_revoked",
+            detail="API key revoked",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata={
+                "credential_id": str(revoked_credential.id),
+                "credential_status": "revoked",
+                "key_fingerprint": _fingerprint_from_hash(
+                    revoked_credential.key_hash
+                ),
+                "api_key_source": source,
+            },
+        )
+
+    for configured_key in settings.api_keys:
+        if secrets.compare_digest(candidate_api_key, configured_key):
+            subject_hash = api_key_hash
             return Principal(
-                subject=active_credential.subject,
+                subject=f"apikey:{subject_hash}",
                 auth_method="api_key",
-                roles=roles,
+                roles=list(DEFAULT_ADMIN_ROLES),
             )
 
-        revoked_credential = (
-            db.query(PrincipalCredential)
-            .filter(
-                PrincipalCredential.auth_method == "api_key",
-                PrincipalCredential.key_hash == api_key_hash,
-                PrincipalCredential.revoked_at.isnot(None),
-            )
-            .first()
-        )
-        if revoked_credential:
-            LOGGER.warning(
-                "Rejected revoked API key",
-                extra={"subject": revoked_credential.subject},
-            )
-            revoked_principal = Principal(
-                subject=revoked_credential.subject,
-                auth_method="api_key",
-                roles=list(revoked_credential.roles or []),
-            )
-            log_access_denied(
-                db,
-                principal=revoked_principal,
-                required_roles=[],
-                resource_type="principal_credential",
-                resource_id=str(revoked_credential.id),
-                reason="credential_revoked",
-                detail="API key revoked",
-                extra_metadata={
-                    "credential_id": str(revoked_credential.id),
-                    "credential_status": "revoked",
-                },
-            )
+    if silent:
+        return None
 
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required"
-        )
+    anonymous_principal = Principal(
+        subject=f"apikey:{fingerprint}" if fingerprint else "apikey:unknown",
+        auth_method="api_key",
+        roles=[],
+    )
+    log_access_denied(
+        db,
+        principal=anonymous_principal,
+        required_roles=[],
+        resource_type="principal_credential",
+        resource_id=None,
+        reason="credential_not_found",
+        detail="API key not recognized",
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        extra_metadata={
+            "credential_status": "unknown",
+            "key_fingerprint": fingerprint,
+            "api_key_source": source,
+        },
+    )
 
-    token = credentials.credentials
+
+def _authenticate_jwt(
+    token: str,
+    *,
+    settings: Settings,
+    db: Session,
+) -> Principal:
+    """Authenticate a JWT bearer token and enforce credential state."""
+
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except jwt.PyJWTError as exc:  # pragma: no cover - exercised indirectly
         LOGGER.warning("JWT validation failed", extra={"error": str(exc)})
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
-        ) from exc
+        invalid_principal = Principal(
+            subject="jwt:invalid",
+            auth_method="jwt",
+            roles=[],
+        )
+        log_access_denied(
+            db,
+            principal=invalid_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=None,
+            reason="invalid_token",
+            detail="Invalid token",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata={"error": str(exc)},
+        )
 
     subject = payload.get("sub")
     if not subject:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload"
+        anonymous_principal = Principal(
+            subject="jwt:anonymous",
+            auth_method="jwt",
+            roles=[],
+        )
+        log_access_denied(
+            db,
+            principal=anonymous_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=None,
+            reason="invalid_token_payload",
+            detail="Invalid token payload",
+            status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
     record = (
@@ -761,12 +870,72 @@ def authenticate(
         .first()
     )
     if record is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Subject not authorized"
+        unauthorized_principal = Principal(
+            subject=subject,
+            auth_method="jwt",
+            roles=[],
+        )
+        log_access_denied(
+            db,
+            principal=unauthorized_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=None,
+            reason="subject_not_authorized",
+            detail="Subject not authorized",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     roles = list(record.roles or [])
     return Principal(subject=record.subject, auth_method="jwt", roles=roles)
+
+
+def authenticate(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
+) -> Principal:
+    """Authenticate caller via JWT bearer token or API key headers."""
+
+    api_key_header = request.headers.get("X-API-Key")
+    if api_key_header:
+        api_principal = _authenticate_api_key(
+            api_key_header,
+            db=db,
+            settings=settings,
+            source="header",
+            silent=False,
+        )
+        if api_principal:
+            return api_principal
+
+    if credentials and credentials.scheme.lower() == "bearer":
+        bearer_token = credentials.credentials or ""
+        api_principal = _authenticate_api_key(
+            bearer_token,
+            db=db,
+            settings=settings,
+            source="authorization",
+            silent=True,
+        )
+        if api_principal is not None:
+            return api_principal
+
+        if bearer_token:
+            return _authenticate_jwt(bearer_token, settings=settings, db=db)
+
+    anonymous_principal = Principal(subject="anonymous", auth_method="none", roles=[])
+    log_access_denied(
+        db,
+        principal=anonymous_principal,
+        required_roles=[],
+        resource_type="authentication",
+        resource_id=None,
+        reason="missing_credentials",
+        detail="Authentication required",
+        status_code=status.HTTP_401_UNAUTHORIZED,
+    )
 
 
 def authenticate_worker(
@@ -780,48 +949,23 @@ def authenticate_worker(
         request,
         expected_token=settings.nuclei_callback_token,
         subject="worker:nuclei",
+        db=db,
+        resource_id="nuclei",
     )
-
-    token = request.headers.get("X-Callback-Token")
-    if not token or token != settings.nuclei_callback_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid callback token"
-          
-        worker_principal = Principal(
-            subject="worker:nuclei",
-            auth_method="shared_secret",
-            roles=[],
-        )
-        log_access_denied(
-            db,
-            principal=worker_principal,
-            required_roles=[],
-            resource_type="worker_callback",
-            resource_id="nuclei",
-            reason="invalid_callback_token",
-            detail="Invalid callback token",
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            extra_metadata={"token_provided": bool(token)},
-        )
-
 
 def authenticate_enrichment_worker(
     request: Request,
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
 ) -> Principal:
     """Authenticate enrichment worker callbacks using a dedicated shared secret."""
 
-def enforce_roles(principal: Principal, required_roles: Iterable[str]) -> None:
-    if principal.has_role(ROLE_ADMIN):
-        return
-    if not principal.has_any_role(required_roles):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient role for this operation",
     return _authenticate_callback_worker(
         request,
         expected_token=settings.enrichment_callback_token,
         subject="worker:enrichment",
+        db=db,
+        resource_id="enrichment",
     )
 
 
@@ -958,7 +1102,7 @@ def list_principals(
 ) -> PrincipalCredentialCollectionResponse:
     enforce_roles(
         principal,
-        ["admin"],
+        [ROLE_ADMIN],
         db,
         resource_type="endpoint",
         resource_id="/principals",
@@ -969,7 +1113,7 @@ def list_principals(
         .all()
     )
     response_items = [
-        PrincipalCredentialResponse.model_validate(record, from_attributes=True)
+        _serialize_principal_credential(record)
         for record in records
     ]
 
@@ -1066,7 +1210,7 @@ def create_principal_credential(
 ) -> PrincipalCredentialCreatedResponse:
     enforce_roles(
         principal,
-        ["admin"],
+        [ROLE_ADMIN],
         db,
         resource_type="endpoint",
         resource_id="/principals",
@@ -1116,23 +1260,34 @@ def create_principal_credential(
     db.commit()
     db.refresh(credential)
 
+    fingerprint = _fingerprint_from_hash(credential.key_hash)
+    metadata: Dict[str, Any] = {
+        "subject": credential.subject,
+        "auth_method": credential.auth_method,
+        "roles": credential.roles,
+    }
+    if fingerprint:
+        metadata["rotation"] = {
+            "key_fingerprint": fingerprint,
+            "issued_at": credential.created_at.isoformat(),
+        }
+
     record_audit_event(
         db,
         actor=principal,
         action="create_principal",
         resource_type="principal",
         resource_id=str(credential.id),
-        metadata={
-            "subject": credential.subject,
-            "auth_method": credential.auth_method,
-            "roles": credential.roles,
-        },
+        metadata=metadata,
     )
 
+    base_response = _serialize_principal_credential(credential)
     response_payload = PrincipalCredentialCreatedResponse.model_validate(
-        credential, from_attributes=True
+        base_response.model_dump()
     )
-    return response_payload.model_copy(update={"secret": secret})
+    if secret is not None:
+        response_payload = response_payload.model_copy(update={"secret": secret})
+    return response_payload
 
 
 @app.post(
@@ -1146,7 +1301,7 @@ def revoke_principal_credential(
 ) -> PrincipalCredentialResponse:
     enforce_roles(
         principal,
-        ["admin"],
+        [ROLE_ADMIN],
         db,
         resource_type="endpoint",
         resource_id=f"/principals/{credential_id}/revoke",
@@ -1166,20 +1321,33 @@ def revoke_principal_credential(
     else:
         db.refresh(credential)
 
+    fingerprint = _fingerprint_from_hash(credential.key_hash)
+    metadata = {
+        "subject": credential.subject,
+        "auth_method": credential.auth_method,
+        "roles": credential.roles,
+        "revoked_at": credential.revoked_at.isoformat()
+        if credential.revoked_at
+        else None,
+    }
+    if fingerprint:
+        metadata["rotation"] = {
+            "key_fingerprint": fingerprint,
+            "revoked_at": credential.revoked_at.isoformat()
+            if credential.revoked_at
+            else None,
+        }
+
     record_audit_event(
         db,
         actor=principal,
         action="revoke_principal",
         resource_type="principal",
         resource_id=str(credential.id),
-        metadata={
-            "subject": credential.subject,
-            "auth_method": credential.auth_method,
-            "roles": credential.roles,
-        },
+        metadata=metadata,
     )
 
-    return PrincipalCredentialResponse.model_validate(credential, from_attributes=True)
+    return _serialize_principal_credential(credential)
 
 
 @app.post(
@@ -1190,7 +1358,13 @@ def create_target(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetResponse:
-    enforce_roles(principal, [ROLE_TARGETS_WRITE])
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_WRITE],
+        db,
+        resource_type="endpoint",
+        resource_id="/targets",
+    )
     existing = db.query(Target).filter(Target.scope == request.scope).first()
     if existing:
         raise HTTPException(
@@ -1223,7 +1397,13 @@ def list_targets(
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> TargetCollectionResponse:
-    enforce_roles(principal, [ROLE_TARGETS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/targets",
+    )
     targets = db.query(Target).order_by(Target.created_at.desc()).all()
 
     record_audit_event(
@@ -1249,7 +1429,13 @@ def enqueue_scan(
     queue: QueueClient = Depends(get_queue_client),
     settings: Settings = Depends(get_settings),
 ) -> ScanResponse:
-    enforce_roles(principal, [ROLE_SCAN_ENQUEUE])
+    enforce_roles(
+        principal,
+        [ROLE_SCAN_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/scan",
+    )
 
     target = db.get(Target, scan_request.target_id)
     if target is None:
@@ -1263,9 +1449,34 @@ def enqueue_scan(
             detail="Target is currently outside the authorized scope",
         )
 
+    requested_hosts_param = scan_request.parameters.get("requested_hosts")
+    allowed_hosts: List[str] = []
+    rejected_hosts: List[str] = []
+    if "requested_hosts" in scan_request.parameters:
+        try:
+            requested_hosts = _coerce_requested_hosts(requested_hosts_param)
+        except TypeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="parameters.requested_hosts must be an array of host strings",
+            ) from exc
+
+        allowed_hosts, rejected_hosts = _filter_hosts_for_scope(
+            target.scope, requested_hosts
+        )
+
+        if requested_hosts and not allowed_hosts and rejected_hosts:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No requested hosts remain within the authorized target scope",
+            )
+
     profile, templates, tags, sanitized_parameters = resolve_nuclei_job_configuration(
         scan_request.parameters
     )
+
+    if "requested_hosts" in scan_request.parameters:
+        sanitized_parameters["requested_hosts"] = allowed_hosts
 
     scan = Scan(
         target_id=target.id,
@@ -1306,6 +1517,11 @@ def enqueue_scan(
             "template_profile": profile,
             "controller_callback_url": callback_url,
             "parameters": sanitized_parameters,
+            **(
+                {"rejected_hosts": rejected_hosts}
+                if rejected_hosts
+                else {}
+            ),
         },
     }
     queue.enqueue(settings.nuclei_queue_channel, job_payload)
@@ -1322,6 +1538,14 @@ def enqueue_scan(
             "scanner": scan.scanner,
             "job_id": job_id,
             "template_profile": profile,
+            **(
+                {
+                    "requested_hosts": allowed_hosts,
+                    **({"rejected_hosts": rejected_hosts} if rejected_hosts else {}),
+                }
+                if "requested_hosts" in scan_request.parameters
+                else {}
+            ),
         },
     )
 
@@ -1402,7 +1626,13 @@ def list_scans(
 ) -> ScanCollectionResponse:
     """Return the most recent scans for the authenticated principal."""
 
-    enforce_roles(principal, [ROLE_SCANS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_SCANS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/scans",
+    )
     query = db.query(Scan).options(
         selectinload(Scan.target), selectinload(Scan.findings)
     )
@@ -1613,7 +1843,13 @@ def list_findings(
 ) -> FindingCollectionResponse:
     """Return the latest findings for the requested scope."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/findings",
+    )
     query = db.query(Finding)
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
@@ -1645,7 +1881,13 @@ def get_finding(
 ) -> FindingItemResponse:
     """Fetch a single finding for detailed analysis views."""
 
-    enforce_roles(principal, [ROLE_FINDINGS_READ])
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/findings/{finding_id}",
+    )
     finding = db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(
