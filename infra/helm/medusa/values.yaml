@@ -1,0 +1,318 @@
+# Default values for the Medusa Helm chart.
+# These defaults intentionally assume a hardened production deployment.
+# Development-friendly overrides live in values-dev.yaml.
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+rbac:
+  create: true
+
+podSecurityStandards:
+  enabled: true
+  enforce: baseline
+  audit: restricted
+  warn: baseline
+  namespaceLabelsOnly: false
+
+secrets:
+  strategy: inline # one of [inline, externalSecret, sealedSecret]
+  name: medusa-secrets
+  inline:
+    MEDUSA_DATABASE_URL: "postgresql+psycopg2://medusa:medusa@postgresql:5432/medusa"
+    MEDUSA_REDIS_URL: "redis://redis-master:6379/0"
+    MEDUSA_NUCLEI_QUEUE_CHANNEL: "queues:nuclei:jobs"
+    MEDUSA_NUCLEI_CALLBACK_TOKEN: "change-me"
+    MEDUSA_JWT_SECRET: "change-me"
+    MINIO_ROOT_USER: "medusaadmin"
+    MINIO_ROOT_PASSWORD: "medusaadmin123"
+    MINIO_SITE_REGION: "us-east-1"
+    MEDUSA_ANALYST_API_KEY: ""
+    NUCLEI_CALLBACK_TOKEN: "change-me"
+    NUCLEI_ARTIFACT_BUCKET: ""
+    S3_ACCESS_KEY: "medusaadmin"
+    S3_SECRET_KEY: "medusaadmin123"
+    MEDUSA_POSTGRES_PASSWORD: "change-me"
+  externalSecret:
+    secretStoreKind: ClusterSecretStore
+    secretStoreName: medusa-cluster-secrets
+    refreshInterval: 1h
+    data: []
+  sealedSecret:
+    encryptedData: {}
+    annotations: {}
+
+controller:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: ghcr.io/medusa/controller
+    tag: ""
+    pullPolicy: IfNotPresent
+  component: controller
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ""
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+  securityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  podSecurityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+  env:
+    extra: []
+  envFrom: []
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 6
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 30
+    periodSeconds: 20
+    failureThreshold: 6
+  service:
+    type: ClusterIP
+    port: 8000
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: medusa.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+postgresql:
+  enabled: true
+  image:
+    repository: postgres
+    tag: 15-alpine
+    pullPolicy: IfNotPresent
+  component: postgresql
+  primary:
+    persistence:
+      enabled: true
+      storageClass: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 10Gi
+  service:
+    port: 5432
+  securityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  env:
+    POSTGRES_DB: medusa
+    POSTGRES_USER: medusa
+    POSTGRES_PASSWORD_SECRET_KEY: MEDUSA_POSTGRES_PASSWORD
+    extra: []
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: 7.2-alpine
+    pullPolicy: IfNotPresent
+  component: redis
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
+  service:
+    port: 6379
+  securityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+minio:
+  enabled: true
+  image:
+    repository: quay.io/minio/minio
+    tag: RELEASE.2024-05-27T16-10-24Z
+    pullPolicy: IfNotPresent
+  component: minio
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+  service:
+    apiPort: 9000
+    consolePort: 9001
+    annotations: {}
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  env:
+    extra: []
+  consoleIngress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: minio.medusa.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+qdrant:
+  enabled: true
+  image:
+    repository: qdrant/qdrant
+    tag: v1.7.3
+    pullPolicy: IfNotPresent
+  component: qdrant
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+  service:
+    httpPort: 6333
+    grpcPort: 6334
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+workers:
+  nuclei:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-nuclei
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: nuclei-worker
+    command: []
+    args: []
+    env:
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+
+networkPolicies:
+  enabled: true
+  controller:
+    allowedNamespaces: []
+  ingress:
+    enabled: true
+  egress:
+    enabled: true
+
+metrics:
+  prometheus:
+    enabled: false
+  grafana:
+    enabled: false
+    adminPassword: ""
+
+kubeconform:
+  strict: true
+  additionalArgs: []

@@ -1,0 +1,103 @@
+# Development overrides that mirror infra/docker/docker-compose.yml.
+# These values intentionally trade resiliency for fast local iteration.
+
+controller:
+  replicaCount: 1
+  image:
+    repository: medusa/controller
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8000
+  persistence:
+    enabled: false
+
+postgresql:
+  primary:
+    persistence:
+      enabled: false
+  env:
+    POSTGRES_DB: medusa
+    POSTGRES_USER: medusa
+    POSTGRES_PASSWORD_SECRET_KEY: MEDUSA_POSTGRES_PASSWORD
+
+redis:
+  persistence:
+    enabled: false
+
+minio:
+  persistence:
+    enabled: false
+
+qdrant:
+  persistence:
+    enabled: false
+
+workers:
+  nuclei:
+    image:
+      repository: medusa/worker-nuclei
+      tag: latest
+    env:
+      extra:
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_REDIS_URL
+        - name: NUCLEI_QUEUE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_NUCLEI_QUEUE_CHANNEL
+        - name: NUCLEI_DEAD_LETTER_KEY
+          value: queues:nuclei:dead
+        - name: NUCLEI_CALLBACK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: NUCLEI_CALLBACK_TOKEN
+        - name: NUCLEI_CALLBACK_VERIFY_TLS
+          value: "false"
+        - name: NUCLEI_CALLBACK_TIMEOUT
+          value: "30"
+        - name: NUCLEI_POLL_TIMEOUT
+          value: "2"
+        - name: NUCLEI_MAX_RETRIES
+          value: "3"
+        - name: S3_ENDPOINT_URL
+          value: http://medusa-medusa-minio:9000
+        - name: S3_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_ACCESS_KEY
+        - name: S3_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_SECRET_KEY
+        - name: NUCLEI_ARTIFACT_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: NUCLEI_ARTIFACT_BUCKET
+
+secrets:
+  strategy: inline
+  inline:
+    MEDUSA_DATABASE_URL: postgresql+psycopg2://medusa:medusa@postgresql:5432/medusa
+    MEDUSA_REDIS_URL: redis://redis:6379/0
+    MEDUSA_NUCLEI_QUEUE_CHANNEL: queues:nuclei:jobs
+    MEDUSA_NUCLEI_CALLBACK_TOKEN: local-dev-nuclei-callback
+    MEDUSA_JWT_SECRET: change-this-in-production
+    MINIO_ROOT_USER: medusaadmin
+    MINIO_ROOT_PASSWORD: medusaadmin123
+    MINIO_SITE_REGION: us-east-1
+    MEDUSA_ANALYST_API_KEY: ""
+    NUCLEI_CALLBACK_TOKEN: local-dev-nuclei-callback
+    NUCLEI_ARTIFACT_BUCKET: ""
+    S3_ACCESS_KEY: medusaadmin
+    S3_SECRET_KEY: medusaadmin123
+    MEDUSA_POSTGRES_PASSWORD: medusa
