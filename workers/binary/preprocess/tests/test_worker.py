@@ -5,10 +5,10 @@ from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from controller.db.models import Base, BinarySample
+from controller.db.models import Base, BinarySample, Scan, Target
 from workers.binary.preprocess.inspection import FileDescriptor
 from workers.binary.preprocess.schemas import BinaryPreprocessJob
 from workers.binary.preprocess.storage import MetadataRepository
@@ -148,3 +148,50 @@ def test_policy_blocked_artifact(session_factory: sessionmaker) -> None:
     ]
     assert metadata_payload["policy_allowed"] is False
     assert metadata_payload["policy_status"] == "blocked"
+
+
+def test_scan_record_marked_processed(session_factory: sessionmaker) -> None:
+    sample_bytes = b"ELF" + b"\x00" * 9
+    descriptor = _descriptor_for(sample_bytes, "application/octet-stream")
+    storage = FakeStorage({("uploads", "firmware.bin"): sample_bytes})
+    inspector = StubInspector(descriptor)
+
+    with session_factory() as session:
+        target = Target(name="Firmware", scope="scope.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(target_id=target.id, scanner="binary_preprocess")
+        session.add(scan)
+        session.commit()
+        scan_id = scan.id
+        target_id = target.id
+
+    repo = MetadataRepository(session_factory)
+    config = WorkerConfig(
+        allowed_mime_types=("application/octet-stream",),
+        metadata_bucket="binary-metadata",
+    )
+    worker = BinaryPreprocessWorker(
+        config,
+        inspector=inspector,
+        storage=storage,
+        repository=repo,
+        policies=None,
+        session_factory=session_factory,
+    )
+
+    job = _make_job(
+        scan_id=scan_id,
+        target_id=target_id,
+        object_key="firmware.bin",
+        file_name="firmware.bin",
+    )
+    worker.process_job(job)
+
+    with session_factory() as session:
+        refreshed = session.get(Scan, scan_id)
+        assert refreshed is not None
+        assert refreshed.status == "processed"
+        assert refreshed.completed_at is not None
+        assert refreshed.started_at is not None

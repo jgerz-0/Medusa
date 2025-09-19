@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Generator, Optional
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from controller.db.models import Base, BinarySample
+from controller.db.models import Base, BinarySample, Scan
 from workers.binary.preprocess.schemas import NormalizedBinaryMetadata
 
 LOG = logging.getLogger("medusa.workers.binary.preprocess.storage")
@@ -127,6 +127,22 @@ class MetadataRepository:
             session.add(record)
             session.flush()
             session.refresh(record)
+
+            scan = session.get(Scan, metadata.scan_id)
+            if scan is not None:
+                scan.status = "processed"
+                if scan.started_at is None:
+                    scan.started_at = metadata.inspected_at
+                scan.completed_at = metadata.inspected_at
+                LOG.info(
+                    "Marked scan processed",
+                    extra={
+                        "scan_id": metadata.scan_id,
+                        "status": scan.status,
+                        "completed_at": metadata.inspected_at.isoformat(),
+                    },
+                )
+
             LOG.info(
                 "Persisted binary metadata",
                 extra={"scan_id": metadata.scan_id, "sha256": metadata.sha256},

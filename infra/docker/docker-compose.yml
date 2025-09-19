@@ -246,6 +246,11 @@ services:
     volumes:
       - ../../workers/web/sqlmap:/app:delegated
 
+  binary-preprocess-worker:
+    build:
+      context: ../..
+      dockerfile: workers/binary/preprocess/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_binary_preprocess_worker
   cve-enrichment-worker:
     build:
       context: ../..
@@ -256,6 +261,15 @@ services:
       - .env
     environment:
       REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
+      BINARY_PREPROCESS_QUEUE_KEY: ${BINARY_PREPROCESS_QUEUE_KEY:-queues:binary:preprocess}
+      BINARY_PREPROCESS_DEAD_LETTER_KEY: ${BINARY_PREPROCESS_DEAD_LETTER_KEY:-queues:binary:preprocess:dead}
+      BINARY_METADATA_BUCKET: ${BINARY_METADATA_BUCKET:-binary-metadata}
+      BINARY_METADATA_PREFIX: ${BINARY_METADATA_PREFIX:-preprocess/metadata/}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-medusaadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-medusaadmin123}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
       CVE_ENRICHMENT_QUEUE_KEY: ${CVE_ENRICHMENT_QUEUE_KEY:-queues:enrichment:cve}
       CVE_ENRICHMENT_RESULT_QUEUE_KEY: ${CVE_ENRICHMENT_RESULT_QUEUE_KEY:-queues:enrichment:cve:results}
       CVE_ENRICHMENT_ERROR_QUEUE_KEY: ${CVE_ENRICHMENT_ERROR_QUEUE_KEY:-queues:enrichment:cve:errors}
@@ -273,10 +287,14 @@ services:
         condition: service_healthy
       controller:
         condition: service_healthy
-      qdrant:
+      minio:
         condition: service_healthy
     volumes:
+      - ../../controller:/app/controller:delegated
+      - ../../workers/binary/preprocess:/app/workers/binary/preprocess:delegated
       - ../../workers/enrichment/cve:/app:delegated
+      qdrant:
+        condition: service_healthy
 
 volumes:
   frontend_node_modules:

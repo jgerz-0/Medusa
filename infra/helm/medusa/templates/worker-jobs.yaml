@@ -47,11 +47,22 @@ spec:
           {{- end }}
           securityContext:
             {{- toYaml $worker.securityContext | nindent 12 }}
+          {{- if or $worker.env.secretRefs (or $worker.env.values $worker.env.extra) }}
           env:
-            - name: REDIS_URL
+            {{- with $worker.env.secretRefs }}
+            {{- range $envName, $secretKey := . }}
+            - name: {{ $envName }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $.Values.secrets.name }}
+                  key: {{ $secretKey }}
+            {{- end }}
+            {{- end }}
+            {{- with $worker.env.values }}
+            {{- range $envName, $value := . }}
+            - name: {{ $envName }}
+              value: {{ tpl $value $ | quote }}
+            {{- end }}
                   key: MEDUSA_REDIS_URL
             {{- if eq $name "nuclei" }}
             - name: NUCLEI_QUEUE_KEY
@@ -137,6 +148,7 @@ spec:
             {{- range $worker.env.extra }}
             - {{- toYaml . | nindent 14 }}
             {{- end }}
+          {{- end }}
           resources:
             {{- toYaml $worker.resources | nindent 12 }}
 ---
