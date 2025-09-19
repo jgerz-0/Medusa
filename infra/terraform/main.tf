@@ -21,6 +21,11 @@ terraform {
       source  = "external-secrets/external-secrets"
       version = "~> 0.9"
     }
+
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.5"
+    }
   }
 
   backend "s3" {
@@ -92,6 +97,84 @@ module "eks" {
   default_node_group_disk_size = var.default_node_group_disk_size
   managed_node_groups = var.managed_node_groups
   tags = local.common_tags
+}
+
+data "aws_eks_cluster_auth" "medusa" {
+  name = local.cluster_name
+
+  depends_on = [module.eks]
+}
+
+resource "random_password" "medusa_callback" {
+  for_each = {
+    nuclei        = true
+    enrichment    = true
+    binary_static = true
+    binary_fuzzing = true
+  }
+
+  length  = 40
+  special = false
+}
+
+module "medusa" {
+  source = "./modules/medusa"
+
+  cluster_name                       = local.cluster_name
+  cluster_endpoint                   = module.eks.cluster_endpoint
+  cluster_certificate_authority_data = module.eks.cluster_certificate_authority_data
+  cluster_token                      = data.aws_eks_cluster_auth.medusa.token
+
+  namespace    = local.environment_context.namespace
+  release_name = local.environment_context.helm_release
+
+  secret_name     = var.medusa_secret_name
+  secret_strategy = var.medusa_secret_strategy
+
+  manage_inline_secret   = var.medusa_manage_inline_secret
+  manage_external_secret = var.medusa_manage_external_secret
+
+  database = {
+    hostname          = module.rds.controller_context.hostname
+    port              = module.rds.controller_context.port
+    database          = module.rds.controller_context.database
+    connection_string = module.rds.controller_context.connection_string
+    secret_arn        = module.rds.controller_context.secret_arn
+    secret_name       = module.rds.controller_context.secret_name
+  }
+
+  bucket_names = merge(
+    {
+      artifact = module.s3.artifact_bucket.name
+      fuzzing  = module.s3.artifact_bucket.name
+      metadata = module.s3.artifact_bucket.name
+    },
+    var.medusa_bucket_overrides,
+  )
+
+  callback_tokens = {
+    nuclei         = random_password.medusa_callback["nuclei"].result
+    enrichment     = random_password.medusa_callback["enrichment"].result
+    binary_static  = random_password.medusa_callback["binary_static"].result
+    binary_fuzzing = random_password.medusa_callback["binary_fuzzing"].result
+  }
+
+  inline_secret_overrides       = var.medusa_inline_secret_overrides
+  external_secret_configuration = var.medusa_external_secret_configuration
+  controller_additional_env     = var.medusa_controller_additional_env
+  extra_values                  = var.medusa_extra_values
+  common_labels = merge(
+    {
+      "app.kubernetes.io/managed-by" = "terraform"
+      "medusa.security/environment"  = local.environment
+      "medusa.security/project"      = local.project_name
+    },
+    var.medusa_additional_labels,
+  )
+  render_operator_kubeconfig = var.medusa_render_operator_kubeconfig
+  helm_timeout_seconds       = var.medusa_helm_timeout_seconds
+
+  depends_on = [module.eks, module.rds, module.s3]
 }
 
 module "s3" {
