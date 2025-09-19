@@ -1,8 +1,9 @@
 import json
+from datetime import datetime
 from unittest import mock
 
 import pytest
-
+from controller.main import NucleiCallbackRequest
 from controller.main import CallbackFinding
 from workers.web.nuclei import worker
 
@@ -151,18 +152,30 @@ def test_process_job_posts_callback(sample_job):
     assert args[0] == sample_job.callback_url
     payload = kwargs["json"]
     assert payload["status"] == "completed"
-    assert payload["scan_id"] == sample_job.scan_id
+    assert payload["scan_id"] == str(sample_job.scan_id)
     assert payload["findings"][0]["severity"] == "high"
     assert payload["error"] is None
+    completed_at = payload["completed_at"]
+    assert isinstance(completed_at, str)
+    parsed_completed_at = datetime.fromisoformat(completed_at)
+    assert parsed_completed_at.tzinfo is not None
     metadata = payload["worker_metadata"]
-    assert metadata["artifact_locations"]["stdout"].endswith("stdout.log")
+    assert metadata["artifacts"]["stdout"].endswith("stdout.log")
     assert metadata["job_id"] == sample_job.job_id
+    artifact_locations = payload.get("artifact_locations")
+    assert artifact_locations is not None
+    assert artifact_locations["stdout"].endswith("stdout.log")
 
     headers = kwargs["headers"]
     assert headers["X-Callback-Token"] == "shared-secret"
 
     # stdout upload attempted because stdout is populated
     mock_s3.put_object.assert_called()
+
+    # Validate payload against controller schema (extras ignored by design).
+    model = NucleiCallbackRequest.model_validate(payload)
+    assert model.scan_id == payload["scan_id"]
+    assert model.status == "completed"
 
 
 def test_post_callback_includes_token(sample_job):

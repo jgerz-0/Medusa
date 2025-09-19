@@ -160,9 +160,11 @@ class NucleiJob:
             raise FatalJobError("Job payload contains invalid 'scan_id'")
 
         try:
-            attempts = int(data.get("attempts", 0))
-        except (TypeError, ValueError) as exc:
-            raise FatalJobError("Job payload contains invalid 'scan_id'") from exc
+            int(scan_id_raw)
+        except (TypeError, ValueError):
+            # `scan_id` may be a UUID string when provided through metadata.
+            if not isinstance(scan_id_raw, str) or not scan_id_raw.strip():
+                raise FatalJobError("Job payload contains invalid 'scan_id'")
 
         attempts = int(data.get("attempts", 0))
         tags = data.get("tags") or []
@@ -170,13 +172,7 @@ class NucleiJob:
         if not isinstance(metadata_payload, dict):
             raise FatalJobError("Job metadata must be a JSON object")
         scan_id_value = data.get("scan_id") or metadata_payload.get("scan_id")
-        if scan_id_value is None:
-            raise FatalJobError("Job payload missing 'scan_id'")
-        try:
-            int(scan_id_value)
-        except (TypeError, ValueError) as exc:
-            raise FatalJobError("Job payload contains invalid 'scan_id'") from exc
-        scan_id_str = str(scan_id_value)
+        scan_id_str = str(scan_id_value) if scan_id_value is not None else None
 
         return cls(
             job_id=job_id,
@@ -446,10 +442,11 @@ def normalize_findings(records: Iterable[Dict[str, Any]], job: NucleiJob) -> Lis
             {
                 "title": title,
                 "severity": severity,
-                "description": description,
-                "cve_id": cve_id,
-                "metadata": metadata,
-                "evidence": evidence,
+                "description": str(description),
+                "cve_id": _coerce_cve(info),
+                "metadata": {k: v for k, v in metadata.items() if v},
+                "evidence": {k: v for k, v in evidence.items() if v},
+                "artifacts": [artifact_payload],
             }
         )
     return findings
@@ -534,16 +531,19 @@ def process_job(
 ) -> None:
     """Execute a single job lifecycle."""
 
-    scan_id = job.scan_id
+    scan_id = job.scan_id or (
+        job.metadata.get("scan_id") if isinstance(job.metadata, dict) else None
+    )
     if not scan_id:
         raise FatalJobError("Job payload missing 'scan_id' required for callback")
+    normalized_scan_id = str(scan_id)
 
     scan = run_scan(job, config)
     if scan.exit_code != 0:
         raise RetryableJobError(f"nuclei exited with code {scan.exit_code}")
 
     findings = normalize_findings(scan.records, job)
-    artifacts = upload_artifacts(scan, job, config, s3_client)
+    artifact_locations = upload_artifacts(scan, job, config, s3_client)
     worker_metadata: Dict[str, Any] = {
         "job_id": job.job_id,
         "target": job.target,
@@ -554,19 +554,20 @@ def process_job(
     extra_metadata = {k: v for k, v in job.metadata.items() if k != "scan_id"} if job.metadata else {}
     if extra_metadata:
         worker_metadata["job_metadata"] = extra_metadata
-    if artifacts:
-        worker_metadata["artifact_locations"] = artifacts
+    if artifact_locations:
+        worker_metadata["artifacts"] = artifact_locations
 
-    if job.metadata:
-        worker_metadata.update({k: v for k, v in job.metadata.items() if k != "scan_id"})
+    worker_metadata.update(job.metadata)
     payload = {
-        "scan_id": scan_id,
+        "scan_id": normalized_scan_id,
         "status": "completed",
         "findings": findings,
         "worker_metadata": worker_metadata,
         "error": None,
         "completed_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+    if artifact_locations:
+        payload["artifact_locations"] = artifact_locations
     post_callback(job, config, payload, session=session)
     LOG.info("Job %s completed successfully", job.job_id)
 
