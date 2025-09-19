@@ -30,6 +30,7 @@ def test_sqlmap_worker_config_defaults(monkeypatch):
         nuclei_callback_token="nuclei-token",
         zap_callback_token="zap-token",
         sqlmap_callback_token="sqlmap-token",
+        validator_callback_token="validator-token",
         enrichment_callback_token="enrichment-token",
         binary_static_analysis_callback_token="static-secret",
         binary_fuzzing_callback_token="fuzzing-secret",

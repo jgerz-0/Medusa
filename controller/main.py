@@ -47,6 +47,12 @@ from controller.db.models import (
     Target,
 )
 from controller.db.session import SessionLocal
+from controller.notifications import (
+    CriticalFindingNotification,
+    NotificationService,
+    build_notification_service,
+)
+from controller.severity import normalize_severity, severity_score
 from workers.enrichment.cve.schemas import CVEEnrichmentResult
 
 
@@ -78,6 +84,14 @@ ALLOWED_ROLES = {
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
 }
+
+FINDING_STATUS_PENDING_VALIDATION = "pending_validation"
+FINDING_STATUS_OPEN = "open"
+FINDING_STATUS_INVALIDATED = "invalidated"
+
+VALIDATION_STATUS_PENDING = "pending"
+VALIDATION_STATUS_PASSED = "passed"
+VALIDATION_STATUS_FAILED = "failed"
 
 DEFAULT_ANALYST_ROLES = [
     ROLE_ANALYST,
@@ -530,6 +544,10 @@ class Settings(BaseSettings):
     sqlmap_queue_channel: str = Field(
         "queues:sqlmap:jobs", description="Redis list channel for SQLMap scan jobs."
     )
+    validator_queue_channel: str = Field(
+        "queues:validator:jobs",
+        description="Redis list channel for finding validation jobs.",
+    )
     jwt_secret: str = Field(
         ..., description="JWT secret used to validate bearer tokens."
     )
@@ -570,6 +588,9 @@ class Settings(BaseSettings):
     sqlmap_callback_token: str = Field(
         ..., description="Shared secret token required for SQLMap worker callbacks."
     )
+    validator_callback_token: str = Field(
+        ..., description="Shared secret required for validator worker callbacks."
+    )
     enrichment_callback_token: str = Field(
         ..., description="Shared secret required for enrichment worker callbacks."
     )
@@ -579,6 +600,38 @@ class Settings(BaseSettings):
     )
     binary_fuzzing_callback_token: str = Field(
         ..., description="Shared secret required for binary fuzzing worker callbacks."
+    )
+    notification_slack_webhook: Optional[str] = Field(
+        default=None,
+        description="Incoming webhook URL for Slack notifications.",
+    )
+    notification_email_sender: Optional[str] = Field(
+        default=None,
+        description="Email address used as the sender for notification emails.",
+    )
+    notification_email_recipients: List[str] = Field(
+        default_factory=list,
+        description="Email recipients for validated critical finding alerts.",
+    )
+    smtp_host: Optional[str] = Field(
+        default=None,
+        description="SMTP host used to dispatch notification emails.",
+    )
+    smtp_port: int = Field(
+        default=587,
+        description="SMTP port used for notification emails.",
+    )
+    smtp_username: Optional[str] = Field(
+        default=None,
+        description="SMTP username for authenticated email delivery.",
+    )
+    smtp_password: Optional[str] = Field(
+        default=None,
+        description="SMTP password for authenticated email delivery.",
+    )
+    smtp_use_tls: bool = Field(
+        default=True,
+        description="Whether to negotiate STARTTLS when delivering notification emails.",
     )
 
     model_config = ConfigDict(env_prefix="MEDUSA_", case_sensitive=False)
@@ -868,6 +921,11 @@ class StaticAnalysisFindingPayload(BaseModel):
     artifact_key: Optional[str] = None
     executed_at: datetime
 
+    @field_validator("severity")
+    @classmethod
+    def validate_severity(cls, value: str) -> str:
+        return normalize_severity(value)
+
 
 class StaticAnalysisReportPayload(BaseModel):
     tool: str
@@ -915,11 +973,7 @@ class FuzzingFindingPayload(BaseModel):
     @field_validator("severity")
     @classmethod
     def validate_severity(cls, value: str) -> str:
-        allowed = {"critical", "high", "medium", "low", "info"}
-        lowered = value.lower()
-        if lowered not in allowed:
-            raise ValueError("Unsupported severity level")
-        return lowered
+        return normalize_severity(value)
 
 
 class FuzzingRunPayload(BaseModel):
@@ -1008,7 +1062,11 @@ class FindingResponse(BaseModel):
     description: str
     detected_at: datetime
     updated_at: datetime
-    status: str
+    status: Literal[
+        FINDING_STATUS_PENDING_VALIDATION,
+        FINDING_STATUS_OPEN,
+        FINDING_STATUS_INVALIDATED,
+    ]
     template_id: str
     evidence: Optional[str]
     remediation: Optional[str]
@@ -1039,11 +1097,7 @@ class CallbackFinding(BaseModel):
     @field_validator("severity")
     @classmethod
     def validate_severity(cls, value: str) -> str:
-        allowed = {"critical", "high", "medium", "low", "info"}
-        lowered = value.lower()
-        if lowered not in allowed:
-            raise ValueError("Unsupported severity level")
-        return lowered
+        return normalize_severity(value)
 
 
 class ScanCallbackRequest(BaseModel):
@@ -1066,6 +1120,29 @@ class ScanCallbackRequest(BaseModel):
 
 NucleiCallbackRequest = ScanCallbackRequest
 
+
+class ValidationFindingResult(BaseModel):
+    finding_id: str = Field(..., min_length=1, max_length=36)
+    status: Literal["passed", "failed"]
+    observed_at: datetime
+    evidence_hash: Optional[str] = None
+    severity: Optional[str] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("severity")
+    @classmethod
+    def validate_severity(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_severity(value)
+
+
+class ValidatorCallbackRequest(BaseModel):
+    job_id: str = Field(..., min_length=1, max_length=64)
+    status: Literal["completed", "failed"]
+    processed_at: datetime
+    findings: List[ValidationFindingResult] = Field(default_factory=list)
+    error: Optional[str] = None
 
 class Principal(BaseModel):
     subject: str
@@ -1196,6 +1273,21 @@ def get_db_session() -> Iterator[Session]:
 
 def get_queue_client(settings: Settings = Depends(get_settings)) -> QueueClient:
     return RedisQueueClient(settings.redis_url)
+
+
+def get_notification_service(
+    settings: Settings = Depends(get_settings),
+) -> NotificationService:
+    return build_notification_service(
+        slack_webhook=settings.notification_slack_webhook,
+        email_sender=settings.notification_email_sender,
+        email_recipients=settings.notification_email_recipients,
+        smtp_host=settings.smtp_host,
+        smtp_port=settings.smtp_port,
+        smtp_username=settings.smtp_username,
+        smtp_password=settings.smtp_password,
+        smtp_use_tls=settings.smtp_use_tls,
+    )
 
 
 def _authenticate_callback_worker(
@@ -1496,6 +1588,22 @@ def authenticate_sqlmap_worker(
         subject="worker:sqlmap",
         db=db,
         resource_id="sqlmap",
+    )
+
+
+def authenticate_validator_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
+) -> Principal:
+    """Authenticate validator worker callbacks using a shared secret header."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.validator_callback_token,
+        subject="worker:validator",
+        db=db,
+        resource_id="validator",
     )
 
 
@@ -2693,6 +2801,9 @@ def _persist_scan_callback(
     payload: ScanCallbackRequest,
     principal: Principal,
     worker_name: str,
+    queue: QueueClient,
+    settings: Settings,
+    validator_callback_url: str,
 ) -> int:
     if scan.scanner != worker_name:
         raise HTTPException(
@@ -2718,6 +2829,7 @@ def _persist_scan_callback(
     if payload.status in {"completed", "failed"}:
         scan.completed_at = payload.completed_at or datetime.now(tz=timezone.utc)
 
+    pending_validation_jobs: List[Dict[str, Any]] = []
     findings_persisted = 0
     for finding_payload in payload.findings:
         metadata_payload = deepcopy(_normalize_payload(finding_payload.metadata))
@@ -2734,8 +2846,51 @@ def _persist_scan_callback(
             evidence=evidence_payload,
             evidence_hash="",
         )
+        submitted_at = datetime.now(tz=timezone.utc)
+        job_id = str(uuid.uuid4())
+        finding.status = FINDING_STATUS_PENDING_VALIDATION
+        finding.validation_status = VALIDATION_STATUS_PENDING
+        finding.validation_metadata = {
+            "job_id": job_id,
+            "status": VALIDATION_STATUS_PENDING,
+            "scheduled_at": submitted_at.isoformat(),
+            "source_worker": worker_name,
+        }
         db.add(finding)
+        pending_validation_jobs.append(
+            {
+                "finding": finding,
+                "job_id": job_id,
+                "submitted_at": submitted_at,
+                "metadata": metadata_payload,
+                "evidence": evidence_payload,
+            }
+        )
         findings_persisted += 1
+
+    if pending_validation_jobs:
+        db.flush()
+
+    validation_jobs: List[Dict[str, Any]] = []
+    for job_data in pending_validation_jobs:
+        finding_record: Finding = job_data["finding"]
+        job_payload = _build_validation_job(
+            finding=finding_record,
+            scan=scan,
+            job_id=job_data["job_id"],
+            submitted_at=job_data["submitted_at"],
+            worker_name=worker_name,
+            metadata=job_data["metadata"],
+            evidence=job_data["evidence"],
+            validator_callback_url=validator_callback_url,
+        )
+        if job_payload:
+            validation_jobs.append(
+                {
+                    "payload": job_payload,
+                    "finding": finding_record,
+                }
+            )
 
     try:
         db.commit()
@@ -2753,7 +2908,83 @@ def _persist_scan_callback(
             detail="Failed to persist callback",
         ) from exc
 
+    if settings.validator_queue_channel and validation_jobs:
+        for job in validation_jobs:
+            queue.enqueue(settings.validator_queue_channel, job["payload"])
+            record_audit_event(
+                db,
+                actor=principal,
+                action="enqueue_validation",
+                resource_type="finding",
+                resource_id=str(job["finding"].id),
+                finding_id=str(job["finding"].id),
+                scan_id=str(scan.id),
+                metadata={
+                    "job_id": job["payload"]["job_id"],
+                    "validator_queue": settings.validator_queue_channel,
+                    "severity": job["finding"].severity,
+                },
+            )
+
     return findings_persisted
+
+
+def _build_validation_job(
+    *,
+    finding: Finding,
+    scan: Scan,
+    job_id: str,
+    submitted_at: datetime,
+    worker_name: str,
+    metadata: Dict[str, Any],
+    evidence: Dict[str, Any],
+    validator_callback_url: str,
+) -> Optional[Dict[str, Any]]:
+    if not validator_callback_url:
+        return None
+
+    target_scope = scan.target.scope if scan.target else None
+
+    job_payload: Dict[str, Any] = {
+        "job_id": job_id,
+        "finding_id": str(finding.id),
+        "scan_id": str(scan.id),
+        "target_id": str(scan.target_id),
+        "target_scope": target_scope,
+        "scanner": scan.scanner,
+        "severity": finding.severity,
+        "evidence_hash": finding.evidence_hash,
+        "callback_url": validator_callback_url,
+        "submitted_at": submitted_at.isoformat(),
+        "metadata": {
+            "source_worker": worker_name,
+            "source_scan_created_at": scan.created_at.isoformat()
+            if scan.created_at
+            else None,
+        },
+    }
+
+    http_steps: List[Dict[str, Any]] = []
+    uri = evidence.get("uri") or metadata.get("uri")
+    if isinstance(uri, str) and uri.strip().lower().startswith(("http://", "https://")):
+        method = evidence.get("method") or metadata.get("method") or "GET"
+        expected_status = evidence.get("status") or metadata.get("expected_status") or 200
+        http_steps.append(
+            {
+                "method": str(method).upper(),
+                "url": uri.strip(),
+                "expected_status": expected_status,
+            }
+        )
+
+    if http_steps:
+        job_payload["verification"] = {"http": http_steps}
+
+    job_payload["metadata"] = {
+        key: value for key, value in job_payload["metadata"].items() if value is not None
+    }
+
+    return job_payload
 
 
 def _handle_scan_callback(
@@ -2762,6 +2993,9 @@ def _handle_scan_callback(
     payload: ScanCallbackRequest,
     principal: Principal,
     worker_name: str,
+    queue: QueueClient,
+    settings: Settings,
+    validator_callback_url: str,
 ) -> Tuple[Scan, int]:
     scan = db.get(Scan, payload.scan_id)
     if scan is None:
@@ -2775,6 +3009,9 @@ def _handle_scan_callback(
         payload=payload,
         principal=principal,
         worker_name=worker_name,
+        queue=queue,
+        settings=settings,
+        validator_callback_url=validator_callback_url,
     )
     return scan, findings_persisted
 
@@ -2956,8 +3193,11 @@ def _persist_binary_fuzzing_callback(
 )
 def nuclei_callback(
     payload: ScanCallbackRequest,
+    http_request: Request,
     principal: Principal = Depends(authenticate_nuclei_worker),
     db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
 ) -> Response:
     """Persist nuclei worker results while enforcing evidence immutability."""
 
@@ -2966,6 +3206,9 @@ def nuclei_callback(
         payload=payload,
         principal=principal,
         worker_name=SCAN_TYPE_NUCLEI,
+        queue=queue,
+        settings=settings,
+        validator_callback_url=str(http_request.url_for("validator_callback")),
     )
 
     record_audit_event(
@@ -2991,8 +3234,11 @@ def nuclei_callback(
 )
 def zap_callback(
     payload: ScanCallbackRequest,
+    http_request: Request,
     principal: Principal = Depends(authenticate_zap_worker),
     db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
 ) -> Response:
     """Persist ZAP worker results."""
 
@@ -3001,6 +3247,9 @@ def zap_callback(
         payload=payload,
         principal=principal,
         worker_name=SCAN_TYPE_ZAP,
+        queue=queue,
+        settings=settings,
+        validator_callback_url=str(http_request.url_for("validator_callback")),
     )
 
     record_audit_event(
@@ -3026,8 +3275,11 @@ def zap_callback(
 )
 def sqlmap_callback(
     payload: ScanCallbackRequest,
+    http_request: Request,
     principal: Principal = Depends(authenticate_sqlmap_worker),
     db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
 ) -> Response:
     """Persist SQLMap worker results."""
 
@@ -3036,6 +3288,9 @@ def sqlmap_callback(
         payload=payload,
         principal=principal,
         worker_name=SCAN_TYPE_SQLMAP,
+        queue=queue,
+        settings=settings,
+        validator_callback_url=str(http_request.url_for("validator_callback")),
     )
 
     record_audit_event(
@@ -3051,6 +3306,156 @@ def sqlmap_callback(
         },
         message=payload.error,
     )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
+    "/internal/validator/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def validator_callback(
+    payload: ValidatorCallbackRequest,
+    principal: Principal = Depends(authenticate_validator_worker),
+    db: Session = Depends(get_db_session),
+    notification_service: NotificationService = Depends(get_notification_service),
+) -> Response:
+    """Promote or reject findings based on validator retests."""
+
+    validation_results: List[Dict[str, Any]] = []
+
+    for result in payload.findings:
+        finding = db.get(Finding, result.finding_id)
+        if finding is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Finding {result.finding_id} not found",
+            )
+        if (
+            result.evidence_hash
+            and finding.evidence_hash
+            and result.evidence_hash != finding.evidence_hash
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Evidence hash mismatch during validation",
+            )
+        if finding.status not in {
+            FINDING_STATUS_PENDING_VALIDATION,
+            FINDING_STATUS_INVALIDATED,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Finding already validated",
+            )
+
+        normalized_status = (
+            VALIDATION_STATUS_PASSED
+            if result.status == "passed"
+            else VALIDATION_STATUS_FAILED
+        )
+
+        if result.severity:
+            finding.severity = result.severity
+
+        finding.validation_status = normalized_status
+        finding.validated_at = result.observed_at
+        finding.status = (
+            FINDING_STATUS_OPEN
+            if normalized_status == VALIDATION_STATUS_PASSED
+            else FINDING_STATUS_INVALIDATED
+        )
+
+        validation_metadata = deepcopy(_normalize_payload(finding.validation_metadata))
+        history = validation_metadata.setdefault("history", [])
+        history.append(
+            {
+                "job_id": payload.job_id,
+                "status": normalized_status,
+                "observed_at": result.observed_at.isoformat(),
+                "details": deepcopy(result.details),
+            }
+        )
+        validation_metadata["job_id"] = payload.job_id
+        validation_metadata["status"] = normalized_status
+        validation_metadata["validator_subject"] = principal.subject
+        if payload.error:
+            errors = validation_metadata.setdefault("errors", [])
+            if payload.error not in errors:
+                errors.append(payload.error)
+        finding.validation_metadata = validation_metadata
+
+        validation_results.append(
+            {
+                "finding": finding,
+                "status": normalized_status,
+                "details": deepcopy(result.details),
+            }
+        )
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:  # pragma: no cover - defensive path
+        db.rollback()
+        LOGGER.exception(
+            "Failed to persist validator callback",
+            extra={"job_id": payload.job_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist validator callback",
+        ) from exc
+
+    notifications: List[CriticalFindingNotification] = []
+    for item in validation_results:
+        finding: Finding = item["finding"]
+        record_audit_event(
+            db,
+            actor=principal,
+            action="validator_callback",
+            resource_type="finding",
+            resource_id=str(finding.id),
+            finding_id=str(finding.id),
+            scan_id=str(finding.scan_id),
+            metadata={
+                "job_id": payload.job_id,
+                "validation_status": item["status"],
+                "details": item["details"],
+            },
+            message=payload.error if payload.error else None,
+        )
+
+        if (
+            finding.severity == "critical"
+            and item["status"] == VALIDATION_STATUS_PASSED
+        ):
+            target_scope = (
+                finding.scan.target.scope
+                if finding.scan and finding.scan.target
+                else None
+            )
+            notifications.append(
+                CriticalFindingNotification(
+                    finding_id=str(finding.id),
+                    title=finding.title,
+                    severity=finding.severity,
+                    target=target_scope,
+                    scanner=finding.scan.scanner if finding.scan else None,
+                    validation_status=item["status"],
+                    validated_at=finding.validated_at.isoformat()
+                    if finding.validated_at
+                    else None,
+                    evidence_hash=finding.evidence_hash,
+                    metadata={
+                        "scan_id": str(finding.scan_id),
+                        "job_id": payload.job_id,
+                    },
+                )
+            )
+
+    for notification in notifications:
+        notification_service.notify_critical_finding(notification)
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -3468,6 +3873,24 @@ def serialize_finding(finding: Finding) -> FindingResponse:
                 )
             )
 
+    status_value = finding.status or FINDING_STATUS_OPEN
+    validation_status = finding.validation_status or (
+        VALIDATION_STATUS_PASSED
+        if status_value == FINDING_STATUS_OPEN
+        else VALIDATION_STATUS_PENDING
+    )
+
+    metadata_payload.setdefault("severity_score", severity_score(finding.severity))
+    metadata_payload.setdefault("validation_status", validation_status)
+    validation_payload = deepcopy(_normalize_payload(finding.validation_metadata))
+    validation_payload.setdefault("status", validation_status)
+    if finding.validated_at:
+        validation_payload.setdefault(
+            "validated_at", finding.validated_at.isoformat()
+        )
+    if "validation" not in metadata_payload:
+        metadata_payload["validation"] = validation_payload
+
     return FindingResponse(
         id=str(finding.id),
         scan_id=str(finding.scan_id),
@@ -3477,7 +3900,7 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         description=finding.description,
         detected_at=detected_at,
         updated_at=finding.updated_at or detected_at,
-        status="open",
+        status=status_value,
         template_id=template_id,
         evidence=evidence_text,
         remediation=None,
@@ -3496,6 +3919,8 @@ def serialize_binary_static_finding(
     metadata_payload = deepcopy(_normalize_payload(record.metadata_json))
     metadata_payload.setdefault("scanner", SCAN_TYPE_BINARY_STATIC)
     metadata_payload.setdefault("tool", record.tool)
+    metadata_payload.setdefault("severity_score", severity_score(record.severity))
+    metadata_payload.setdefault("validation_status", VALIDATION_STATUS_PASSED)
     evidence_payload = _normalize_payload(record.evidence)
     evidence_text = (
         json.dumps(evidence_payload, sort_keys=True) if evidence_payload else None
@@ -3513,6 +3938,12 @@ def serialize_binary_static_finding(
         else f"{record.tool}:finding"
     )
 
+    if "validation" not in metadata_payload:
+        metadata_payload["validation"] = {
+            "status": VALIDATION_STATUS_PASSED,
+            "validated_at": record.executed_at.isoformat(),
+        }
+
     return FindingResponse(
         id=str(record.id),
         scan_id=str(record.scan_id),
@@ -3522,7 +3953,7 @@ def serialize_binary_static_finding(
         description=record.description,
         detected_at=record.executed_at,
         updated_at=record.updated_at or record.executed_at,
-        status="open",
+        status=FINDING_STATUS_OPEN,
         template_id=template_id,
         evidence=evidence_text,
         remediation=None,
@@ -3541,6 +3972,8 @@ def serialize_binary_fuzzing_finding(
     metadata_payload = deepcopy(_normalize_payload(record.metadata_json))
     metadata_payload.setdefault("scanner", SCAN_TYPE_BINARY_FUZZING)
     metadata_payload.setdefault("tool", record.tool)
+    metadata_payload.setdefault("severity_score", severity_score(record.severity))
+    metadata_payload.setdefault("validation_status", VALIDATION_STATUS_PASSED)
     evidence_payload = _normalize_payload(record.evidence)
     evidence_text = (
         json.dumps(evidence_payload, sort_keys=True) if evidence_payload else None
@@ -3557,6 +3990,12 @@ def serialize_binary_fuzzing_finding(
         else f"{record.tool}:crash"
     )
 
+    if "validation" not in metadata_payload:
+        metadata_payload["validation"] = {
+            "status": VALIDATION_STATUS_PASSED,
+            "validated_at": record.executed_at.isoformat(),
+        }
+
     return FindingResponse(
         id=str(record.id),
         scan_id=str(record.scan_id),
@@ -3566,7 +4005,7 @@ def serialize_binary_fuzzing_finding(
         description=record.description,
         detected_at=record.executed_at,
         updated_at=record.updated_at or record.executed_at,
-        status="open",
+        status=FINDING_STATUS_OPEN,
         template_id=template_id,
         evidence=evidence_text,
         remediation=None,

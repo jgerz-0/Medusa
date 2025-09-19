@@ -24,6 +24,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from controller.severity import normalize_severity
+
 
 class Base(DeclarativeBase):
     """Base declarative class used by all ORM models."""
@@ -143,6 +145,14 @@ class Finding(TimestampMixin, Base):
     )
     evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending_validation", nullable=False)
+    validated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    validation_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    validation_metadata: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
 
     scan: Mapped["Scan"] = relationship(back_populates="findings")
     audit_entries: Mapped[list["AuditLog"]] = relationship(
@@ -335,6 +345,7 @@ def _binary_sample_update_hash(mapper, connection, target: BinarySample) -> None
 def _binary_static_analysis_set_hash(
     mapper, connection, target: BinaryStaticAnalysisFinding
 ) -> None:
+    target.severity = normalize_severity(target.severity)
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
     if not target.evidence_hash:
@@ -347,6 +358,7 @@ def _binary_static_analysis_set_hash(
 
 @event.listens_for(BinaryFuzzingFinding, "before_insert", propagate=True)
 def _binary_fuzzing_set_hash(mapper, connection, target: BinaryFuzzingFinding) -> None:
+    target.severity = normalize_severity(target.severity)
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
     if not target.evidence_hash:
@@ -393,8 +405,10 @@ def _binary_static_analysis_prevent_mutation(
 
 @event.listens_for(Finding, "before_insert", propagate=True)
 def _finding_set_hash(mapper, connection, target: Finding) -> None:
+    target.severity = normalize_severity(target.severity)
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
+    target.validation_metadata = _coerce_evidence(target.validation_metadata)
     if not target.evidence_hash:
         payload = {
             "metadata": target.metadata_json,

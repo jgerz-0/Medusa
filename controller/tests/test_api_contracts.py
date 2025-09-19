@@ -30,9 +30,11 @@ from controller.main import (
     _hash_secret,
     app,
     get_db_session,
+    get_notification_service,
     get_queue_client,
     get_settings,
 )
+from controller.notifications import CriticalFindingNotification, NotificationService
 
 
 class InMemoryQueue(QueueClient):
@@ -41,6 +43,25 @@ class InMemoryQueue(QueueClient):
 
     def enqueue(self, channel: str, payload: dict) -> None:  # type: ignore[override]
         self.messages.append((channel, payload))
+
+
+class DummyNotificationService(NotificationService):
+    def __init__(self) -> None:
+        super().__init__(
+            slack_webhook=None,
+            email_sender=None,
+            email_recipients=[],
+            smtp_host=None,
+            smtp_port=None,
+            smtp_username=None,
+            smtp_password=None,
+            smtp_use_tls=False,
+        )
+
+    def notify_critical_finding(  # type: ignore[override]
+        self, payload: CriticalFindingNotification
+    ) -> None:
+        return
 
 
 @pytest.fixture()
@@ -54,10 +75,12 @@ def api_client() -> (
         nuclei_queue_channel="nuclei:test",
         zap_queue_channel="zap:test",
         sqlmap_queue_channel="sqlmap:test",
+        validator_queue_channel="validator:test",
         jwt_secret="unit-test-secret",
         nuclei_callback_token="callback-secret",
         zap_callback_token="zap-callback",
         sqlmap_callback_token="sqlmap-callback",
+        validator_callback_token="validator-callback",
         enrichment_callback_token="enrichment-secret",
         binary_static_analysis_queue_channel="binary-static:test",
         binary_static_analysis_callback_token="binary-static-secret",
@@ -75,6 +98,7 @@ def api_client() -> (
     SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
 
     queue = InMemoryQueue()
+    notification_service = DummyNotificationService()
 
     with SessionFactory() as session:
         bootstrap_credential = PrincipalCredential(
@@ -99,9 +123,13 @@ def api_client() -> (
     def override_queue() -> InMemoryQueue:
         return queue
 
+    def override_notification() -> DummyNotificationService:
+        return notification_service
+
     app.dependency_overrides[get_settings] = override_settings
     app.dependency_overrides[get_db_session] = override_session
     app.dependency_overrides[get_queue_client] = override_queue
+    app.dependency_overrides[get_notification_service] = override_notification
 
     with TestClient(app) as client:
         yield client, queue, SessionFactory, settings
@@ -267,7 +295,7 @@ def test_preprocess_enqueue_flow(
     assert job["object_bucket"] == "binary-uploads"
     assert job["metadata"]["target_scope"] == "firmware.example.com"
 
-    with _session_factory() as session:
+    with session_factory() as session:
         audit_entry = (
             session.query(AuditLog)
             .filter(AuditLog.action == "enqueue_binary_preprocess")
@@ -1001,7 +1029,7 @@ def test_finding_contracts(
     assert finding_item["id"] == finding_id
     assert finding_item["scan_id"] == scan_id
     assert finding_item["severity"] == "high"
-    assert finding_item["status"] == "open"
+    assert finding_item["status"] == "pending_validation"
     assert finding_item["template_id"] == "CVE-2024-0001"
     assert finding_item["evidence"]
     assert finding_item["enrichments"] == []
