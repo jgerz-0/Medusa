@@ -1,0 +1,30 @@
+{{- if .Values.minio.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "medusa.fullname" . }}-minio
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: minio
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    {{- range $k, $v := .Values.minio.service.annotations }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "medusa.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: minio
+  ports:
+    - name: tcp-minio
+      port: {{ .Values.minio.service.apiPort }}
+      targetPort: tcp-minio
+      protocol: TCP
+    - name: tcp-minio-console
+      port: {{ .Values.minio.service.consolePort }}
+      targetPort: tcp-minio-console
+      protocol: TCP
+{{- end -}}
