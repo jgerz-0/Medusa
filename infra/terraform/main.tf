@@ -175,6 +175,64 @@ locals {
   medusa_secret_strategy_effective         = local.external_secrets_operator_enabled ? "externalSecret" : var.medusa_secret_strategy
   medusa_manage_inline_secret_effective    = local.external_secrets_operator_enabled ? false : var.medusa_manage_inline_secret
   medusa_manage_external_secret_effective  = local.external_secrets_operator_enabled ? true : var.medusa_manage_external_secret
+
+  alb_controller_enabled = var.enable_aws_lb_controller
+
+  medusa_controller_ingress_class_name_effective = coalesce(
+    var.medusa_controller_ingress_class_name,
+    local.alb_controller_enabled ? module.aws_lb_controller.ingress_class_name : null,
+  )
+
+  medusa_controller_ingress_annotations = merge(
+    local.alb_controller_enabled ? module.aws_lb_controller.ingress_annotations : {},
+    var.medusa_controller_ingress_additional_annotations,
+  )
+
+  medusa_controller_ingress_hosts_rendered = [
+    for host in var.medusa_controller_ingress_hosts : {
+      host  = host.host
+      paths = [
+        for path in host.paths : {
+          path     = path.path
+          pathType = coalesce(path.path_type, "Prefix")
+        }
+      ]
+    }
+  ]
+
+  medusa_controller_ingress_tls_rendered = [
+    for tls in var.medusa_controller_ingress_tls : {
+      hosts      = tls.hosts
+      secretName = tls.secret_name
+    }
+  ]
+
+  medusa_controller_ingress_values = (
+    var.medusa_controller_ingress_enabled
+    ? [
+        {
+          controller = {
+            ingress = merge(
+              { enabled = true },
+              local.medusa_controller_ingress_class_name_effective != null ? {
+                className = local.medusa_controller_ingress_class_name_effective
+              } : {},
+              local.medusa_controller_ingress_annotations != {} ? {
+                annotations = local.medusa_controller_ingress_annotations
+              } : {},
+              length(local.medusa_controller_ingress_hosts_rendered) > 0 ? {
+                hosts = local.medusa_controller_ingress_hosts_rendered
+              } : {},
+              length(local.medusa_controller_ingress_tls_rendered) > 0 ? {
+                tls = local.medusa_controller_ingress_tls_rendered
+              } : {},
+              var.medusa_controller_ingress_extra_settings,
+            )
+          }
+        }
+      ]
+    : []
+  )
 }
 
 module "medusa" {
@@ -210,7 +268,11 @@ module "medusa" {
   inline_secret_overrides       = var.medusa_inline_secret_overrides
   external_secret_configuration = local.medusa_external_secret_configuration_effective
   controller_additional_env     = var.medusa_controller_additional_env
-  extra_values                  = concat(var.medusa_extra_values, module.irsa.helm_values)
+  extra_values = concat(
+    var.medusa_extra_values,
+    module.irsa.helm_values,
+    local.medusa_controller_ingress_values,
+  )
   common_labels = merge(
     {
       "app.kubernetes.io/managed-by" = "terraform"
@@ -265,6 +327,46 @@ module "irsa" {
   worker_policy_documents      = module.s3.worker_policy_documents
   controller_service_account   = var.medusa_irsa_controller_service_account
   worker_service_accounts      = local.medusa_irsa_worker_service_accounts
+
+  tags = local.common_tags
+}
+
+module "aws_lb_controller" {
+  source = "./modules/aws_lb_controller"
+
+  enabled                 = var.enable_aws_lb_controller
+  cluster_name            = local.cluster_name
+  cluster_region          = local.aws_region
+  cluster_oidc_issuer_url = module.eks.cluster_oidc_issuer_url
+  vpc_id                  = module.eks.vpc_id
+  private_subnet_ids      = module.eks.private_subnet_ids
+  public_subnet_ids       = module.eks.public_subnet_ids
+
+  namespace        = var.aws_lb_controller_namespace
+  release_name     = var.aws_lb_controller_release_name
+  chart_repository = var.aws_lb_controller_chart_repository
+  chart_name       = var.aws_lb_controller_chart_name
+  chart_version    = var.aws_lb_controller_chart_version
+  create_namespace = var.aws_lb_controller_create_namespace
+  service_account  = var.aws_lb_controller_service_account
+  iam_role_name    = var.aws_lb_controller_iam_role_name
+
+  additional_policy_arns   = var.aws_lb_controller_additional_policy_arns
+  helm_additional_values   = var.aws_lb_controller_additional_helm_values
+  helm_timeout_seconds     = var.aws_lb_controller_helm_timeout_seconds
+  load_balancer_scheme     = var.aws_lb_controller_scheme
+  load_balancer_ip_address_type = var.aws_lb_controller_ip_address_type
+  target_type                    = var.aws_lb_controller_target_type
+  ingress_class_name             = var.aws_lb_controller_ingress_class_name
+  ingress_class_params_name      = var.aws_lb_controller_ingress_class_params_name
+  set_default_ingress_class      = var.aws_lb_controller_set_default_ingress_class
+  load_balancer_certificate_arn  = var.aws_lb_controller_certificate_arn
+  load_balancer_ssl_policy       = var.aws_lb_controller_ssl_policy
+  load_balancer_additional_annotations = var.aws_lb_controller_additional_annotations
+  load_balancer_additional_tags        = var.aws_lb_controller_additional_tags
+  load_balancer_security_group_ids     = var.aws_lb_controller_security_group_ids
+  node_selector                         = var.aws_lb_controller_node_selector
+  tolerations                           = var.aws_lb_controller_tolerations
 
   tags = local.common_tags
 }
