@@ -17,6 +17,17 @@ helm_repository_url          = "oci://ghcr.io/medusa/charts"
 helm_repository_username     = "medusa-dev-bot"
 helm_repository_password     = "REPLACE_WITH_OIDC_TOKEN"
 
+# IRSA bindings for the Medusa controller and workers (disabled by default).
+enable_medusa_irsa = false
+# medusa_irsa_controller_service_account = {
+#   name = "medusa-dev-controller-irsa"
+# }
+# medusa_irsa_worker_service_accounts = {
+#   nuclei = {
+#     service_account_name = "medusa-dev-nuclei-irsa"
+#   }
+# }
+
 vpc_cidr = "10.50.0.0/16"
 availability_zones = ["us-east-1a", "us-east-1b"]
 private_subnet_cidrs = ["10.50.1.0/24", "10.50.2.0/24"]

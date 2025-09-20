@@ -162,7 +162,7 @@ module "medusa" {
   inline_secret_overrides       = var.medusa_inline_secret_overrides
   external_secret_configuration = var.medusa_external_secret_configuration
   controller_additional_env     = var.medusa_controller_additional_env
-  extra_values                  = var.medusa_extra_values
+  extra_values                  = concat(var.medusa_extra_values, module.irsa.helm_values)
   common_labels = merge(
     {
       "app.kubernetes.io/managed-by" = "terraform"
@@ -205,6 +205,22 @@ module "s3" {
   tags = local.common_tags
 }
 
+module "irsa" {
+  source = "./modules/irsa"
+
+  enabled     = var.enable_medusa_irsa
+  namespace   = local.environment_context.namespace
+  release_name = local.environment_context.helm_release
+
+  cluster_oidc_issuer_url      = module.eks.cluster_oidc_issuer_url
+  controller_policy_document   = module.s3.controller_policy_document
+  worker_policy_documents      = module.s3.worker_policy_documents
+  controller_service_account   = var.medusa_irsa_controller_service_account
+  worker_service_accounts      = local.medusa_irsa_worker_service_accounts
+
+  tags = local.common_tags
+}
+
 module "rds" {
   source = "./modules/rds"
 
@@ -242,6 +258,32 @@ module "rds" {
 }
 
 locals {
+  medusa_irsa_worker_defaults = {
+    nuclei = {
+      helm_worker_key = "nuclei"
+    }
+    binary_preprocess = {
+      helm_worker_key = "binaryPreprocess"
+    }
+    binary_fuzzing = {
+      helm_worker_key = "binaryFuzzing"
+    }
+    binary_static_analysis = {
+      helm_worker_key = "binaryStaticAnalysis"
+    }
+  }
+
+  medusa_irsa_worker_service_accounts = {
+    for worker in setunion(
+      toset(keys(local.medusa_irsa_worker_defaults)),
+      toset(keys(var.medusa_irsa_worker_service_accounts)),
+    ) :
+    worker => merge(
+      lookup(local.medusa_irsa_worker_defaults, worker, {}),
+      lookup(var.medusa_irsa_worker_service_accounts, worker, {}),
+    )
+  }
+
   eks_context = {
     cluster_endpoint = module.eks.cluster_endpoint
     cluster_certificate_authority_data = module.eks.cluster_certificate_authority_data
