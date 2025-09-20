@@ -115,6 +115,17 @@ variable "external_secret_configuration" {
       secretKey = string
       remoteRef = map(string)
     })))
+    data_from = optional(list(object({
+      extract = object({
+        key = string
+      })
+    })))
+    target_template = optional(object({
+      type           = optional(string)
+      engine_version = optional(string)
+      data           = optional(map(string))
+      metadata       = optional(map(string))
+    }))
   })
   default = null
 

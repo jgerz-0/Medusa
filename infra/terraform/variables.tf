@@ -102,6 +102,146 @@ variable "helm_repository_password" {
   sensitive   = true
 }
 
+variable "enable_external_secrets_operator" {
+  description = "Deploy the External Secrets Operator and supporting resources."
+  type        = bool
+  default     = false
+}
+
+variable "external_secrets_namespace" {
+  description = "Namespace hosting the External Secrets Operator release."
+  type        = string
+  default     = "external-secrets"
+}
+
+variable "external_secrets_release_name" {
+  description = "Helm release name for the External Secrets Operator."
+  type        = string
+  default     = "external-secrets"
+}
+
+variable "external_secrets_chart_version" {
+  description = "Version of the External Secrets Operator chart to deploy."
+  type        = string
+  default     = "0.9.13"
+}
+
+variable "external_secrets_create_namespace" {
+  description = "Allow Helm to create the operator namespace if missing."
+  type        = bool
+  default     = true
+}
+
+variable "external_secrets_install_crds" {
+  description = "Install the External Secrets custom resource definitions via Helm."
+  type        = bool
+  default     = true
+}
+
+variable "external_secrets_service_account_name" {
+  description = "Service account name used by the External Secrets Operator."
+  type        = string
+  default     = "external-secrets-operator"
+}
+
+variable "external_secrets_service_account_annotations" {
+  description = "Additional annotations merged into the operator service account."
+  type        = map(string)
+  default     = {}
+}
+
+variable "external_secrets_irsa_role_arn" {
+  description = "IAM role ARN assumed by the External Secrets Operator service account."
+  type        = string
+  default     = null
+}
+
+variable "external_secrets_secret_store_name" {
+  description = "Name of the SecretStore or ClusterSecretStore resource for External Secrets."
+  type        = string
+  default     = "medusa-cluster-secrets"
+}
+
+variable "external_secrets_secret_store_scope" {
+  description = "Scope of the External Secrets store (cluster or namespace)."
+  type        = string
+  default     = "cluster"
+
+  validation {
+    condition     = contains(["cluster", "namespace"], var.external_secrets_secret_store_scope)
+    error_message = "external_secrets_secret_store_scope must be either 'cluster' or 'namespace'."
+  }
+}
+
+variable "external_secrets_secret_store_annotations" {
+  description = "Annotations applied to the SecretStore/ClusterSecretStore metadata."
+  type        = map(string)
+  default     = {}
+}
+
+variable "external_secrets_default_refresh_interval" {
+  description = "Default refresh interval applied to managed ExternalSecrets."
+  type        = string
+  default     = "1h"
+}
+
+variable "external_secrets_external_secrets" {
+  description = "Optional ExternalSecret manifests rendered by the External Secrets module."
+  type        = map(object({
+    name              = optional(string)
+    namespace         = string
+    secret_store_name = optional(string)
+    secret_store_kind = optional(string)
+    refresh_interval  = optional(string)
+    labels            = optional(map(string))
+    annotations       = optional(map(string))
+    target = optional(object({
+      name            = optional(string)
+      creation_policy = optional(string)
+      deletion_policy = optional(string)
+      template        = optional(map(any))
+    }))
+    data = optional(list(object({
+      secret_key = string
+      remote_ref = object({
+        key      = string
+        property = optional(string)
+        version  = optional(string)
+      })
+    })))
+    data_from = optional(list(object({
+      extract = object({
+        key = string
+      })
+    })))
+  }))
+  default = {}
+}
+
+variable "external_secrets_additional_helm_values" {
+  description = "Additional Helm value documents merged into the operator release."
+  type        = list(any)
+  default     = []
+}
+
+variable "external_secrets_helm_timeout_seconds" {
+  description = "Timeout (in seconds) for External Secrets Helm operations."
+  type        = number
+  default     = 600
+}
+
+variable "external_secrets_additional_labels" {
+  description = "Additional labels injected into External Secrets resources."
+  type        = map(string)
+  default     = {}
+}
+
+variable "external_secrets_medusa_refresh_interval" {
+  description = "Refresh interval applied to the Medusa ExternalSecret when the operator is enabled."
+  type        = string
+  default     = "5m"
+}
+
 variable "medusa_secret_strategy" {
   description = "Secret delivery strategy for the Medusa Helm release (inline or externalSecret)."
   type        = string
@@ -147,6 +287,17 @@ variable "medusa_external_secret_configuration" {
       secretKey = string
       remoteRef = map(string)
     })))
+    data_from = optional(list(object({
+      extract = object({
+        key = string
+      })
+    })))
+    target_template = optional(object({
+      type           = optional(string)
+      engine_version = optional(string)
+      data           = optional(map(string))
+      metadata       = optional(map(string))
+    }))
   })
   default = null
 

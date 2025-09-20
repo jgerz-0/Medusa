@@ -17,8 +17,10 @@ configuration deterministic and auditable.
     `manage_inline_secret = true`, Terraform provisions the `Secret` directly
     and suppresses Helm's inline template to prevent duplication.
   - **externalSecret** &rarr; Terraform can emit an
-    `external-secrets.io` manifest when `manage_external_secret = true`, or the
-    chart may render it when disabled.
+    `external-secrets.io` manifest when `manage_external_secret = true`,
+    including optional `dataFrom` and `target.template` blocks for templating
+    composite secrets. The chart may render the manifest when Terraform
+    management is disabled.
 - Wires Helm values with RDS connection strings, S3 bucket names, and callback
   tokens generated elsewhere in Terraform.
 

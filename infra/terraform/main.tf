@@ -117,6 +117,66 @@ resource "random_password" "medusa_callback" {
   special = false
 }
 
+locals {
+  medusa_callback_tokens = {
+    nuclei         = random_password.medusa_callback["nuclei"].result
+    enrichment     = random_password.medusa_callback["enrichment"].result
+    binary_static  = random_password.medusa_callback["binary_static"].result
+    binary_fuzzing = random_password.medusa_callback["binary_fuzzing"].result
+  }
+
+  medusa_bucket_names = merge(
+    {
+      artifact = module.s3.artifact_bucket.name
+      fuzzing  = module.s3.artifact_bucket.name
+      metadata = module.s3.artifact_bucket.name
+    },
+    var.medusa_bucket_overrides,
+  )
+
+  external_secrets_operator_enabled = var.enable_external_secrets_operator
+
+  external_secrets_irsa_role_arn_effective = coalesce(
+    var.external_secrets_irsa_role_arn,
+    lookup(var.external_secrets_service_account_annotations, "eks.amazonaws.com/role-arn", null),
+  )
+
+  medusa_external_secret_template_data = merge(
+    {
+      MEDUSA_DATABASE_URL                        = format(
+        "postgresql://{{ .medusaDatabaseUsername }}:{{ .medusaDatabasePassword }}@%s:%d/%s",
+        module.rds.controller_context.hostname,
+        module.rds.controller_context.port,
+        module.rds.controller_context.database,
+      )
+      MEDUSA_NUCLEI_CALLBACK_TOKEN               = local.medusa_callback_tokens.nuclei
+      NUCLEI_CALLBACK_TOKEN                      = local.medusa_callback_tokens.nuclei
+      MEDUSA_ENRICHMENT_CALLBACK_TOKEN           = local.medusa_callback_tokens.enrichment
+      MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN = local.medusa_callback_tokens.binary_static
+      MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN       = local.medusa_callback_tokens.binary_fuzzing
+      NUCLEI_ARTIFACT_BUCKET                     = local.medusa_bucket_names.artifact
+      BINARY_FUZZING_BUCKET                      = local.medusa_bucket_names.fuzzing
+      BINARY_METADATA_BUCKET                     = local.medusa_bucket_names.metadata
+    },
+    var.medusa_inline_secret_overrides,
+  )
+
+  medusa_external_secret_configuration_effective = local.external_secrets_operator_enabled ? {
+    secret_store_kind = module.external_secrets.secret_store_kind
+    secret_store_name = module.external_secrets.secret_store_name
+    refresh_interval  = var.external_secrets_medusa_refresh_interval
+    data              = module.external_secrets.medusa_database_remote_refs
+    target_template = {
+      type = "Opaque"
+      data = local.medusa_external_secret_template_data
+    }
+  } : var.medusa_external_secret_configuration
+
+  medusa_secret_strategy_effective         = local.external_secrets_operator_enabled ? "externalSecret" : var.medusa_secret_strategy
+  medusa_manage_inline_secret_effective    = local.external_secrets_operator_enabled ? false : var.medusa_manage_inline_secret
+  medusa_manage_external_secret_effective  = local.external_secrets_operator_enabled ? true : var.medusa_manage_external_secret
+}
+
 module "medusa" {
   source = "./modules/medusa"
 
@@ -129,10 +189,10 @@ module "medusa" {
   release_name = local.environment_context.helm_release
 
   secret_name     = var.medusa_secret_name
-  secret_strategy = var.medusa_secret_strategy
+  secret_strategy = local.medusa_secret_strategy_effective
 
-  manage_inline_secret   = var.medusa_manage_inline_secret
-  manage_external_secret = var.medusa_manage_external_secret
+  manage_inline_secret   = local.medusa_manage_inline_secret_effective
+  manage_external_secret = local.medusa_manage_external_secret_effective
 
   database = {
     hostname          = module.rds.controller_context.hostname
@@ -143,24 +203,12 @@ module "medusa" {
     secret_name       = module.rds.controller_context.secret_name
   }
 
-  bucket_names = merge(
-    {
-      artifact = module.s3.artifact_bucket.name
-      fuzzing  = module.s3.artifact_bucket.name
-      metadata = module.s3.artifact_bucket.name
-    },
-    var.medusa_bucket_overrides,
-  )
+  bucket_names    = local.medusa_bucket_names
 
-  callback_tokens = {
-    nuclei         = random_password.medusa_callback["nuclei"].result
-    enrichment     = random_password.medusa_callback["enrichment"].result
-    binary_static  = random_password.medusa_callback["binary_static"].result
-    binary_fuzzing = random_password.medusa_callback["binary_fuzzing"].result
-  }
+  callback_tokens = local.medusa_callback_tokens
 
   inline_secret_overrides       = var.medusa_inline_secret_overrides
-  external_secret_configuration = var.medusa_external_secret_configuration
+  external_secret_configuration = local.medusa_external_secret_configuration_effective
   controller_additional_env     = var.medusa_controller_additional_env
   extra_values                  = concat(var.medusa_extra_values, module.irsa.helm_values)
   common_labels = merge(
@@ -219,6 +267,35 @@ module "irsa" {
   worker_service_accounts      = local.medusa_irsa_worker_service_accounts
 
   tags = local.common_tags
+}
+
+module "external_secrets" {
+  source = "./modules/external-secrets"
+
+  enabled               = var.enable_external_secrets_operator
+  namespace             = var.external_secrets_namespace
+  release_name          = var.external_secrets_release_name
+  chart_version         = var.external_secrets_chart_version
+  create_namespace      = var.external_secrets_create_namespace
+  install_crds          = var.external_secrets_install_crds
+  service_account_name  = var.external_secrets_service_account_name
+  service_account_annotations = var.external_secrets_service_account_annotations
+  irsa_role_arn         = local.external_secrets_irsa_role_arn_effective
+
+  cluster_name = local.cluster_name
+  aws_region   = local.aws_region
+
+  secret_store_name        = var.external_secrets_secret_store_name
+  secret_store_scope       = var.external_secrets_secret_store_scope
+  secret_store_annotations = var.external_secrets_secret_store_annotations
+
+  rds_master_secret_arn    = module.rds.master_credentials_secret_arn
+  default_refresh_interval = var.external_secrets_default_refresh_interval
+  external_secrets         = var.external_secrets_external_secrets
+
+  additional_helm_values = var.external_secrets_additional_helm_values
+  helm_timeout_seconds   = var.external_secrets_helm_timeout_seconds
+  common_labels          = local.external_secrets_common_labels
 }
 
 module "rds" {
@@ -283,6 +360,15 @@ locals {
       lookup(var.medusa_irsa_worker_service_accounts, worker, {}),
     )
   }
+
+  external_secrets_common_labels = merge(
+    {
+      "app.kubernetes.io/managed-by" = "terraform"
+      "medusa.security/environment"  = local.environment
+      "medusa.security/project"      = local.project_name
+    },
+    var.external_secrets_additional_labels,
+  )
 
   eks_context = {
     cluster_endpoint = module.eks.cluster_endpoint
