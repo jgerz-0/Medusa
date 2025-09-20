@@ -82,6 +82,9 @@ spec:
             matchLabels:
               app.kubernetes.io/instance: {{ .Release.Name }}
               app.kubernetes.io/component: controller
+        {{- /* Only allow enabled workers explicitly listed in values.networkPolicies.workers.allowedComponents. */}}
+        {{- /* Current data-plane workers: nuclei-worker, binary-preprocess-worker, binary-fuzzing-worker, */}}
+        {{- /* binary-static-analysis-worker, cve-enrichment-worker, zap-worker, sqlmap-worker, validator-worker. */}}
         {{- $allowedComponents := default (list) .Values.networkPolicies.workers.allowedComponents }}
         {{- range $workerName, $workerConfig := .Values.workers }}
           {{- $component := $workerConfig.component | default "" }}
