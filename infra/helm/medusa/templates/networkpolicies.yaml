@@ -82,10 +82,16 @@ spec:
             matchLabels:
               app.kubernetes.io/instance: {{ .Release.Name }}
               app.kubernetes.io/component: controller
+        {{- $allowedComponents := default (list) .Values.networkPolicies.workers.allowedComponents }}
+        {{- range $workerName, $workerConfig := .Values.workers }}
+          {{- $component := $workerConfig.component | default "" }}
+          {{- if and ($workerConfig.enabled | default false) $component (has $component $allowedComponents) }}
         - podSelector:
             matchLabels:
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: nuclei-worker
+              app.kubernetes.io/instance: {{ $.Release.Name }}
+              app.kubernetes.io/component: {{ $component }}
+          {{- end }}
+        {{- end }}
   policyTypes:
     - Ingress
 {{- end }}
