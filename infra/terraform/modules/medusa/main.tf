@@ -47,6 +47,8 @@ locals {
       enrichment    = null,
       binary_static = null,
       binary_fuzzing = null,
+      zap           = null,
+      validator     = null,
     },
     var.callback_tokens,
   )
@@ -63,6 +65,10 @@ locals {
       MEDUSA_ENRICHMENT_CALLBACK_TOKEN           = local.callback_tokens.enrichment
       MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN = local.callback_tokens.binary_static
       MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN       = local.callback_tokens.binary_fuzzing
+      MEDUSA_ZAP_CALLBACK_TOKEN                  = local.callback_tokens.zap
+      ZAP_CALLBACK_TOKEN                         = local.callback_tokens.zap
+      MEDUSA_VALIDATOR_CALLBACK_TOKEN            = local.callback_tokens.validator
+      VALIDATOR_CALLBACK_TOKEN                   = local.callback_tokens.validator
       NUCLEI_ARTIFACT_BUCKET                     = local.bucket_names.artifact
       BINARY_FUZZING_BUCKET                      = local.bucket_names.fuzzing
       BINARY_METADATA_BUCKET                     = local.bucket_names.metadata
