@@ -409,6 +409,20 @@ export async function fetchTargets(): Promise<Target[]> {
   return payload.data;
 }
 
+export interface CreateTargetPayload {
+  name: string;
+  scope: string;
+  is_authorized: boolean;
+}
+
+export async function createTarget(payload: CreateTargetPayload): Promise<Target> {
+  return request<Target>('/targets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
 export interface CreateScanPayload {
   target_id: string;
   scanner: string;
