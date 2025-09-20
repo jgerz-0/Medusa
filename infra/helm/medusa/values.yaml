@@ -32,8 +32,10 @@ secrets:
     MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: "queues:binary:preprocess"
     MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: "queues:binary:static-analysis"
     MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: "queues:binary:fuzzing"
+    MEDUSA_VALIDATOR_QUEUE_CHANNEL: "queues:validator:jobs"
     MEDUSA_NUCLEI_CALLBACK_TOKEN: "change-me"
     MEDUSA_ENRICHMENT_CALLBACK_TOKEN: "change-me"
+    MEDUSA_VALIDATOR_CALLBACK_TOKEN: "change-me"
     MEDUSA_JWT_SECRET: "change-me"
     MINIO_ROOT_USER: "medusaadmin"
     MINIO_ROOT_PASSWORD: "medusaadmin123"
@@ -54,6 +56,7 @@ secrets:
     BINARY_FUZZING_DEAD_LETTER_KEY: "queues:binary:fuzzing:dead"
     BINARY_FUZZING_BUCKET: ""
     BINARY_FUZZING_PREFIX: "analysis/fuzzing/"
+    MEDUSA_VALIDATOR_DEAD_LETTER_KEY: "queues:validator:dead"
     MEDUSA_POSTGRES_PASSWORD: "change-me"
     MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: "queues:enrichment:cve"
     MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: "change-me"
@@ -329,6 +332,63 @@ workers:
         S3_SECRET_KEY: S3_SECRET_KEY
       values:
         S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
+  validator:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-validator
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: validator-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_VALIDATOR_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_VALIDATOR_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_VALIDATOR_CALLBACK_TOKEN
+      maxRetries: 3
+      pollTimeout: 5
+      httpTimeout: 10
       extra: []
     resources:
       requests:

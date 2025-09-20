@@ -529,6 +529,9 @@ locals {
     binary_static_analysis = {
       helm_worker_key = "binaryStaticAnalysis"
     }
+    validator = {
+      helm_worker_key = "validator"
+    }
   }
 
   medusa_irsa_worker_service_accounts = {
