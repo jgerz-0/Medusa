@@ -6,6 +6,7 @@ import clsx from 'clsx';
 import { ReactNode } from 'react';
 
 const navigation = [
+  { name: 'Targets', href: '/targets' },
   { name: 'Scans', href: '/scans' },
   { name: 'Findings', href: '/findings' }
 ];
