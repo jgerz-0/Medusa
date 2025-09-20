@@ -1,0 +1,61 @@
+{{- if .Values.rbac.create }}
+{{- range $name, $worker := .Values.workers }}
+{{- $serviceAccount := default (dict) $worker.serviceAccount }}
+{{- $rbac := default (dict) $worker.rbac }}
+{{- if and $serviceAccount.create $rbac.create }}
+{{- $context := dict "root" $ "name" $name "worker" $worker }}
+{{- $roleName := include "medusa.workerRoleName" $context }}
+{{- $roleBindingName := include "medusa.workerRoleBindingName" $context }}
+{{- $serviceAccountName := include "medusa.workerServiceAccountName" $context }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $roleName }}
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/version: {{ $.Chart.AppVersion | quote }}
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+    app.kubernetes.io/component: {{ default (printf "%s-worker" $name) $worker.component }}
+  {{- $roleAnnotations := merge (dict "medusa.security/description" (printf "Namespace RBAC scoped to the %s worker." $name)) (default (dict) $rbac.roleAnnotations) }}
+  annotations:
+    {{- range $k, $v := $roleAnnotations }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+{{- if $rbac.rules }}
+rules:
+  {{- toYaml $rbac.rules | nindent 2 }}
+{{- else }}
+rules: []
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $roleBindingName }}
+  labels:
+    app.kubernetes.io/name: {{ include "medusa.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/version: {{ $.Chart.AppVersion | quote }}
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+    app.kubernetes.io/component: {{ default (printf "%s-worker" $name) $worker.component }}
+  {{- $roleBindingAnnotations := merge (dict "medusa.security/description" (printf "Binds the %s worker service account to its namespace Role." $name)) (default (dict) $rbac.roleBindingAnnotations) }}
+  annotations:
+    {{- range $k, $v := $roleBindingAnnotations }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $roleName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccountName }}
+    namespace: {{ $.Release.Namespace }}
+  {{- with $rbac.additionalSubjects }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+---
+{{- end }}
+{{- end }}
+{{- end }}

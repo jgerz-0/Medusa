@@ -33,6 +33,44 @@ app.kubernetes.io/component: {{ .Values.component | default "core" }}
 {{- end -}}
 {{- end -}}
 
+{{- define "medusa.workerServiceAccountName" -}}
+{{- $root := .root -}}
+{{- $workerName := .name -}}
+{{- $worker := .worker -}}
+{{- $serviceAccount := default (dict) $worker.serviceAccount -}}
+{{- if $serviceAccount.name -}}
+{{- $serviceAccount.name -}}
+{{- else if $serviceAccount.create -}}
+{{- printf "%s-worker-%s-sa" (include "medusa.fullname" $root) $workerName | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- include "medusa.serviceAccountName" $root -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "medusa.workerRoleName" -}}
+{{- $root := .root -}}
+{{- $workerName := .name -}}
+{{- $worker := .worker -}}
+{{- $rbac := default (dict) $worker.rbac -}}
+{{- if $rbac.roleName -}}
+{{- $rbac.roleName -}}
+{{- else -}}
+{{- printf "%s-worker-%s-role" (include "medusa.fullname" $root) $workerName | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "medusa.workerRoleBindingName" -}}
+{{- $root := .root -}}
+{{- $workerName := .name -}}
+{{- $worker := .worker -}}
+{{- $rbac := default (dict) $worker.rbac -}}
+{{- if $rbac.roleBindingName -}}
+{{- $rbac.roleBindingName -}}
+{{- else -}}
+{{- printf "%s-worker-%s-rolebinding" (include "medusa.fullname" $root) $workerName | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "medusa.secrets.checksum" -}}
 {{- if eq .Values.secrets.strategy "inline" -}}
 {{ toYaml .Values.secrets.inline }}

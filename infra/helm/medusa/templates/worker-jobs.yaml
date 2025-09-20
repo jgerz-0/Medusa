@@ -1,5 +1,9 @@
 {{- range $name, $worker := .Values.workers }}
 {{- if $worker.enabled }}
+{{- $context := dict "root" $ "name" $name "worker" $worker }}
+{{- $serviceAccount := default (dict) $worker.serviceAccount }}
+{{- $serviceAccountName := include "medusa.workerServiceAccountName" $context }}
+{{- $automount := ternary $serviceAccount.automountServiceAccountToken true (hasKey $serviceAccount "automountServiceAccountToken") }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -32,6 +36,8 @@ spec:
         {{ $k }}: {{ $v | quote }}
         {{- end }}
     spec:
+      serviceAccountName: {{ $serviceAccountName }}
+      automountServiceAccountToken: {{ $automount }}
       restartPolicy: OnFailure
       containers:
         - name: {{ $name }}
