@@ -111,6 +111,9 @@ resource "random_password" "medusa_callback" {
     enrichment    = true
     binary_static = true
     binary_fuzzing = true
+    sqlmap        = true
+    zap           = true
+    validator     = true
   }
 
   length  = 40
@@ -123,6 +126,9 @@ locals {
     enrichment     = random_password.medusa_callback["enrichment"].result
     binary_static  = random_password.medusa_callback["binary_static"].result
     binary_fuzzing = random_password.medusa_callback["binary_fuzzing"].result
+    sqlmap         = random_password.medusa_callback["sqlmap"].result
+    zap            = random_password.medusa_callback["zap"].result
+    validator      = random_password.medusa_callback["validator"].result
   }
 
   medusa_bucket_names = merge(
