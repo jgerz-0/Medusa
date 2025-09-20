@@ -67,6 +67,20 @@ locals {
 
   render_inline_secret = var.secret_strategy == "inline" && !var.manage_inline_secret
 
+  render_sealed_secret = var.secret_strategy == "sealedSecret" && !var.manage_sealed_secret
+
+  sealed_secret_annotations = merge(
+    {
+      "medusa.security/description" = "SealedSecret envelope for Medusa credentials."
+    },
+    var.sealed_secret_configuration != null ? try(var.sealed_secret_configuration.template_annotations, {}) : {},
+  )
+
+  sealed_secret_values = var.sealed_secret_configuration != null ? {
+    encryptedData = local.render_sealed_secret ? var.sealed_secret_configuration.encrypted_data : {}
+    annotations   = local.sealed_secret_annotations
+  } : null
+
   external_secret_configuration = (
     var.secret_strategy == "externalSecret" && var.external_secret_configuration != null
   ) ? {
@@ -104,12 +118,70 @@ locals {
     } : {},
   ) : null
 
+  sealed_secret_metadata_labels = merge(
+    var.common_labels,
+    {
+      "app.kubernetes.io/name"       = "medusa"
+      "app.kubernetes.io/instance"   = var.release_name
+      "app.kubernetes.io/managed-by" = "terraform"
+      "app.kubernetes.io/component"  = "secrets"
+    },
+    var.sealed_secret_configuration != null ? try(var.sealed_secret_configuration.metadata_labels, {}) : {},
+  )
+
+  sealed_secret_metadata_annotations = merge(
+    {
+      "medusa.security/description" = "SealedSecret envelope for Medusa credentials."
+    },
+    var.sealed_secret_configuration != null ? try(var.sealed_secret_configuration.metadata_annotations, {}) : {},
+  )
+
+  sealed_secret_template_labels = merge(
+    var.common_labels,
+    {
+      "app.kubernetes.io/name"      = "medusa"
+      "app.kubernetes.io/instance"  = var.release_name
+      "app.kubernetes.io/component" = "secrets"
+    },
+    var.sealed_secret_configuration != null ? try(var.sealed_secret_configuration.template_labels, {}) : {},
+  )
+
+  sealed_secret_template_annotations = local.sealed_secret_annotations
+
+  sealed_secret_template_type = var.sealed_secret_configuration != null ? coalesce(
+    try(var.sealed_secret_configuration.template_type, null),
+    "Opaque",
+  ) : "Opaque"
+
+  sealed_secret_manifest = var.secret_strategy == "sealedSecret" && var.sealed_secret_configuration != null ? {
+    apiVersion = "bitnami.com/v1alpha1"
+    kind       = "SealedSecret"
+    metadata = {
+      name        = var.secret_name
+      namespace   = var.namespace
+      labels      = local.sealed_secret_metadata_labels
+      annotations = local.sealed_secret_metadata_annotations
+    }
+    spec = {
+      encryptedData = var.sealed_secret_configuration.encrypted_data
+      template = {
+        metadata = {
+          name        = var.secret_name
+          labels      = local.sealed_secret_template_labels
+          annotations = local.sealed_secret_template_annotations
+        }
+        type = local.sealed_secret_template_type
+      }
+    }
+  } : null
+
   base_helm_values = {
     secrets = {
       strategy       = var.secret_strategy
       name           = var.secret_name
       inline         = local.render_inline_secret ? local.inline_secret_values : null
       externalSecret = local.external_secret_configuration
+      sealedSecret   = local.sealed_secret_values
     }
     controller = {
       env = {
@@ -252,6 +324,14 @@ resource "kubernetes_manifest" "external_secret" {
   depends_on = [kubernetes_namespace.medusa]
 }
 
+resource "kubernetes_manifest" "sealed_secret" {
+  count = var.secret_strategy == "sealedSecret" && var.manage_sealed_secret ? 1 : 0
+
+  manifest = local.sealed_secret_manifest
+
+  depends_on = [kubernetes_namespace.medusa]
+}
+
 resource "helm_release" "medusa" {
   name             = var.release_name
   namespace        = var.namespace
@@ -269,5 +349,6 @@ resource "helm_release" "medusa" {
     [kubernetes_namespace.medusa],
     var.secret_strategy == "inline" && var.manage_inline_secret ? kubernetes_secret.inline : [],
     var.secret_strategy == "externalSecret" && var.manage_external_secret ? kubernetes_manifest.external_secret : [],
+    var.secret_strategy == "sealedSecret" && var.manage_sealed_secret ? kubernetes_manifest.sealed_secret : [],
   )
 }

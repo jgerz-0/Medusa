@@ -172,9 +172,23 @@ locals {
     }
   } : var.medusa_external_secret_configuration
 
-  medusa_secret_strategy_effective         = local.external_secrets_operator_enabled ? "externalSecret" : var.medusa_secret_strategy
-  medusa_manage_inline_secret_effective    = local.external_secrets_operator_enabled ? false : var.medusa_manage_inline_secret
-  medusa_manage_external_secret_effective  = local.external_secrets_operator_enabled ? true : var.medusa_manage_external_secret
+  medusa_secret_strategy_effective = local.external_secrets_operator_enabled ? "externalSecret" : var.medusa_secret_strategy
+
+  medusa_manage_inline_secret_effective = (
+    local.medusa_secret_strategy_effective == "inline"
+    && !local.external_secrets_operator_enabled
+  ) ? var.medusa_manage_inline_secret : false
+
+  medusa_manage_external_secret_effective = local.medusa_secret_strategy_effective == "externalSecret" ? (
+    local.external_secrets_operator_enabled ? true : var.medusa_manage_external_secret
+  ) : false
+
+  medusa_manage_sealed_secret_effective = (
+    local.medusa_secret_strategy_effective == "sealedSecret"
+    && !local.external_secrets_operator_enabled
+  ) ? var.medusa_manage_sealed_secret : false
+
+  medusa_sealed_secret_configuration_effective = local.medusa_secret_strategy_effective == "sealedSecret" ? var.medusa_sealed_secret_configuration : null
 
   alb_controller_enabled = var.enable_aws_lb_controller
 
@@ -310,6 +324,7 @@ module "medusa" {
 
   manage_inline_secret   = local.medusa_manage_inline_secret_effective
   manage_external_secret = local.medusa_manage_external_secret_effective
+  manage_sealed_secret   = local.medusa_manage_sealed_secret_effective
 
   database = {
     hostname          = module.rds.controller_context.hostname
@@ -326,6 +341,7 @@ module "medusa" {
 
   inline_secret_overrides       = var.medusa_inline_secret_overrides
   external_secret_configuration = local.medusa_external_secret_configuration_effective
+  sealed_secret_configuration   = local.medusa_sealed_secret_configuration_effective
   controller_additional_env     = var.medusa_controller_additional_env
   extra_values = concat(
     var.medusa_extra_values,

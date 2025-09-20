@@ -96,6 +96,21 @@ medusa_controller_ingress_additional_annotations = {
   "alb.ingress.kubernetes.io/load-balancer-attributes" = "idle_timeout.timeout_seconds=60"
 }
 
+# Medusa secret delivery strategy (example SealedSecret configuration shown for reference).
+# medusa_secret_strategy = "sealedSecret"
+# medusa_manage_sealed_secret = true
+# medusa_sealed_secret_configuration = {
+#   encrypted_data = {
+#     "MEDUSA_DATABASE_URL" = "AgB..." # ciphertext from kubeseal
+#   }
+#   metadata_annotations = {
+#     "sealedsecrets.bitnami.com/cluster-wide" = "true"
+#   }
+#   template_annotations = {
+#     "medusa.security/description" = "SealedSecret envelope for Medusa credentials."
+#   }
+# }
+
 vpc_cidr = "10.50.0.0/16"
 availability_zones = ["us-east-1a", "us-east-1b"]
 private_subnet_cidrs = ["10.50.1.0/24", "10.50.2.0/24"]
