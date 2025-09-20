@@ -38,6 +38,23 @@ Key behaviors:
 
 Keep the `rbac` scope tight—workers should only receive the Kubernetes permissions they need to fetch secrets, configmaps, or other workload-specific resources.
 
+## Network Policies
+
+Stateful dependencies (PostgreSQL, Redis, MinIO, Qdrant) are isolated behind a namespace-local `NetworkPolicy`. Controllers and workers must be explicitly admitted to reach those services. Extend the `.Values.networkPolicies.workers.allowedComponents` list whenever you add a new worker Job so the data-plane policy keeps pace with the workloads you deploy.
+
+```yaml
+networkPolicies:
+  workers:
+    allowedComponents:
+      - nuclei-worker
+      - binary-preprocess-worker
+      - binary-fuzzing-worker
+      - binary-static-analysis-worker
+      - cve-enrichment-worker
+```
+
+Each entry must match the `app.kubernetes.io/component` label set on the worker pod template. Keeping the list explicit preserves the zero-trust default while still letting operators onboard additional analysis agents without editing templates.
+
 ## Binary Static Analysis worker configuration
 
 The binary static analysis worker streams jobs from Redis, executes containerized tooling (checksec and Bandit today), and writes reports back to S3. Wire the queue keys, runtime images, callback token, and artifact storage credentials through `.Values.workers.binaryStaticAnalysis` so the Job can authenticate deterministically.

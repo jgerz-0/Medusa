@@ -835,6 +835,15 @@ networkPolicies:
   enabled: true
   controller:
     allowedNamespaces: []
+  workers:
+    # Components allowed to connect to stateful data-plane services. Extend this list
+    # when adding new worker Jobs so network policies stay scoped but functional.
+    allowedComponents:
+      - nuclei-worker
+      - binary-preprocess-worker
+      - binary-fuzzing-worker
+      - binary-static-analysis-worker
+      - cve-enrichment-worker
   ingress:
     enabled: true
   egress:
