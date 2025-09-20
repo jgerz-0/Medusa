@@ -167,6 +167,75 @@ workers:
         - name: BINARY_FUZZING_MAX_DURATION
           value: "900"
 
+  binaryStaticAnalysis:
+    image:
+      repository: medusa/worker-binary-static-analysis
+      tag: latest
+    env:
+      extra:
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_REDIS_URL
+        - name: BINARY_STATIC_ANALYSIS_QUEUE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL
+        - name: BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY
+        - name: BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN
+        - name: BINARY_ANALYSIS_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: BINARY_ANALYSIS_BUCKET
+        - name: BINARY_ANALYSIS_PREFIX
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: BINARY_ANALYSIS_PREFIX
+        - name: S3_ENDPOINT_URL
+          value: http://medusa-medusa-minio:9000
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_ACCESS_KEY_ID
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_SECRET_ACCESS_KEY
+        - name: AWS_DEFAULT_REGION
+          value: us-east-1
+        - name: BINARY_STATIC_ANALYSIS_POLL_TIMEOUT
+          value: "2"
+        - name: BINARY_STATIC_ANALYSIS_MAX_ATTEMPTS
+          value: "3"
+        - name: BINARY_STATIC_ANALYSIS_RUNTIME
+          value: docker
+        - name: BINARY_STATIC_ANALYSIS_RUNTIME_FLAGS
+          value: ""
+        - name: BINARY_STATIC_ANALYSIS_CHECKSEC_IMAGE
+          value: docker.io/medusa/checksec:latest
+        - name: BINARY_STATIC_ANALYSIS_BANDIT_IMAGE
+          value: docker.io/medusa/bandit:latest
+        - name: BINARY_STATIC_ANALYSIS_ENABLE_CHECKSEC
+          value: "1"
+        - name: BINARY_STATIC_ANALYSIS_ENABLE_BANDIT
+          value: "1"
+        - name: BINARY_STATIC_ANALYSIS_TOOL_TIMEOUT
+          value: "120"
+
 secrets:
   strategy: inline
   inline:
@@ -191,6 +260,9 @@ secrets:
     S3_ACCESS_KEY_ID: medusaadmin
     S3_SECRET_ACCESS_KEY: medusaadmin123
     MEDUSA_POSTGRES_PASSWORD: medusa
+    BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY: queues:binary:static-analysis:dead
+    BINARY_ANALYSIS_BUCKET: binary-analysis
+    BINARY_ANALYSIS_PREFIX: analysis/reports/
     BINARY_PREPROCESS_DEAD_LETTER_KEY: queues:binary:preprocess:dead
     BINARY_METADATA_BUCKET: binary-metadata
     BINARY_METADATA_PREFIX: preprocess/metadata/
