@@ -69,6 +69,8 @@ module "medusa" {
     enrichment    = random_password.medusa_callback["enrichment"].result
     binary_static = random_password.medusa_callback["binary_static"].result
     binary_fuzzing = random_password.medusa_callback["binary_fuzzing"].result
+    zap           = random_password.medusa_callback["zap"].result
+    validator     = random_password.medusa_callback["validator"].result
   }
 
   sealed_secret_configuration = var.medusa_sealed_secret_configuration
