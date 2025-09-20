@@ -21,6 +21,39 @@ helm_repository_password     = "REPLACE_WITH_OIDC_TOKEN"
 enable_external_secrets_operator = false
 external_secrets_secret_store_name = "medusa-dev-cluster-secrets"
 
+# Observability stack
+enable_observability = true
+observability_mode   = "embedded"
+observability_manage_grafana_admin_secret = true
+observability_grafana_admin_credentials = {
+  username = "medusa-ops"
+  password = "REPLACE_WITH_STRONG_SECRET"
+}
+observability_grafana_ingress_enabled = true
+observability_grafana_ingress_hosts = [
+  {
+    host = "grafana.dev.example.com"
+    paths = [
+      {
+        path      = "/"
+        path_type = "Prefix"
+      }
+    ]
+  }
+]
+observability_grafana_ingress_tls = [
+  {
+    hosts       = ["grafana.dev.example.com"]
+    secret_name = "medusa-dev-tls"
+  }
+]
+observability_service_monitor_interval        = "30s"
+observability_service_monitor_scrape_timeout  = "10s"
+observability_prometheus_retention            = "7d"
+observability_grafana_ingress_annotations = {
+  "alb.ingress.kubernetes.io/group.name" = "medusa-dev"
+}
+
 # IRSA bindings for the Medusa controller and workers (disabled by default).
 enable_medusa_irsa = false
 # medusa_irsa_controller_service_account = {

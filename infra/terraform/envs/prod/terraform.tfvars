@@ -21,6 +21,36 @@ helm_repository_password     = "REPLACE_WITH_OIDC_TOKEN"
 enable_external_secrets_operator = false
 external_secrets_secret_store_name = "medusa-prod-cluster-secrets"
 
+# Observability stack (enable once ingress, RBAC, and alert routing are signed off).
+enable_observability = false
+observability_mode   = "kube-prometheus-stack"
+# observability_manage_grafana_admin_secret = true
+# observability_grafana_admin_credentials = {
+#   username = "medusa-sre"
+#   password = "REPLACE_WITH_SEALED_SECRET"
+# }
+# observability_grafana_ingress_enabled = true
+# observability_grafana_ingress_hosts = [
+#   {
+#     host = "grafana.prod.example.com"
+#     paths = [
+#       {
+#         path      = "/"
+#         path_type = "Prefix"
+#       }
+#     ]
+#   }
+# ]
+# observability_grafana_ingress_tls = [
+#   {
+#     hosts       = ["grafana.prod.example.com"]
+#     secret_name = "medusa-prod-tls"
+#   }
+# ]
+# observability_service_monitor_interval       = "15s"
+# observability_service_monitor_scrape_timeout = "10s"
+# observability_enable_alertmanager            = true
+
 # IRSA bindings for the Medusa controller and workers (disabled by default).
 enable_medusa_irsa = false
 # medusa_irsa_controller_service_account = {
