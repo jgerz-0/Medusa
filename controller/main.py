@@ -46,6 +46,7 @@ from sqlalchemy.orm import Session, selectinload
 from controller import metrics
 from controller.db.models import (
     AuditLog,
+    AnomalyEvent,
     BinaryFuzzingFinding,
     BinarySample,
     BinaryStaticAnalysisFinding,
@@ -60,6 +61,7 @@ from controller.db.models import (
 )
 from controller.db.session import SessionLocal
 from controller.notifications import (
+    AnomalyNotification,
     CriticalFindingNotification,
     NotificationService,
     build_notification_service,
@@ -633,6 +635,9 @@ class Settings(BaseSettings):
     )
     enrichment_callback_token: str = Field(
         ..., description="Shared secret required for enrichment worker callbacks."
+    )
+    anomaly_callback_token: str = Field(
+        ..., description="Shared secret required for anomaly worker callbacks."
     )
     validator_callback_token: str = Field(
         ..., description="Shared secret required for validator agent callbacks."
@@ -1521,6 +1526,69 @@ class ValidatorCallbackRequest(BaseModel):
     findings: List[ValidationFindingResult] = Field(default_factory=list)
     error: Optional[str] = None
 
+
+class AnomalyObservation(BaseModel):
+    anomaly_type: str = Field(..., min_length=1, max_length=128)
+    actor: str = Field(..., min_length=1, max_length=128)
+    first_seen: datetime
+    last_seen: datetime
+    count: int = Field(..., ge=1)
+    window_seconds: int = Field(..., ge=1)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("anomaly_type", "actor", mode="before")
+    @classmethod
+    def _normalize_strings(cls, value: object) -> str:
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate:
+                return candidate
+        raise ValueError("value must be a non-empty string")
+
+    @field_validator("first_seen", "last_seen")
+    @classmethod
+    def _ensure_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _normalize_metadata(cls, value: object) -> Dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        raise ValueError("metadata must be a JSON object")
+
+
+class AnomalyCallbackRequest(BaseModel):
+    source: str = Field(..., min_length=1, max_length=128)
+    detected_at: datetime
+    anomalies: List[AnomalyObservation] = Field(default_factory=list)
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _normalize_source(cls, value: object) -> str:
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate:
+                return candidate
+        raise ValueError("source must be provided")
+
+    @field_validator("detected_at")
+    @classmethod
+    def _normalize_detected_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def _require_anomalies(self) -> "AnomalyCallbackRequest":
+        if not self.anomalies:
+            raise ValueError("At least one anomaly must be provided")
+        return self
+
 class Principal(BaseModel):
     subject: str
     auth_method: str
@@ -2162,6 +2230,22 @@ def authenticate_validator_worker(
         subject="worker:validator",
         db=db,
         resource_id="validator",
+    )
+
+
+def authenticate_anomaly_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
+) -> Principal:
+    """Authenticate anomaly worker callbacks using a shared secret header."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.anomaly_callback_token,
+        subject="worker:anomaly",
+        db=db,
+        resource_id="anomaly",
     )
 
 
@@ -4467,6 +4551,73 @@ def enrichment_callback(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@app.post(
+    "/internal/anomalies",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def anomaly_callback(
+    payload: AnomalyCallbackRequest,
+    principal: Principal = Depends(authenticate_anomaly_worker),
+    db: Session = Depends(get_db_session),
+    notification_service: NotificationService = Depends(get_notification_service),
+) -> Response:
+    """Persist anomaly callback payloads and dispatch notifications."""
+
+    for anomaly in payload.anomalies:
+        event = AnomalyEvent(
+            anomaly_type=anomaly.anomaly_type,
+            actor=anomaly.actor,
+            source=payload.source,
+            detected_at=payload.detected_at,
+            first_seen=anomaly.first_seen,
+            last_seen=anomaly.last_seen,
+            count=anomaly.count,
+            window_seconds=anomaly.window_seconds,
+            metadata_json=anomaly.metadata,
+        )
+        db.add(event)
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        LOGGER.exception(
+            "Failed to persist anomaly callback",
+            extra={"source": payload.source, "count": len(payload.anomalies)},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist anomaly events",
+        ) from exc
+
+    for anomaly in payload.anomalies:
+        notification_service.notify_anomaly(
+            AnomalyNotification(
+                anomaly_type=anomaly.anomaly_type,
+                actor=anomaly.actor,
+                source=payload.source,
+                count=anomaly.count,
+                window_seconds=anomaly.window_seconds,
+                first_seen=anomaly.first_seen.isoformat(),
+                last_seen=anomaly.last_seen.isoformat(),
+                metadata=anomaly.metadata,
+            )
+        )
+
+    LOGGER.info(
+        "Persisted anomaly events",
+        extra={
+            "source": payload.source,
+            "count": len(payload.anomalies),
+            "actors": sorted({anomaly.actor for anomaly in payload.anomalies}),
+            "worker_subject": principal.subject,
+        },
+    )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 def _retrieve_finding_records(
     db: Session,
     *,
@@ -5935,5 +6086,7 @@ __all__ = [
     "authenticate_enrichment_worker",
     "authenticate_zap_worker",
     "authenticate_sqlmap_worker",
+    "authenticate_anomaly_worker",
     "ScanCallbackRequest",
+    "AnomalyCallbackRequest",
 ]

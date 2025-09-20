@@ -29,6 +29,20 @@ class CriticalFindingNotification:
     metadata: Dict[str, str]
 
 
+@dataclass
+class AnomalyNotification:
+    """Structured payload for audit-log driven anomaly detection."""
+
+    anomaly_type: str
+    actor: str
+    source: str
+    count: int
+    window_seconds: int
+    first_seen: str
+    last_seen: str
+    metadata: Dict[str, object]
+
+
 class NotificationService:
     """Dispatch Slack and email notifications for critical findings."""
 
@@ -78,7 +92,30 @@ class NotificationService:
         if self._slack_webhook:
             self._dispatch_slack(message_body)
         if self._email_sender and self._email_recipients and self._smtp_host:
-            self._dispatch_email(message_body)
+            self._dispatch_email("Medusa critical finding validated", message_body)
+
+    def notify_anomaly(self, payload: AnomalyNotification) -> None:
+        """Deliver anomaly notifications via Slack and email."""
+
+        message_lines = [
+            "Medusa detected an audit anomaly:",
+            f"• Type: {payload.anomaly_type}",
+            f"• Actor: {payload.actor}",
+            f"• Source: {payload.source}",
+            f"• Events observed: {payload.count} in {payload.window_seconds} seconds",
+            f"• First seen: {payload.first_seen}",
+            f"• Last seen: {payload.last_seen}",
+        ]
+        if payload.metadata:
+            metadata_json = json.dumps(payload.metadata, sort_keys=True)
+            message_lines.append(f"• Metadata: {metadata_json}")
+
+        message_body = "\n".join(message_lines)
+
+        if self._slack_webhook:
+            self._dispatch_slack(message_body)
+        if self._email_sender and self._email_recipients and self._smtp_host:
+            self._dispatch_email("Medusa anomaly detected", message_body)
 
     def _dispatch_slack(self, message: str) -> None:
         data = json.dumps({"text": message}).encode("utf-8")
@@ -91,9 +128,9 @@ class NotificationService:
         except urllib_error.URLError as exc:  # pragma: no cover - best effort logging
             LOGGER.warning("Failed to deliver Slack notification", extra={"error": str(exc)})
 
-    def _dispatch_email(self, message: str) -> None:
+    def _dispatch_email(self, subject: str, message: str) -> None:
         email = EmailMessage()
-        email["Subject"] = "Medusa critical finding validated"
+        email["Subject"] = subject
         email["From"] = self._email_sender  # type: ignore[assignment]
         email["To"] = ", ".join(self._email_recipients)
         email.set_content(message)
