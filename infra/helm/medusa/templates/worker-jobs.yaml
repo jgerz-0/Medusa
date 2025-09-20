@@ -130,6 +130,42 @@ spec:
               value: {{ default 3 $worker.env.maxRetries | int | quote }}
             - name: ZAP_CALLBACK_TIMEOUT
               value: {{ default 30 $worker.env.callbackTimeout | int | quote }}
+            {{- else if eq $name "sqlmap" }}
+            - name: SQLMAP_QUEUE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_SQLMAP_QUEUE_CHANNEL" $worker.env.queueSecretKey }}
+            - name: SQLMAP_DEAD_LETTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_SQLMAP_DEAD_LETTER_KEY" $worker.env.deadLetterSecretKey }}
+            - name: SQLMAP_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_SQLMAP_CALLBACK_TOKEN" $worker.env.callbackTokenSecretKey }}
+            - name: SQLMAP_CALLBACK_VERIFY_TLS
+              value: {{ ternary "true" "false" (default true $worker.env.verifyTLS) | quote }}
+            - name: SQLMAP_BINARY
+              value: {{ default "/usr/bin/sqlmap" $worker.env.binary | quote }}
+            - name: SQLMAP_WORK_DIR
+              value: {{ default "/tmp/sqlmap" $worker.env.workDir | quote }}
+            - name: SQLMAP_POLL_TIMEOUT
+              value: {{ default 5 $worker.env.pollTimeout | int | quote }}
+            - name: SQLMAP_MAX_RETRIES
+              value: {{ default 3 $worker.env.maxRetries | int | quote }}
+            - name: SQLMAP_CALLBACK_TIMEOUT
+              value: {{ default 30 $worker.env.callbackTimeout | int | quote }}
+            {{- if hasKey $worker.env "defaultLevel" }}
+            - name: SQLMAP_DEFAULT_LEVEL
+              value: {{ default 1 $worker.env.defaultLevel | int | quote }}
+            {{- end }}
+            {{- if hasKey $worker.env "defaultRisk" }}
+            - name: SQLMAP_DEFAULT_RISK
+              value: {{ default 1 $worker.env.defaultRisk | int | quote }}
+            {{- end }}
             {{- else if eq $name "validator" }}
             - name: VALIDATOR_QUEUE_KEY
               valueFrom:
