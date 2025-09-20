@@ -77,3 +77,13 @@ qdrant:
 ```
 
 Tune these numbers to match the replica topology in your cluster. Keeping explicit budgets ensures planned maintenance cannot silently evict the only running pod for a security-critical subsystem.
+
+## Rendering validation
+
+Always render the chart after editing Job templates or environment variables so malformed YAML (e.g., dangling keys within `env` lists) is caught before review. The development values file exercises the worker Jobs and replicates the Redis secret wiring that previously regressed.
+
+```bash
+helm template infra/helm/medusa -f infra/helm/medusa/values-dev.yaml
+```
+
+If the command fails, address the template error before opening a pull request. Pair this with your preferred schema linter (such as `kubeconform`) to keep worker manifests deterministic and auditable.
