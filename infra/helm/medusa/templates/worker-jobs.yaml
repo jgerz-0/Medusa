@@ -69,7 +69,6 @@ spec:
             - name: {{ $envName }}
               value: {{ tpl $value $ | quote }}
             {{- end }}
-                  key: MEDUSA_REDIS_URL
             {{- if eq $name "nuclei" }}
             - name: NUCLEI_QUEUE_KEY
               valueFrom:
