@@ -188,6 +188,20 @@ variable "common_labels" {
   default     = {}
 }
 
+variable "namespace_pod_security_standards" {
+  description = "Pod Security Standards levels enforced on the Medusa namespace via labels."
+  type = object({
+    enforce = string
+    audit   = string
+    warn    = string
+  })
+  default = {
+    enforce = "restricted"
+    audit   = "restricted"
+    warn    = "restricted"
+  }
+}
+
 variable "render_operator_kubeconfig" {
   description = "Whether to render a kubeconfig snippet for operators using the supplied token."
   type        = bool

@@ -219,6 +219,9 @@ locals {
     minio = {
       existingSecret = var.secret_name
     }
+    podSecurityStandards = {
+      namespaceLabelsOnly = true
+    }
   }
 
   rendered_helm_values = concat(
@@ -268,6 +271,7 @@ resource "kubernetes_namespace" "medusa" {
       {
         "medusa.security/scope" = "application"
       },
+      { for key, value in var.namespace_pod_security_standards : "pod-security.kubernetes.io/${key}" => value },
     )
   }
 }

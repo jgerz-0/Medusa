@@ -95,6 +95,22 @@ EOF
 
 **External alerting.** The module exposes `observability_alertmanager_config` so Alertmanager can forward incidents to PagerDuty, Slack, email, or SIEM webhooks. Store sensitive tokens in AWS Secrets Manager and render them via External Secrets, then reference the secret in your YAML using the standard Alertmanager templating syntax.
 
+### Pod Security Standards
+
+Terraform owns the Medusa namespace and attaches Kubernetes Pod Security Standards (PSS) labels so admission control is deterministic across clusters. The module sets `pod-security.kubernetes.io/{enforce,audit,warn}=restricted` by default and injects the Helm override `podSecurityStandards.namespaceLabelsOnly=true`. This keeps the Helm release from attempting to recreate or manage the namespace while still enforcing `restricted` level guardrails cluster-side.
+
+Override the PSS levels per environment by setting `namespace_pod_security_standards` in your environment `terraform.tfvars`:
+
+```hcl
+namespace_pod_security_standards = {
+  enforce = "baseline"   # Runtime admission level
+  audit   = "restricted"  # Audit-only warnings
+  warn    = "baseline"    # Warning banner surfaced to operators
+}
+```
+
+Only relax these values for tightly scoped dev clusters and document the justification in the same `tfvars` file. Production and shared environments should stick with `restricted` to maintain blast-radius isolation.
+
 ## Security Considerations
 - Enable AWS IAM roles for service accounts (IRSA) to scope worker pod permissions.
 - Encrypt RDS and S3 with KMS keys managed by the security team.
