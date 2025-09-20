@@ -94,6 +94,21 @@ workers:
               name: medusa-secrets
               key: NUCLEI_ARTIFACT_BUCKET
 
+  validator:
+    image:
+      repository: medusa/worker-validator
+      tag: latest
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_VALIDATOR_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_VALIDATOR_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_VALIDATOR_CALLBACK_TOKEN
+      maxRetries: 3
+      pollTimeout: 2
+      httpTimeout: 10
+      extra: []
+
   binaryFuzzing:
     image:
       repository: medusa/worker-binary-fuzzing
@@ -245,9 +260,11 @@ secrets:
     MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: queues:binary:preprocess
     MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: queues:binary:static-analysis
     MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: queues:binary:fuzzing
+    MEDUSA_VALIDATOR_QUEUE_CHANNEL: queues:validator:jobs
     MEDUSA_NUCLEI_CALLBACK_TOKEN: local-dev-nuclei-callback
     MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: local-dev-binary-static-callback
     MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: local-dev-binary-fuzzing-callback
+    MEDUSA_VALIDATOR_CALLBACK_TOKEN: local-dev-validator-callback
     MEDUSA_JWT_SECRET: change-this-in-production
     MINIO_ROOT_USER: medusaadmin
     MINIO_ROOT_PASSWORD: medusaadmin123
@@ -269,3 +286,4 @@ secrets:
     BINARY_FUZZING_DEAD_LETTER_KEY: queues:binary:fuzzing:dead
     BINARY_FUZZING_BUCKET: ""
     BINARY_FUZZING_PREFIX: analysis/fuzzing/
+    MEDUSA_VALIDATOR_DEAD_LETTER_KEY: queues:validator:dead

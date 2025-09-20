@@ -71,6 +71,29 @@ workers:
 
 Populate the matching secret keys—`MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL`, `BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY`, `BINARY_ANALYSIS_BUCKET`, `BINARY_ANALYSIS_PREFIX`, and `MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN`—through your selected secrets strategy (`inline`, `ExternalSecret`, or `SealedSecret`). These credentials gate which jobs the worker can dequeue and where findings are stored, so rotate them alongside Redis credentials during routine maintenance. Development overrides in `values-dev.yaml` mirror the same wiring with shorter poll timeouts for faster feedback.
 
+## Validator worker configuration
+
+The validator worker reenacts high-value findings prior to promotion. Configure its queue bindings and callback secrets so it can stream jobs from Redis and post signed results back to the controller.
+
+```yaml
+workers:
+  validator:
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_VALIDATOR_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_VALIDATOR_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_VALIDATOR_CALLBACK_TOKEN
+      maxRetries: 3
+      pollTimeout: 5
+      httpTimeout: 10
+    serviceAccount:
+      annotations:
+        eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/medusa-validator
+```
+
+Secret keys `MEDUSA_VALIDATOR_QUEUE_CHANNEL`, `MEDUSA_VALIDATOR_DEAD_LETTER_KEY`, and `MEDUSA_VALIDATOR_CALLBACK_TOKEN` must be present in whichever secret strategy you choose. Use the numeric knobs to tune retry behavior and Redis polling intervals for your environment. Attach IAM roles for service accounts (IRSA) or other identity annotations directly to `.Values.workers.validator.serviceAccount.annotations` when the worker needs cloud credentials (for example, to fetch evidence from S3 or notify downstream audit tooling).
+
 ## Pod Disruption Budgets
 
 Medusa components can now opt in to `PodDisruptionBudget` (PDB) objects so voluntary disruptions do not take down critical services during node drain events.
