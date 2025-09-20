@@ -51,20 +51,20 @@ The following baseline roles are supported:
 |-----------------|-------------------------------------------------------------------------|
 | `admin`         | Full access to all controller routes (implicit superset of other roles). |
 | `scan:enqueue`  | Permission to enqueue scans via `POST /scan`.                            |
-| `targets:write` | Permission to create and manage targets (future expansion).              |
-| `findings:read` | Permission to list findings and other read-only data.                    |
+| `targets:write` | Permission to create and manage targets via `POST /targets`.             |
+| `findings:read` | Permission to list findings via `GET /findings` and other read-only data.|
 | `analyst`       | Convenience label for subjects limited to read-only access.              |
 
 Routes can require multiple roles; holding `admin` always satisfies the
-requirement.
+requirement. The `admin` role remains a superset of `targets:write` and
+`findings:read`, so existing integrations using administrative credentials do
+not require immediate updates.
 
 ## Enforcement Points
 
 - `POST /scan` – requires `scan:enqueue` (or `admin`).
-- `POST /targets` – currently requires authentication; extend with
-  `targets:write` when write restrictions are needed.
-- `GET /findings` – requires any authenticated principal. Read-only access is
-  typically granted via `findings:read`.
+- `POST /targets` – requires `targets:write` (or `admin`).
+- `GET /findings` – requires `findings:read` (or `admin`).
 - `GET /audit-log` – requires `admin`. This route exposes sensitive telemetry
   about every privileged operation and must stay locked down.
 
