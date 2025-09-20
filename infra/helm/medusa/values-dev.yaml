@@ -3,6 +3,8 @@
 
 controller:
   replicaCount: 1
+  pdb:
+    enabled: false
   image:
     repository: medusa/controller
     tag: latest
@@ -14,6 +16,8 @@ controller:
     enabled: false
 
 postgresql:
+  pdb:
+    enabled: false
   primary:
     persistence:
       enabled: false
@@ -23,14 +27,20 @@ postgresql:
     POSTGRES_PASSWORD_SECRET_KEY: MEDUSA_POSTGRES_PASSWORD
 
 redis:
+  pdb:
+    enabled: false
   persistence:
     enabled: false
 
 minio:
+  pdb:
+    enabled: false
   persistence:
     enabled: false
 
 qdrant:
+  pdb:
+    enabled: false
   persistence:
     enabled: false
 
