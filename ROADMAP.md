@@ -44,6 +44,9 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 - ✅ Secrets management wired to External Secrets Operator when enabled via Terraform and Helm values.
 - ✅ Observability stack delivered via Prometheus/Grafana modules with Medusa dashboards and ServiceMonitor support.
 - ✅ AWS Load Balancer Controller provisioned through Terraform with hardened ingress defaults for the Medusa controller.
+- ✅ Terraform root module, environment tfvars, and supporting AWS modules (EKS, RDS, S3, IRSA, External Secrets, Observability, Medusa Helm release) published under `infra/terraform/`.
+
+Implementation guidance for these deliverables lives in [docs/TERRAFORM.md](docs/TERRAFORM.md) and [docs/KUBERNETES.md](docs/KUBERNETES.md), and the README quickstart now calls out the `infra/terraform/envs/<env>` workflows for applying them consistently across clusters.
 
 **Follow-ups:**
 - Validate NetworkPolicy coverage as additional scanners and enrichment workers move into Kubernetes.

@@ -98,7 +98,20 @@ These commands run entirely on the host using SQLite so you can iterate without 
 
 ### Automate cluster deployments
 
-Graduate from Docker Compose by running the Terraform workflow in [docs/TERRAFORM.md](docs/TERRAFORM.md) and then applying the Helm release steps in [docs/KUBERNETES.md](docs/KUBERNETES.md) to stand up the EKS cluster, External Secrets, and ALB ingress end-to-end.
+Graduate from Docker Compose by applying the Terraform workflow in [docs/TERRAFORM.md](docs/TERRAFORM.md) and then the Helm playbooks in [docs/KUBERNETES.md](docs/KUBERNETES.md) to stand up the EKS cluster, External Secrets, and ALB ingress end-to-end.
+
+```bash
+cd infra/terraform/envs/dev
+
+# Inspect and update terraform.tfvars with environment-specific values.
+terraform init
+terraform fmt -recursive
+terraform validate
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+Terraform modules provision EKS, RDS, S3, External Secrets, observability, and the Medusa Helm release. Helm values and secret delivery can be tailored per environment by editing the corresponding `envs/<env>/terraform.tfvars` file before running the plan.
 
 ### Analyst workflow: launching scans from the console
 
