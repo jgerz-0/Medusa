@@ -46,9 +46,26 @@ kubectl label namespace medusa \
 
 ## Deploy External Secrets (optional)
 
-For production, connect the chart to [External Secrets Operator](https://external-secrets.io) or Bitnami Sealed Secrets. The chart renders `ExternalSecret` or `SealedSecret` resources based on `values.yaml`.
+Production clusters should source credentials from a hardened store instead of inline manifests. The Terraform module now manages the [External Secrets Operator](https://external-secrets.io) via `infra/terraform/modules/external-secrets`:
 
-For local development we stick with inline secrets that replicate `infra/docker/docker-compose.yml`.
+1. Provision an IAM role for service accounts (IRSA) that grants `secretsmanager:GetSecretValue` on the required AWS Secrets Manager keys.
+2. Set the following variables in your environment `.tfvars` file:
+
+   ```hcl
+   enable_external_secrets_operator   = true
+   external_secrets_irsa_role_arn     = "arn:aws:iam::123456789012:role/external-secrets-operator"
+   external_secrets_secret_store_name = "medusa-prod-cluster-secrets"
+   ```
+
+3. Run `terraform apply` from `infra/terraform/envs/<env>` to install the operator, create a `ClusterSecretStore`, and wire the service account annotations.
+
+When the operator is enabled, the Medusa release automatically switches `secrets.strategy` to `externalSecret` and renders an `ExternalSecret` that:
+
+- Pulls the controller database credentials from Secrets Manager using the store above.
+- Templatizes the connection string and Medusa callback tokens generated during `terraform apply`.
+- Refreshes on the cadence configured by `external_secrets_medusa_refresh_interval` (defaults to five minutes).
+
+Clusters without AWS access or IRSA bindings can continue to use inline secrets that mirror `infra/docker/docker-compose.yml`.
 
 ## Install Medusa via Helm
 

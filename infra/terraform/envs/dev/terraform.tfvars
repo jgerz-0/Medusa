@@ -17,6 +17,10 @@ helm_repository_url          = "oci://ghcr.io/medusa/charts"
 helm_repository_username     = "medusa-dev-bot"
 helm_repository_password     = "REPLACE_WITH_OIDC_TOKEN"
 
+# External Secrets Operator (disabled by default until the IRSA role and store are prepared).
+enable_external_secrets_operator = false
+external_secrets_secret_store_name = "medusa-dev-cluster-secrets"
+
 # IRSA bindings for the Medusa controller and workers (disabled by default).
 enable_medusa_irsa = false
 # medusa_irsa_controller_service_account = {

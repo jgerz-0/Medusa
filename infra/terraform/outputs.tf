@@ -81,3 +81,15 @@ output "medusa_irsa" {
     workers    = module.irsa.workers
   }
 }
+
+output "external_secrets" {
+  description = "External Secrets Operator deployment context."
+  value = {
+    enabled          = module.external_secrets.enabled
+    secret_store = {
+      name = module.external_secrets.secret_store_name
+      kind = module.external_secrets.secret_store_kind
+    }
+    service_account = module.external_secrets.service_account_name
+  }
+}

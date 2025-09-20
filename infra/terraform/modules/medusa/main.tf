@@ -78,18 +78,31 @@ locals {
 
   external_secret_manifest_spec = (
     var.secret_strategy == "externalSecret" && var.external_secret_configuration != null
-  ) ? {
-    refreshInterval = coalesce(var.external_secret_configuration.refresh_interval, "1h")
-    secretStoreRef = {
-      kind = var.external_secret_configuration.secret_store_kind
-      name = var.external_secret_configuration.secret_store_name
-    }
-    target = {
-      name           = var.secret_name
-      creationPolicy = "Owner"
-    }
-    data = coalesce(var.external_secret_configuration.data, [])
-  } : null
+  ) ? merge(
+    {
+      refreshInterval = coalesce(var.external_secret_configuration.refresh_interval, "1h")
+      secretStoreRef = {
+        kind = var.external_secret_configuration.secret_store_kind
+        name = var.external_secret_configuration.secret_store_name
+      }
+      target = merge(
+        {
+          name           = var.secret_name
+          creationPolicy = "Owner"
+        },
+        var.external_secret_configuration.target_template != null ? {
+          template = var.external_secret_configuration.target_template
+        } : {},
+      )
+      data = coalesce(var.external_secret_configuration.data, [])
+    },
+    (
+      var.external_secret_configuration.data_from != null
+      && length(var.external_secret_configuration.data_from) > 0
+    ) ? {
+      dataFrom = var.external_secret_configuration.data_from
+    } : {},
+  ) : null
 
   base_helm_values = {
     secrets = {
