@@ -32,6 +32,37 @@ enable_medusa_irsa = false
 #   }
 # }
 
+# AWS Load Balancer Controller and Medusa ingress wiring.
+enable_aws_lb_controller = true
+aws_lb_controller_scheme = "internal"
+aws_lb_controller_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/medusa-dev-placeholder"
+aws_lb_controller_additional_annotations = {
+  "alb.ingress.kubernetes.io/listen-ports" = "[{\"HTTPS\":443}]"
+  "alb.ingress.kubernetes.io/ssl-redirect" = "443"
+}
+
+medusa_controller_ingress_enabled = true
+medusa_controller_ingress_hosts = [
+  {
+    host = "medusa.dev.example.com"
+    paths = [
+      {
+        path      = "/"
+        path_type = "Prefix"
+      }
+    ]
+  }
+]
+medusa_controller_ingress_tls = [
+  {
+    hosts       = ["medusa.dev.example.com"]
+    secret_name = "medusa-dev-tls"
+  }
+]
+medusa_controller_ingress_additional_annotations = {
+  "alb.ingress.kubernetes.io/load-balancer-attributes" = "idle_timeout.timeout_seconds=60"
+}
+
 vpc_cidr = "10.50.0.0/16"
 availability_zones = ["us-east-1a", "us-east-1b"]
 private_subnet_cidrs = ["10.50.1.0/24", "10.50.2.0/24"]

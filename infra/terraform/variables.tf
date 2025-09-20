@@ -242,6 +242,181 @@ variable "external_secrets_medusa_refresh_interval" {
   default     = "5m"
 }
 
+variable "enable_aws_lb_controller" {
+  description = "Deploy the AWS Load Balancer Controller Helm chart and supporting IAM role."
+  type        = bool
+  default     = false
+}
+
+variable "aws_lb_controller_namespace" {
+  description = "Namespace hosting the AWS Load Balancer Controller release."
+  type        = string
+  default     = "kube-system"
+}
+
+variable "aws_lb_controller_release_name" {
+  description = "Helm release name for the AWS Load Balancer Controller."
+  type        = string
+  default     = "aws-load-balancer-controller"
+}
+
+variable "aws_lb_controller_chart_repository" {
+  description = "Helm repository that publishes the AWS Load Balancer Controller chart."
+  type        = string
+  default     = "https://aws.github.io/eks-charts"
+}
+
+variable "aws_lb_controller_chart_name" {
+  description = "Chart name for the AWS Load Balancer Controller."
+  type        = string
+  default     = "aws-load-balancer-controller"
+}
+
+variable "aws_lb_controller_chart_version" {
+  description = "Version of the AWS Load Balancer Controller chart to deploy."
+  type        = string
+  default     = "1.9.2"
+}
+
+variable "aws_lb_controller_create_namespace" {
+  description = "Allow Helm to create the controller namespace if it is missing."
+  type        = bool
+  default     = false
+}
+
+variable "aws_lb_controller_service_account" {
+  description = "Optional overrides for the controller service account."
+  type = object({
+    name        = optional(string)
+    create      = optional(bool)
+    annotations = optional(map(string))
+  })
+  default = {}
+}
+
+variable "aws_lb_controller_iam_role_name" {
+  description = "Explicit name assigned to the controller IAM role."
+  type        = string
+  default     = null
+}
+
+variable "aws_lb_controller_additional_policy_arns" {
+  description = "Additional IAM policies attached to the controller role."
+  type        = list(string)
+  default     = []
+}
+
+variable "aws_lb_controller_additional_helm_values" {
+  description = "Extra Helm value documents applied to the controller release."
+  type        = list(any)
+  default     = []
+}
+
+variable "aws_lb_controller_helm_timeout_seconds" {
+  description = "Timeout (in seconds) for AWS Load Balancer Controller Helm operations."
+  type        = number
+  default     = 600
+}
+
+variable "aws_lb_controller_scheme" {
+  description = "Scheme assigned to the default Application Load Balancer (internal or internet-facing)."
+  type        = string
+  default     = "internal"
+
+  validation {
+    condition     = contains(["internal", "internet-facing"], lower(var.aws_lb_controller_scheme))
+    error_message = "aws_lb_controller_scheme must be either 'internal' or 'internet-facing'."
+  }
+}
+
+variable "aws_lb_controller_ip_address_type" {
+  description = "IP address allocation strategy for the controller-managed load balancer."
+  type        = string
+  default     = "ipv4"
+
+  validation {
+    condition     = contains(["ipv4", "dualstack"], lower(var.aws_lb_controller_ip_address_type))
+    error_message = "aws_lb_controller_ip_address_type must be 'ipv4' or 'dualstack'."
+  }
+}
+
+variable "aws_lb_controller_target_type" {
+  description = "Target registration mode for ALB target groups (ip or instance)."
+  type        = string
+  default     = "ip"
+
+  validation {
+    condition     = contains(["ip", "instance"], lower(var.aws_lb_controller_target_type))
+    error_message = "aws_lb_controller_target_type must be either 'ip' or 'instance'."
+  }
+}
+
+variable "aws_lb_controller_ingress_class_name" {
+  description = "IngressClass name advertised by the AWS Load Balancer Controller."
+  type        = string
+  default     = "alb"
+}
+
+variable "aws_lb_controller_ingress_class_params_name" {
+  description = "IngressClassParams name managed by the controller release."
+  type        = string
+  default     = null
+}
+
+variable "aws_lb_controller_set_default_ingress_class" {
+  description = "Mark the controller-managed IngressClass as the cluster default."
+  type        = bool
+  default     = true
+}
+
+variable "aws_lb_controller_certificate_arn" {
+  description = "ACM certificate ARN bound to HTTPS listeners created by the controller."
+  type        = string
+  default     = null
+}
+
+variable "aws_lb_controller_ssl_policy" {
+  description = "SSL policy enforced on controller-managed HTTPS listeners."
+  type        = string
+  default     = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+}
+
+variable "aws_lb_controller_additional_annotations" {
+  description = "Custom annotations merged into default ingress settings produced by the controller module."
+  type        = map(string)
+  default     = {}
+}
+
+variable "aws_lb_controller_additional_tags" {
+  description = "Tags applied to load balancers created via the controller's IngressClassParams."
+  type        = map(string)
+  default     = {}
+}
+
+variable "aws_lb_controller_security_group_ids" {
+  description = "Security group identifiers attached to load balancers created by the controller."
+  type        = list(string)
+  default     = []
+}
+
+variable "aws_lb_controller_node_selector" {
+  description = "Node selector applied to the controller deployment."
+  type        = map(string)
+  default     = {}
+}
+
+variable "aws_lb_controller_tolerations" {
+  description = "Tolerations applied to the controller deployment."
+  type = list(object({
+    key               = optional(string)
+    operator          = optional(string)
+    value             = optional(string)
+    effect            = optional(string)
+    toleration_seconds = optional(number)
+  }))
+  default = []
+}
+
 variable "medusa_secret_strategy" {
   description = "Secret delivery strategy for the Medusa Helm release (inline or externalSecret)."
   type        = string
@@ -320,6 +495,51 @@ variable "medusa_extra_values" {
   description = "Extra Helm value documents appended to the Medusa release."
   type        = list(any)
   default     = []
+}
+
+variable "medusa_controller_ingress_enabled" {
+  description = "Enable the Medusa controller Ingress resource and pass ALB annotations."
+  type        = bool
+  default     = false
+}
+
+variable "medusa_controller_ingress_class_name" {
+  description = "Override the ingressClassName applied to the Medusa controller ingress."
+  type        = string
+  default     = null
+}
+
+variable "medusa_controller_ingress_additional_annotations" {
+  description = "Custom annotations merged into the controller ingress before rendering."
+  type        = map(string)
+  default     = {}
+}
+
+variable "medusa_controller_ingress_hosts" {
+  description = "Host and path configuration for the Medusa controller ingress."
+  type = list(object({
+    host  = string
+    paths = list(object({
+      path      = string
+      path_type = optional(string)
+    }))
+  }))
+  default = []
+}
+
+variable "medusa_controller_ingress_tls" {
+  description = "TLS secrets referenced by the Medusa controller ingress."
+  type = list(object({
+    hosts       = list(string)
+    secret_name = string
+  }))
+  default = []
+}
+
+variable "medusa_controller_ingress_extra_settings" {
+  description = "Raw map of additional ingress settings merged into the Helm values."
+  type        = map(any)
+  default     = {}
 }
 
 variable "enable_medusa_irsa" {

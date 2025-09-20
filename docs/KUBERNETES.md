@@ -67,6 +67,68 @@ When the operator is enabled, the Medusa release automatically switches `secrets
 
 Clusters without AWS access or IRSA bindings can continue to use inline secrets that mirror `infra/docker/docker-compose.yml`.
 
+## Provision the AWS Load Balancer Controller
+
+Production clusters expose Medusa via an Application Load Balancer managed by
+the [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/).
+The Terraform module at `infra/terraform/modules/aws_lb_controller` automates
+the IAM role, IRSA wiring, and Helm deployment with hardened defaults
+(non-root controller pods, default ingress class, and TLS 1.2/1.3 policies).
+
+1. Populate the following variables in `infra/terraform/envs/<env>/terraform.tfvars`:
+
+   ```hcl
+   enable_aws_lb_controller = true
+   aws_lb_controller_scheme = "internal" # or "internet-facing" when exposing Medusa publicly
+   aws_lb_controller_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/your-cert"
+   aws_lb_controller_additional_annotations = {
+     "alb.ingress.kubernetes.io/listen-ports" = "[{\"HTTPS\":443}]"
+     "alb.ingress.kubernetes.io/ssl-redirect" = "443"
+   }
+
+   medusa_controller_ingress_enabled = true
+   medusa_controller_ingress_hosts = [
+     {
+       host = "medusa.dev.example.com"
+       paths = [
+         {
+           path      = "/"
+           path_type = "Prefix"
+         }
+       ]
+     }
+   ]
+   medusa_controller_ingress_tls = [
+     {
+       hosts       = ["medusa.dev.example.com"]
+       secret_name = "medusa-dev-tls"
+     }
+   ]
+   ```
+
+2. Run `terraform apply` inside `infra/terraform/envs/<env>`.
+
+   Terraform will:
+
+   - Create an IAM role that trusts the EKS OIDC provider and attaches the
+     `AmazonEKSLoadBalancerControllerPolicy` managed policy.
+   - Deploy the upstream Helm chart with the IRSA annotation, Pod Security
+     settings, and the default ingress class/parameters bound to your private or
+     public subnets.
+   - Inject ALB annotations (scheme, certificate ARN, SSL policy, additional
+     listener attributes) into the Medusa controller ingress via
+     `extra_values`, so the ALB stands up automatically during the Helm
+     release.
+
+3. Optionally tune advanced settings via the Terraform variables:
+
+   - `aws_lb_controller_security_group_ids` to pin ALBs to precreated security
+     groups.
+   - `aws_lb_controller_additional_tags` to enforce cost/audit tagging on ALB
+     resources.
+   - `medusa_controller_ingress_additional_annotations` to append WAF, Shield,
+     or access-log settings required by your security posture.
+
 ## Install Medusa via Helm
 
 ```bash
