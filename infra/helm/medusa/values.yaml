@@ -73,6 +73,10 @@ secrets:
 controller:
   enabled: true
   replicaCount: 2
+  pdb:
+    enabled: true
+    minAvailable: 1
+    maxUnavailable: null
   image:
     repository: ghcr.io/medusa/controller
     tag: ""
@@ -155,6 +159,10 @@ postgresql:
     tag: 15-alpine
     pullPolicy: IfNotPresent
   component: postgresql
+  pdb:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
   primary:
     persistence:
       enabled: true
@@ -194,6 +202,10 @@ redis:
     tag: 7.2-alpine
     pullPolicy: IfNotPresent
   component: redis
+  pdb:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
   persistence:
     enabled: true
     storageClass: ""
@@ -227,6 +239,10 @@ minio:
     tag: RELEASE.2024-05-27T16-10-24Z
     pullPolicy: IfNotPresent
   component: minio
+  pdb:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
   persistence:
     enabled: true
     storageClass: ""
@@ -264,6 +280,10 @@ qdrant:
     tag: v1.7.3
     pullPolicy: IfNotPresent
   component: qdrant
+  pdb:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
   persistence:
     enabled: true
     storageClass: ""

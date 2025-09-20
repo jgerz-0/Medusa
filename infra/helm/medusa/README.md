@@ -37,3 +37,43 @@ Key behaviors:
 - Use `additionalSubjects` to append extra principals to the RoleBinding without losing the automatically managed service account subject.
 
 Keep the `rbac` scope tight—workers should only receive the Kubernetes permissions they need to fetch secrets, configmaps, or other workload-specific resources.
+
+## Pod Disruption Budgets
+
+Medusa components can now opt in to `PodDisruptionBudget` (PDB) objects so voluntary disruptions do not take down critical services during node drain events.
+
+- The controller defaults to `minAvailable: 1` because the chart runs two replicas by default.
+- Stateful dependencies (PostgreSQL, Redis, MinIO, Qdrant) expose the same toggle but remain disabled until you run them with multiple replicas.
+- Set exactly one of `minAvailable` or `maxUnavailable` per component. Leave the unused field `null` to keep the rendered manifest valid.
+
+Example hardening posture when running HA data services:
+
+```yaml
+controller:
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+postgresql:
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+redis:
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+    minAvailable: null
+
+minio:
+  pdb:
+    enabled: true
+    minAvailable: 2
+
+qdrant:
+  pdb:
+    enabled: true
+    minAvailable: 1
+```
+
+Tune these numbers to match the replica topology in your cluster. Keeping explicit budgets ensures planned maintenance cannot silently evict the only running pod for a security-critical subsystem.
