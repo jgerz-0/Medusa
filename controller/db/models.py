@@ -306,6 +306,31 @@ class AuditLog(Base):
     finding: Mapped[Optional["Finding"]] = relationship(back_populates="audit_entries")
 
 
+class AnomalyEvent(Base):
+    """Structured anomaly callback emitted by the anomaly worker."""
+
+    __tablename__ = "anomaly_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    anomaly_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+    detected_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    first_seen: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_seen: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    window_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+
+
 class FindingComment(Base):
     """Immutable analyst commentary linked to findings."""
 

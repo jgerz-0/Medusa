@@ -61,6 +61,7 @@ def test_worker_config_defaults_align_with_controller(monkeypatch):
         sqlmap_callback_token="sqlmap-secret",
         enrichment_callback_token="enrichment-secret",
         validator_callback_token="validator-secret",
+        anomaly_callback_token="anomaly-secret",
         binary_static_analysis_callback_token="static-secret",
         binary_fuzzing_callback_token="fuzzing-secret",
     )

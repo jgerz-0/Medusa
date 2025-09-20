@@ -12,6 +12,7 @@ import jwt
 import pytest
 from controller.db.models import (
     AuditLog,
+    AnomalyEvent,
     Base,
     BinaryFuzzingFinding,
     BinarySample,
@@ -35,7 +36,11 @@ from controller.main import (
     get_queue_client,
     get_settings,
 )
-from controller.notifications import CriticalFindingNotification, NotificationService
+from controller.notifications import (
+    AnomalyNotification,
+    CriticalFindingNotification,
+    NotificationService,
+)
 from controller.tests.conftest import InMemoryQueue
 
 
@@ -51,11 +56,17 @@ class DummyNotificationService(NotificationService):
             smtp_password=None,
             smtp_use_tls=False,
         )
+        self.anomaly_notifications: list[AnomalyNotification] = []
 
     def notify_critical_finding(  # type: ignore[override]
         self, payload: CriticalFindingNotification
     ) -> None:
         return
+
+    def notify_anomaly(  # type: ignore[override]
+        self, payload: AnomalyNotification
+    ) -> None:
+        self.anomaly_notifications.append(payload)
 
 
 @pytest.fixture()
@@ -75,6 +86,7 @@ def api_client() -> (
         zap_callback_token="zap-callback",
         sqlmap_callback_token="sqlmap-callback",
         validator_callback_token="validator-secret",
+        anomaly_callback_token="anomaly-secret",
         enrichment_callback_token="enrichment-secret",
         binary_static_analysis_queue_channel="binary-static:test",
         binary_static_analysis_callback_token="binary-static-secret",
@@ -148,6 +160,10 @@ def binary_static_headers() -> dict[str, str]:
 
 def binary_fuzzing_headers() -> dict[str, str]:
     return {"X-Callback-Token": "binary-fuzzing-secret"}
+
+
+def anomaly_headers() -> dict[str, str]:
+    return {"X-Callback-Token": "anomaly-secret"}
 
 
 def _create_finding_record(session_factory: sessionmaker) -> str:
@@ -1429,6 +1445,50 @@ def test_enrichment_callback_records_errors(
         audit_entries = session.query(AuditLog).all()
         assert any(entry.action == "list_findings" for entry in audit_entries)
         assert any(entry.action == "get_finding" for entry in audit_entries)
+
+
+def test_anomaly_callback_persists_events_and_notifies(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    detected_at = datetime.now(timezone.utc)
+    first_seen = detected_at - timedelta(minutes=1)
+    last_seen = detected_at
+
+    payload = {
+        "source": "worker:anomaly",
+        "detected_at": detected_at.isoformat(),
+        "anomalies": [
+            {
+                "anomaly_type": "excessive_access_denied",
+                "actor": "svc-tester",
+                "first_seen": first_seen.isoformat(),
+                "last_seen": last_seen.isoformat(),
+                "count": 5,
+                "window_seconds": 600,
+                "metadata": {"reason_counts": {"missing_required_roles": 5}},
+            }
+        ],
+    }
+
+    response = client.post(
+        "/internal/anomalies",
+        json=payload,
+        headers=anomaly_headers(),
+    )
+    assert response.status_code == 204, response.text
+
+    with session_factory() as session:
+        event = session.query(AnomalyEvent).one()
+        assert event.anomaly_type == "excessive_access_denied"
+        assert event.actor == "svc-tester"
+        assert event.metadata_json["reason_counts"]["missing_required_roles"] == 5
+
+    notification_service = app.dependency_overrides[get_notification_service]()
+    assert notification_service.anomaly_notifications
+    message = notification_service.anomaly_notifications[-1]
+    assert message.anomaly_type == "excessive_access_denied"
+    assert message.actor == "svc-tester"
 
 
 def test_rbac_denial_is_audited(
