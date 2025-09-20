@@ -28,7 +28,7 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
   - Stores pending jobs keyed by agent type.
   - Ensures idempotent delivery with per-job retry policy.
 - **Workers**
-  - Containerized wrappers around scanners (nuclei, ZAP, SQLMap, AFL, angr).
+  - Containerized wrappers around scanners (nuclei, ZAP, SQLMap, AFL/libFuzzer fuzzing, checksec, bandit).
   - Normalize output into the shared JSON Finding schema.
   - Upload heavy artifacts (pcaps, binaries, logs) to MinIO.
   - **CVE Enrichment Worker** – fetches deterministic advisories from NVD and CIRCL, emits structured metadata for findings, and writes normalized advisory embeddings to Qdrant for semantic enrichment without blocking Redis callbacks.
