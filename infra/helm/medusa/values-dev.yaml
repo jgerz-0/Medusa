@@ -120,6 +120,27 @@ workers:
         name: zap-reports
         emptyDir: {}
 
+  sqlmap:
+    enabled: true
+    image:
+      repository: medusa/worker-sqlmap
+      tag: latest
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_SQLMAP_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_SQLMAP_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_SQLMAP_CALLBACK_TOKEN
+      verifyTLS: false
+      binary: "/usr/bin/sqlmap"
+      workDir: "/tmp/sqlmap"
+      pollTimeout: 2
+      maxRetries: 3
+      callbackTimeout: 30
+      defaultRisk: 1
+      defaultLevel: 1
+      extra: []
+
   validator:
     image:
       repository: medusa/worker-validator

@@ -100,6 +100,32 @@ workers:
 
 Secret keys `MEDUSA_ZAP_QUEUE_CHANNEL`, `MEDUSA_ZAP_DEAD_LETTER_KEY`, and `MEDUSA_ZAP_CALLBACK_TOKEN` must exist in the rendered secret so the worker can authenticate with Redis and the controller. Set `verifyTLS` to `true` (the default) in production clusters so callbacks validate the API server certificate chain. The `reportVolume` block automatically renders an `emptyDir` that mounts to `ZAP_WORK_DIR`; override the volume definition if compliance controls require the reports to persist outside the pod lifecycle.
 
+## SQLMap worker configuration
+
+The SQLMap worker validates injection findings against sanitized targets and feeds normalized data back to the controller. Its Helm values expose the Redis bindings, callback token, hardened sqlmap binary path, and deterministic retry behavior so operators can enforce strict IAM roles and network scopes.
+
+```yaml
+workers:
+  sqlmap:
+    enabled: true                      # defaults to false in production values
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_SQLMAP_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_SQLMAP_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_SQLMAP_CALLBACK_TOKEN
+      verifyTLS: true                   # keep enabled to validate callback certificates
+      binary: "/usr/bin/sqlmap"          # matches the worker container default
+      workDir: "/tmp/sqlmap"             # directory is created per job id
+      pollTimeout: 5
+      maxRetries: 3
+      callbackTimeout: 30
+      defaultRisk: 1                    # controller still enforces bounds of 0-3
+      defaultLevel: 1                   # controller constrains to 1-5 regardless of overrides
+```
+
+Back the queue, dead-letter channel, and callback token with the same secret strategy you use for other workers. Production deployments should provision the callback token and Redis credentials through External Secrets or a SealedSecret so only the SQLMap service account—and its IRSA role—can access them. Keep `verifyTLS` enabled except in tightly controlled development clusters.
+
 ## Validator worker configuration
 
 The validator worker reenacts high-value findings prior to promotion. Configure its queue bindings and callback secrets so it can stream jobs from Redis and post signed results back to the controller.

@@ -101,12 +101,12 @@ variable "bucket_names" {
 }
 
 variable "callback_tokens" {
-  description = "Callback tokens for Medusa agents keyed by capability (nuclei, enrichment, binary_static, binary_fuzzing)."
+  description = "Callback tokens for Medusa agents keyed by capability (nuclei, sqlmap, enrichment, binary_static, binary_fuzzing)."
   type        = map(string)
 
   validation {
-    condition     = alltrue([for key in ["nuclei", "enrichment", "binary_static", "binary_fuzzing"] : contains(keys(var.callback_tokens), key)])
-    error_message = "callback_tokens must provide nuclei, enrichment, binary_static, and binary_fuzzing entries."
+    condition     = alltrue([for key in ["nuclei", "sqlmap", "enrichment", "binary_static", "binary_fuzzing"] : contains(keys(var.callback_tokens), key)])
+    error_message = "callback_tokens must provide nuclei, sqlmap, enrichment, binary_static, and binary_fuzzing entries."
   }
 }
 

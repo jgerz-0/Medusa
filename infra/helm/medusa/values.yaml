@@ -34,6 +34,10 @@ secrets:
     MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: "queues:binary:fuzzing"
     MEDUSA_VALIDATOR_QUEUE_CHANNEL: "queues:validator:jobs"
     MEDUSA_NUCLEI_CALLBACK_TOKEN: "change-me"
+    MEDUSA_SQLMAP_QUEUE_CHANNEL: "queues:sqlmap:jobs"
+    MEDUSA_SQLMAP_DEAD_LETTER_KEY: "queues:sqlmap:dead"
+    MEDUSA_SQLMAP_CALLBACK_TOKEN: "change-me"
+    SQLMAP_CALLBACK_TOKEN: "change-me"
     MEDUSA_ENRICHMENT_CALLBACK_TOKEN: "change-me"
     MEDUSA_VALIDATOR_CALLBACK_TOKEN: "change-me"
     MEDUSA_JWT_SECRET: "change-me"
@@ -403,6 +407,68 @@ workers:
       volume:
         name: zap-reports
         emptyDir: {}
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
+  sqlmap:
+    enabled: false
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-sqlmap
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: sqlmap-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_SQLMAP_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_SQLMAP_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_SQLMAP_CALLBACK_TOKEN
+      verifyTLS: true
+      binary: "/usr/bin/sqlmap"
+      workDir: "/tmp/sqlmap"
+      pollTimeout: 5
+      maxRetries: 3
+      callbackTimeout: 30
+      defaultRisk: 1
+      defaultLevel: 1
+      extra: []
     resources:
       requests:
         cpu: 250m

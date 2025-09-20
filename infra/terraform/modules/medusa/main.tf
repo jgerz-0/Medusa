@@ -43,6 +43,7 @@ locals {
   callback_tokens = merge(
     {
       nuclei        = null,
+      sqlmap        = null,
       enrichment    = null,
       binary_static = null,
       binary_fuzzing = null,
@@ -55,6 +56,10 @@ locals {
       MEDUSA_DATABASE_URL                        = var.database.connection_string
       MEDUSA_NUCLEI_CALLBACK_TOKEN               = local.callback_tokens.nuclei
       NUCLEI_CALLBACK_TOKEN                      = local.callback_tokens.nuclei
+      MEDUSA_SQLMAP_QUEUE_CHANNEL                = "queues:sqlmap:jobs"
+      MEDUSA_SQLMAP_DEAD_LETTER_KEY              = "queues:sqlmap:dead"
+      MEDUSA_SQLMAP_CALLBACK_TOKEN               = local.callback_tokens.sqlmap
+      SQLMAP_CALLBACK_TOKEN                      = local.callback_tokens.sqlmap
       MEDUSA_ENRICHMENT_CALLBACK_TOKEN           = local.callback_tokens.enrichment
       MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN = local.callback_tokens.binary_static
       MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN       = local.callback_tokens.binary_fuzzing

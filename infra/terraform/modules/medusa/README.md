@@ -65,6 +65,7 @@ module "medusa" {
 
   callback_tokens = {
     nuclei        = random_password.medusa_callback["nuclei"].result
+    sqlmap        = random_password.medusa_callback["sqlmap"].result
     enrichment    = random_password.medusa_callback["enrichment"].result
     binary_static = random_password.medusa_callback["binary_static"].result
     binary_fuzzing = random_password.medusa_callback["binary_fuzzing"].result
