@@ -844,6 +844,9 @@ networkPolicies:
       - binary-fuzzing-worker
       - binary-static-analysis-worker
       - cve-enrichment-worker
+      - zap-worker
+      - sqlmap-worker
+      - validator-worker
   ingress:
     enabled: true
   egress:
