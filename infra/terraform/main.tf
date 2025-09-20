@@ -235,6 +235,65 @@ locals {
   )
 }
 
+module "observability" {
+  source = "./modules/observability"
+
+  enabled              = var.enable_observability
+  mode                 = var.observability_mode
+  namespace            = var.observability_namespace
+  create_namespace     = var.observability_create_namespace
+  release_name         = var.observability_release_name
+  chart_repository     = var.observability_chart_repository
+  chart_name           = var.observability_chart_name
+  chart_version        = var.observability_chart_version
+  helm_timeout_seconds = var.observability_helm_timeout_seconds
+
+  medusa_namespace    = local.environment_context.namespace
+  medusa_release_name = local.environment_context.helm_release
+
+  service_monitor_labels         = var.observability_service_monitor_labels
+  service_monitor_interval       = var.observability_service_monitor_interval
+  service_monitor_scrape_timeout = var.observability_service_monitor_scrape_timeout
+  embedded_service_monitor_enabled = var.observability_embedded_service_monitor_enabled
+  prometheus_retention           = var.observability_prometheus_retention
+  embedded_prometheus_persistent_volume_enabled = var.observability_embedded_prometheus_persistent_volume_enabled
+  embedded_prometheus_storage_class             = var.observability_embedded_prometheus_storage_class
+  embedded_prometheus_storage_size              = var.observability_embedded_prometheus_storage_size
+  embedded_prometheus_service_type              = var.observability_embedded_prometheus_service_type
+
+  grafana_service_type                = var.observability_grafana_service_type
+  grafana_ingress_enabled             = var.observability_grafana_ingress_enabled
+  grafana_ingress_class_name          = var.observability_grafana_ingress_class_name
+  grafana_ingress_annotations         = var.observability_grafana_ingress_annotations
+  grafana_ingress_hosts               = var.observability_grafana_ingress_hosts
+  grafana_ingress_tls                 = var.observability_grafana_ingress_tls
+  grafana_ingress_additional_settings = var.observability_grafana_ingress_additional_settings
+
+  manage_grafana_admin_secret      = var.observability_manage_grafana_admin_secret
+  grafana_admin_secret_name        = var.observability_grafana_admin_secret_name
+  grafana_admin_user_key           = var.observability_grafana_admin_user_key
+  grafana_admin_password_key       = var.observability_grafana_admin_password_key
+  grafana_admin_secret_labels      = var.observability_grafana_admin_secret_labels
+  grafana_admin_secret_annotations = var.observability_grafana_admin_secret_annotations
+  grafana_admin_credentials        = var.observability_grafana_admin_credentials
+
+  enable_alertmanager            = var.observability_enable_alertmanager
+  alertmanager_config            = var.observability_alertmanager_config
+  alertmanager_additional_values = var.observability_alertmanager_additional_values
+  kube_prometheus_additional_values = var.observability_kube_prometheus_additional_values
+  embedded_additional_values        = var.observability_embedded_additional_values
+  external_stack_medusa_overrides   = var.observability_external_stack_medusa_overrides
+
+  common_labels = merge(
+    {
+      "app.kubernetes.io/managed-by" = "terraform"
+      "medusa.security/environment"  = local.environment
+      "medusa.security/project"      = local.project_name
+    },
+    var.observability_additional_labels,
+  )
+}
+
 module "medusa" {
   source = "./modules/medusa"
 
@@ -270,6 +329,7 @@ module "medusa" {
   controller_additional_env     = var.medusa_controller_additional_env
   extra_values = concat(
     var.medusa_extra_values,
+    module.observability.medusa_extra_values,
     module.irsa.helm_values,
     local.medusa_controller_ingress_values,
   )
@@ -284,7 +344,10 @@ module "medusa" {
   render_operator_kubeconfig = var.medusa_render_operator_kubeconfig
   helm_timeout_seconds       = var.medusa_helm_timeout_seconds
 
-  depends_on = [module.eks, module.rds, module.s3]
+  depends_on = concat(
+    [module.eks, module.rds, module.s3],
+    var.enable_observability && var.observability_mode == "kube-prometheus-stack" ? [module.observability] : [],
+  )
 }
 
 module "s3" {

@@ -242,6 +242,262 @@ variable "external_secrets_medusa_refresh_interval" {
   default     = "5m"
 }
 
+variable "enable_observability" {
+  description = "Deploy Prometheus/Grafana observability tooling alongside Medusa."
+  type        = bool
+  default     = false
+}
+
+variable "observability_mode" {
+  description = "Select between the kube-prometheus-stack or the Medusa chart's embedded Prometheus/Grafana."
+  type        = string
+  default     = "embedded"
+
+  validation {
+    condition     = contains(["embedded", "kube-prometheus-stack"], var.observability_mode)
+    error_message = "observability_mode must be either 'embedded' or 'kube-prometheus-stack'."
+  }
+}
+
+variable "observability_namespace" {
+  description = "Namespace hosting the kube-prometheus-stack release when enabled."
+  type        = string
+  default     = "observability"
+}
+
+variable "observability_create_namespace" {
+  description = "Allow Terraform to manage the observability namespace."
+  type        = bool
+  default     = true
+}
+
+variable "observability_release_name" {
+  description = "Helm release name for the kube-prometheus-stack deployment."
+  type        = string
+  default     = "kube-prometheus-stack"
+}
+
+variable "observability_chart_repository" {
+  description = "Helm repository hosting kube-prometheus-stack."
+  type        = string
+  default     = "https://prometheus-community.github.io/helm-charts"
+}
+
+variable "observability_chart_name" {
+  description = "Name of the Helm chart used for the observability stack."
+  type        = string
+  default     = "kube-prometheus-stack"
+}
+
+variable "observability_chart_version" {
+  description = "Version of the kube-prometheus-stack chart to deploy."
+  type        = string
+  default     = "55.8.2"
+}
+
+variable "observability_helm_timeout_seconds" {
+  description = "Timeout (in seconds) for observability Helm operations."
+  type        = number
+  default     = 900
+}
+
+variable "observability_service_monitor_labels" {
+  description = "Extra labels applied to the Medusa ServiceMonitor when metrics are enabled."
+  type        = map(string)
+  default     = {}
+}
+
+variable "observability_service_monitor_interval" {
+  description = "Override for the ServiceMonitor scrape interval."
+  type        = string
+  default     = null
+}
+
+variable "observability_service_monitor_scrape_timeout" {
+  description = "Override for the ServiceMonitor scrape timeout."
+  type        = string
+  default     = null
+}
+
+variable "observability_embedded_service_monitor_enabled" {
+  description = "Render the ServiceMonitor when using embedded observability (requires pre-installed CRDs)."
+  type        = bool
+  default     = false
+}
+
+variable "observability_prometheus_retention" {
+  description = "Retention window for Prometheus metrics."
+  type        = string
+  default     = "15d"
+}
+
+variable "observability_embedded_prometheus_persistent_volume_enabled" {
+  description = "Enable persistence for the embedded Prometheus server."
+  type        = bool
+  default     = true
+}
+
+variable "observability_embedded_prometheus_storage_class" {
+  description = "StorageClass assigned to the embedded Prometheus volume."
+  type        = string
+  default     = ""
+}
+
+variable "observability_embedded_prometheus_storage_size" {
+  description = "Persistent volume size for the embedded Prometheus server."
+  type        = string
+  default     = "20Gi"
+}
+
+variable "observability_embedded_prometheus_service_type" {
+  description = "Service type used by the embedded Prometheus server."
+  type        = string
+  default     = "ClusterIP"
+}
+
+variable "observability_grafana_service_type" {
+  description = "Service type used to expose Grafana."
+  type        = string
+  default     = "ClusterIP"
+}
+
+variable "observability_grafana_ingress_enabled" {
+  description = "Expose Grafana via an ingress resource."
+  type        = bool
+  default     = false
+}
+
+variable "observability_grafana_ingress_class_name" {
+  description = "Ingress class used for Grafana when ingress is enabled."
+  type        = string
+  default     = null
+}
+
+variable "observability_grafana_ingress_annotations" {
+  description = "Annotations merged into the Grafana ingress."
+  type        = map(string)
+  default     = {}
+}
+
+variable "observability_grafana_ingress_hosts" {
+  description = "Hosts routed to Grafana when ingress is enabled."
+  type = list(object({
+    host  = string
+    paths = list(object({
+      path      = string
+      path_type = optional(string)
+    }))
+  }))
+  default = []
+}
+
+variable "observability_grafana_ingress_tls" {
+  description = "TLS configuration for the Grafana ingress."
+  type = list(object({
+    secret_name = string
+    hosts       = list(string)
+  }))
+  default = []
+}
+
+variable "observability_grafana_ingress_additional_settings" {
+  description = "Raw map merged into the Grafana ingress stanza for advanced controls."
+  type        = map(any)
+  default     = {}
+}
+
+variable "observability_manage_grafana_admin_secret" {
+  description = "Have Terraform manage the Grafana admin credentials secret."
+  type        = bool
+  default     = false
+}
+
+variable "observability_grafana_admin_secret_name" {
+  description = "Name of the secret containing Grafana admin credentials."
+  type        = string
+  default     = "grafana-admin-credentials"
+}
+
+variable "observability_grafana_admin_user_key" {
+  description = "Key storing the Grafana admin username in the secret."
+  type        = string
+  default     = "admin-user"
+}
+
+variable "observability_grafana_admin_password_key" {
+  description = "Key storing the Grafana admin password in the secret."
+  type        = string
+  default     = "admin-password"
+}
+
+variable "observability_grafana_admin_secret_labels" {
+  description = "Additional labels for the managed Grafana admin secret."
+  type        = map(string)
+  default     = {}
+}
+
+variable "observability_grafana_admin_secret_annotations" {
+  description = "Annotations applied to the managed Grafana admin secret."
+  type        = map(string)
+  default     = {}
+}
+
+variable "observability_grafana_admin_credentials" {
+  description = "Grafana admin username and password when Terraform manages the secret."
+  type = object({
+    username = string
+    password = string
+  })
+  default = null
+
+  validation {
+    condition     = (!var.observability_manage_grafana_admin_secret) || var.observability_grafana_admin_credentials != null
+    error_message = "observability_grafana_admin_credentials must be provided when managing the Grafana admin secret."
+  }
+}
+
+variable "observability_enable_alertmanager" {
+  description = "Deploy Alertmanager as part of the observability stack."
+  type        = bool
+  default     = false
+}
+
+variable "observability_alertmanager_config" {
+  description = "Inline Alertmanager configuration for routing alerts."
+  type        = string
+  default     = null
+}
+
+variable "observability_alertmanager_additional_values" {
+  description = "Additional map merged into the Alertmanager Helm values."
+  type        = map(any)
+  default     = {}
+}
+
+variable "observability_kube_prometheus_additional_values" {
+  description = "Additional Helm value documents for the kube-prometheus-stack release."
+  type        = list(any)
+  default     = []
+}
+
+variable "observability_embedded_additional_values" {
+  description = "Additional Helm value documents merged into Medusa when using embedded observability."
+  type        = list(any)
+  default     = []
+}
+
+variable "observability_external_stack_medusa_overrides" {
+  description = "Extra Medusa Helm values applied when relying on kube-prometheus-stack."
+  type        = list(any)
+  default     = []
+}
+
+variable "observability_additional_labels" {
+  description = "Additional labels applied to observability resources managed by Terraform."
+  type        = map(string)
+  default     = {}
+}
+
 variable "enable_aws_lb_controller" {
   description = "Deploy the AWS Load Balancer Controller Helm chart and supporting IAM role."
   type        = bool
