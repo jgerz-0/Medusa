@@ -38,10 +38,17 @@ The roadmap tracks phased delivery for the automated pentest and binary analysis
 - ✅ Notification hooks (Slack, email) for critical findings after validation.
 
 ## Phase 5 – Kubernetes Orchestration (Weeks 9–10)
-- Helm chart for controller, workers, and dependencies.
-- K8s Job templates with resource constraints, network policies, and PodSecurityStandards.
-- Prometheus/Grafana dashboards with per-scan metrics and audit events.
-- Secrets management via External Secrets or SOPS integration.
+- ✅ Helm chart hardened for controller, workers, and dependencies, including Job templates with resource constraints and namespace NetworkPolicies.
+- ✅ Worker service accounts and namespace RBAC surfaced through the chart for IRSA-ready isolation.
+- ✅ Pod Security Standards enforced through Terraform-managed namespace labels and Helm safeguards.
+- ✅ Secrets management wired to External Secrets Operator when enabled via Terraform and Helm values.
+- ✅ Observability stack delivered via Prometheus/Grafana modules with Medusa dashboards and ServiceMonitor support.
+- ✅ AWS Load Balancer Controller provisioned through Terraform with hardened ingress defaults for the Medusa controller.
+
+**Follow-ups:**
+- Validate NetworkPolicy coverage as additional scanners and enrichment workers move into Kubernetes.
+- Build runbooks for External Secrets failure modes and credential rotation across regions.
+- Finalize Alertmanager routing and WAF/Shields annotations before exposing production ALBs.
 
 ## Phase 6 – Reporting & Frontend (Weeks 11–12)
 - Next.js dashboards with filtering, tagging, and timeline view.
