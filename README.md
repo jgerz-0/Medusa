@@ -102,6 +102,29 @@ Graduate from Docker Compose by running the Terraform workflow in [docs/TERRAFOR
 
 ### Analyst workflow: launching scans from the console
 
+#### Register new targets via the API
+
+Analysts (or automation) must register assets with `POST /targets` before the UI can launch scans. The endpoint enforces the `targets:write` RBAC role (admins inherit it); review the expanded policy matrix in [docs/RBAC.md](docs/RBAC.md).
+
+Required JSON fields:
+
+- `name` – Friendly display name for the asset.
+- `scope` – Canonical hostname, scheme-qualified URL, or CIDR block that defines the authorized scope.
+- `is_authorized` – Optional boolean that defaults to `true`; set to `false` if legal approval is still pending.
+
+```bash
+curl -X POST "http://localhost:8000/targets" \
+  -H "Authorization: Bearer ${MEDUSA_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "Medusa Demo Web",
+        "scope": "https://demo.medusa.internal",
+        "is_authorized": true
+      }'
+```
+
+For local demos you can seed the same records with `poetry run python controller/scripts/seed_targets.py`, which calls `POST /targets` equivalents against the database models. Teams building automation should pair the above flow with the generated OpenAPI reference at `http://localhost:8000/docs` to discover additional fields and error codes.
+
 1. Register the asset under **Targets** in the controller and confirm its `is_authorized` flag is `true`.
 2. Navigate to `http://localhost:3000/scans`, select the authorized target, and choose a scan profile preset.
 3. Submit the form. The UI performs an optimistic update while the controller validates scope and enqueues the nuclei job. Any validation issues returned by the API are rendered inline for rapid remediation.
