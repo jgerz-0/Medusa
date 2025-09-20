@@ -36,12 +36,12 @@ variable "secret_name" {
 }
 
 variable "secret_strategy" {
-  description = "Secret delivery strategy for the chart (inline or externalSecret)."
+  description = "Secret delivery strategy for the chart (inline, externalSecret, or sealedSecret)."
   type        = string
 
   validation {
-    condition     = contains(["inline", "externalSecret"], var.secret_strategy)
-    error_message = "secret_strategy must be either 'inline' or 'externalSecret'."
+    condition     = contains(["inline", "externalSecret", "sealedSecret"], var.secret_strategy)
+    error_message = "secret_strategy must be one of 'inline', 'externalSecret', or 'sealedSecret'."
   }
 }
 
@@ -64,6 +64,17 @@ variable "manage_external_secret" {
   validation {
     condition     = (!var.manage_external_secret) || var.secret_strategy == "externalSecret"
     error_message = "manage_external_secret can only be enabled when secret_strategy is 'externalSecret'."
+  }
+}
+
+variable "manage_sealed_secret" {
+  description = "Whether Terraform should render the SealedSecret manifest instead of Helm."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = (!var.manage_sealed_secret) || var.secret_strategy == "sealedSecret"
+    error_message = "manage_sealed_secret can only be enabled when secret_strategy is 'sealedSecret'."
   }
 }
 
@@ -90,12 +101,12 @@ variable "bucket_names" {
 }
 
 variable "callback_tokens" {
-  description = "Callback tokens for Medusa agents keyed by capability (nuclei, enrichment, binary_static, binary_fuzzing)."
+  description = "Callback tokens for Medusa agents keyed by capability (nuclei, sqlmap, enrichment, binary_static, binary_fuzzing, zap, validator)."
   type        = map(string)
 
   validation {
-    condition     = alltrue([for key in ["nuclei", "enrichment", "binary_static", "binary_fuzzing"] : contains(keys(var.callback_tokens), key)])
-    error_message = "callback_tokens must provide nuclei, enrichment, binary_static, and binary_fuzzing entries."
+    condition     = alltrue([for key in ["nuclei", "sqlmap", "enrichment", "binary_static", "binary_fuzzing", "zap", "validator"] : contains(keys(var.callback_tokens), key)])
+    error_message = "callback_tokens must provide nuclei, sqlmap, enrichment, binary_static, binary_fuzzing, zap, and validator entries."
   }
 }
 
@@ -135,6 +146,27 @@ variable "external_secret_configuration" {
   }
 }
 
+variable "sealed_secret_configuration" {
+  description = "Configuration for the SealedSecret strategy when enabled."
+  type = object({
+    encrypted_data       = map(string)
+    metadata_annotations = optional(map(string))
+    metadata_labels      = optional(map(string))
+    template_annotations = optional(map(string))
+    template_labels      = optional(map(string))
+    template_type        = optional(string)
+  })
+  default = null
+
+  validation {
+    condition = var.secret_strategy != "sealedSecret" || (
+      var.sealed_secret_configuration != null
+      && length(var.sealed_secret_configuration.encrypted_data) > 0
+    )
+    error_message = "sealed_secret_configuration with at least one encrypted_data entry is required when secret_strategy is 'sealedSecret'."
+  }
+}
+
 variable "controller_additional_env" {
   description = "Additional environment variables injected into the controller deployment."
   type = list(object({
@@ -154,6 +186,20 @@ variable "common_labels" {
   description = "Standardised labels applied to managed Kubernetes resources."
   type        = map(string)
   default     = {}
+}
+
+variable "namespace_pod_security_standards" {
+  description = "Pod Security Standards levels enforced on the Medusa namespace via labels."
+  type = object({
+    enforce = string
+    audit   = string
+    warn    = string
+  })
+  default = {
+    enforce = "restricted"
+    audit   = "restricted"
+    warn    = "restricted"
+  }
 }
 
 variable "render_operator_kubeconfig" {

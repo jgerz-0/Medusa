@@ -95,6 +95,59 @@ EOF
 
 **External alerting.** The module exposes `observability_alertmanager_config` so Alertmanager can forward incidents to PagerDuty, Slack, email, or SIEM webhooks. Store sensitive tokens in AWS Secrets Manager and render them via External Secrets, then reference the secret in your YAML using the standard Alertmanager templating syntax.
 
+### Pod Security Standards
+
+Terraform owns the Medusa namespace and attaches Kubernetes Pod Security Standards (PSS) labels so admission control is deterministic across clusters. The module sets `pod-security.kubernetes.io/{enforce,audit,warn}=restricted` by default and injects the Helm override `podSecurityStandards.namespaceLabelsOnly=true`. This keeps the Helm release from attempting to recreate or manage the namespace while still enforcing `restricted` level guardrails cluster-side.
+
+Override the PSS levels per environment by setting `namespace_pod_security_standards` in your environment `terraform.tfvars`:
+
+```hcl
+namespace_pod_security_standards = {
+  enforce = "baseline"   # Runtime admission level
+  audit   = "restricted"  # Audit-only warnings
+  warn    = "baseline"    # Warning banner surfaced to operators
+}
+```
+
+Only relax these values for tightly scoped dev clusters and document the justification in the same `tfvars` file. Production and shared environments should stick with `restricted` to maintain blast-radius isolation.
+
+### SQLMap worker IRSA
+
+Provision a dedicated IAM role for the SQLMap worker so Redis queue access and callback tokens stay isolated from other scanners. Extend the IRSA module wiring by adding a `sqlmap` entry to `worker_policy_documents` and referencing it from your environment configuration:
+
+```hcl
+data "aws_iam_policy_document" "sqlmap_worker" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+    ]
+    resources = [aws_secretsmanager_secret.sqlmap_credentials.arn]
+  }
+  statement {
+    effect = "Allow"
+    actions = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.sqlmap_dead_letter.arn]
+  }
+}
+
+module "irsa" {
+  source = "./modules/irsa"
+
+  # ...existing inputs...
+
+  worker_policy_documents = merge(
+    module.s3.worker_policy_documents,
+    {
+      sqlmap = data.aws_iam_policy_document.sqlmap_worker.json
+    },
+  )
+}
+```
+
+Store the SQLMap callback token, queue key, and dead-letter key in AWS Secrets Manager (or your chosen secret store) and expose them via the Medusa Helm chart's ExternalSecret configuration. The IRSA module renders the service account annotations automatically, so only the SQLMap worker pod can assume the generated role and fetch those credentials.
+
 ## Security Considerations
 - Enable AWS IAM roles for service accounts (IRSA) to scope worker pod permissions.
 - Encrypt RDS and S3 with KMS keys managed by the security team.

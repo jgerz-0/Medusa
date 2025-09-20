@@ -32,8 +32,14 @@ secrets:
     MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: "queues:binary:preprocess"
     MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: "queues:binary:static-analysis"
     MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: "queues:binary:fuzzing"
+    MEDUSA_VALIDATOR_QUEUE_CHANNEL: "queues:validator:jobs"
     MEDUSA_NUCLEI_CALLBACK_TOKEN: "change-me"
+    MEDUSA_SQLMAP_QUEUE_CHANNEL: "queues:sqlmap:jobs"
+    MEDUSA_SQLMAP_DEAD_LETTER_KEY: "queues:sqlmap:dead"
+    MEDUSA_SQLMAP_CALLBACK_TOKEN: "change-me"
+    SQLMAP_CALLBACK_TOKEN: "change-me"
     MEDUSA_ENRICHMENT_CALLBACK_TOKEN: "change-me"
+    MEDUSA_VALIDATOR_CALLBACK_TOKEN: "change-me"
     MEDUSA_JWT_SECRET: "change-me"
     MINIO_ROOT_USER: "medusaadmin"
     MINIO_ROOT_PASSWORD: "medusaadmin123"
@@ -45,12 +51,19 @@ secrets:
     S3_SECRET_KEY: "medusaadmin123"
     S3_ACCESS_KEY_ID: "medusaadmin"
     S3_SECRET_ACCESS_KEY: "medusaadmin123"
+    BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY: "queues:binary:static-analysis:dead"
+    BINARY_ANALYSIS_BUCKET: ""
+    BINARY_ANALYSIS_PREFIX: "analysis/reports/"
     BINARY_PREPROCESS_DEAD_LETTER_KEY: "queues:binary:preprocess:dead"
     BINARY_METADATA_BUCKET: "binary-metadata"
     BINARY_METADATA_PREFIX: "preprocess/metadata/"
     BINARY_FUZZING_DEAD_LETTER_KEY: "queues:binary:fuzzing:dead"
     BINARY_FUZZING_BUCKET: ""
     BINARY_FUZZING_PREFIX: "analysis/fuzzing/"
+    MEDUSA_ZAP_QUEUE_CHANNEL: "queues:zap:jobs"
+    MEDUSA_ZAP_DEAD_LETTER_KEY: "queues:zap:dead"
+    MEDUSA_ZAP_CALLBACK_TOKEN: "change-me"
+    MEDUSA_VALIDATOR_DEAD_LETTER_KEY: "queues:validator:dead"
     MEDUSA_POSTGRES_PASSWORD: "change-me"
     MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: "queues:enrichment:cve"
     MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: "change-me"
@@ -73,6 +86,10 @@ secrets:
 controller:
   enabled: true
   replicaCount: 2
+  pdb:
+    enabled: true
+    minAvailable: 1
+    maxUnavailable: null
   image:
     repository: ghcr.io/medusa/controller
     tag: ""
@@ -155,6 +172,10 @@ postgresql:
     tag: 15-alpine
     pullPolicy: IfNotPresent
   component: postgresql
+  pdb:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
   primary:
     persistence:
       enabled: true
@@ -194,6 +215,10 @@ redis:
     tag: 7.2-alpine
     pullPolicy: IfNotPresent
   component: redis
+  pdb:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
   persistence:
     enabled: true
     storageClass: ""
@@ -227,6 +252,10 @@ minio:
     tag: RELEASE.2024-05-27T16-10-24Z
     pullPolicy: IfNotPresent
   component: minio
+  pdb:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
   persistence:
     enabled: true
     storageClass: ""
@@ -264,6 +293,10 @@ qdrant:
     tag: v1.7.3
     pullPolicy: IfNotPresent
   component: qdrant
+  pdb:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: null
   persistence:
     enabled: true
     storageClass: ""
@@ -340,6 +373,192 @@ workers:
       additionalSubjects: []
       rules: []
 
+  zap:
+    enabled: false
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-zap
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: zap-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_ZAP_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_ZAP_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_ZAP_CALLBACK_TOKEN
+      verifyTLS: true
+      binary: "/zap/zap-baseline.py"
+      workDir: "/tmp/zap"
+      pollTimeout: 5
+      maxRetries: 3
+      callbackTimeout: 30
+      extra: []
+    reportVolume:
+      mount:
+        name: zap-reports
+        mountPath: /tmp/zap
+      volume:
+        name: zap-reports
+        emptyDir: {}
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
+  sqlmap:
+    enabled: false
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-sqlmap
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: sqlmap-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_SQLMAP_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_SQLMAP_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_SQLMAP_CALLBACK_TOKEN
+      verifyTLS: true
+      binary: "/usr/bin/sqlmap"
+      workDir: "/tmp/sqlmap"
+      pollTimeout: 5
+      maxRetries: 3
+      callbackTimeout: 30
+      defaultRisk: 1
+      defaultLevel: 1
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
+  validator:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-validator
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: validator-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_VALIDATOR_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_VALIDATOR_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_VALIDATOR_CALLBACK_TOKEN
+      maxRetries: 3
+      pollTimeout: 5
+      httpTimeout: 10
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
   binaryPreprocess:
     enabled: true
     type: job
@@ -367,6 +586,78 @@ workers:
       values:
         S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
         AWS_DEFAULT_REGION: "us-east-1"
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    extraVolumeMounts: []
+    extraVolumes: []
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
+  binaryStaticAnalysis:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-binary-static-analysis
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: binary-static-analysis-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        BINARY_STATIC_ANALYSIS_QUEUE_KEY: MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL
+        BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY: BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY
+        BINARY_ANALYSIS_BUCKET: BINARY_ANALYSIS_BUCKET
+        BINARY_ANALYSIS_PREFIX: BINARY_ANALYSIS_PREFIX
+        BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN
+        S3_ACCESS_KEY_ID: S3_ACCESS_KEY_ID
+        S3_SECRET_ACCESS_KEY: S3_SECRET_ACCESS_KEY
+      values:
+        S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
+        AWS_DEFAULT_REGION: "us-east-1"
+        BINARY_STATIC_ANALYSIS_POLL_TIMEOUT: "5"
+        BINARY_STATIC_ANALYSIS_MAX_ATTEMPTS: "3"
+        BINARY_STATIC_ANALYSIS_RUNTIME: "docker"
+        BINARY_STATIC_ANALYSIS_RUNTIME_FLAGS: ""
+        BINARY_STATIC_ANALYSIS_CHECKSEC_IMAGE: "docker.io/medusa/checksec:latest"
+        BINARY_STATIC_ANALYSIS_BANDIT_IMAGE: "docker.io/medusa/bandit:latest"
+        BINARY_STATIC_ANALYSIS_ENABLE_CHECKSEC: "1"
+        BINARY_STATIC_ANALYSIS_ENABLE_BANDIT: "1"
+        BINARY_STATIC_ANALYSIS_TOOL_TIMEOUT: "120"
       extra: []
     resources:
       requests:

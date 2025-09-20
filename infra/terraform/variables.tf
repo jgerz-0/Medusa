@@ -674,13 +674,13 @@ variable "aws_lb_controller_tolerations" {
 }
 
 variable "medusa_secret_strategy" {
-  description = "Secret delivery strategy for the Medusa Helm release (inline or externalSecret)."
+  description = "Secret delivery strategy for the Medusa Helm release (inline, externalSecret, or sealedSecret)."
   type        = string
   default     = "inline"
 
   validation {
-    condition     = contains(["inline", "externalSecret"], var.medusa_secret_strategy)
-    error_message = "medusa_secret_strategy must be either 'inline' or 'externalSecret'."
+    condition     = contains(["inline", "externalSecret", "sealedSecret"], var.medusa_secret_strategy)
+    error_message = "medusa_secret_strategy must be one of 'inline', 'externalSecret', or 'sealedSecret'."
   }
 }
 
@@ -698,6 +698,12 @@ variable "medusa_manage_inline_secret" {
 
 variable "medusa_manage_external_secret" {
   description = "Allow Terraform to create the ExternalSecret manifest when using externalSecret strategy."
+  type        = bool
+  default     = false
+}
+
+variable "medusa_manage_sealed_secret" {
+  description = "Allow Terraform to create the SealedSecret manifest when using sealedSecret strategy."
   type        = bool
   default     = false
 }
@@ -735,6 +741,27 @@ variable "medusa_external_secret_configuration" {
   validation {
     condition     = var.medusa_secret_strategy != "externalSecret" || var.medusa_external_secret_configuration != null
     error_message = "medusa_external_secret_configuration must be provided when medusa_secret_strategy is 'externalSecret'."
+  }
+}
+
+variable "medusa_sealed_secret_configuration" {
+  description = "SealedSecret configuration passed to the Medusa module when using sealedSecret strategy."
+  type = object({
+    encrypted_data       = map(string)
+    metadata_annotations = optional(map(string))
+    metadata_labels      = optional(map(string))
+    template_annotations = optional(map(string))
+    template_labels      = optional(map(string))
+    template_type        = optional(string)
+  })
+  default = null
+
+  validation {
+    condition = var.medusa_secret_strategy != "sealedSecret" || (
+      var.medusa_sealed_secret_configuration != null
+      && length(var.medusa_sealed_secret_configuration.encrypted_data) > 0
+    )
+    error_message = "medusa_sealed_secret_configuration with at least one encrypted_data entry is required when medusa_secret_strategy is 'sealedSecret'."
   }
 }
 

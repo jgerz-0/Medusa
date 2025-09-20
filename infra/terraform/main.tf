@@ -111,6 +111,9 @@ resource "random_password" "medusa_callback" {
     enrichment    = true
     binary_static = true
     binary_fuzzing = true
+    sqlmap        = true
+    zap           = true
+    validator     = true
   }
 
   length  = 40
@@ -123,11 +126,15 @@ locals {
     enrichment     = random_password.medusa_callback["enrichment"].result
     binary_static  = random_password.medusa_callback["binary_static"].result
     binary_fuzzing = random_password.medusa_callback["binary_fuzzing"].result
+    sqlmap         = random_password.medusa_callback["sqlmap"].result
+    zap            = random_password.medusa_callback["zap"].result
+    validator      = random_password.medusa_callback["validator"].result
   }
 
   medusa_bucket_names = merge(
     {
       artifact = module.s3.artifact_bucket.name
+      analysis = module.s3.artifact_bucket.name
       fuzzing  = module.s3.artifact_bucket.name
       metadata = module.s3.artifact_bucket.name
     },
@@ -143,20 +150,54 @@ locals {
 
   medusa_external_secret_template_data = merge(
     {
-      MEDUSA_DATABASE_URL                        = format(
+      BINARY_ANALYSIS_BUCKET                       = local.medusa_bucket_names.analysis
+      BINARY_ANALYSIS_PREFIX                       = "analysis/reports/"
+      BINARY_FUZZING_BUCKET                        = local.medusa_bucket_names.fuzzing
+      BINARY_FUZZING_DEAD_LETTER_KEY               = "queues:binary:fuzzing:dead"
+      BINARY_FUZZING_PREFIX                        = "analysis/fuzzing/"
+      BINARY_METADATA_BUCKET                       = local.medusa_bucket_names.metadata
+      BINARY_METADATA_PREFIX                       = "preprocess/metadata/"
+      BINARY_PREPROCESS_DEAD_LETTER_KEY            = "queues:binary:preprocess:dead"
+      BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY       = "queues:binary:static-analysis:dead"
+      CVE_ENRICHMENT_ERROR_QUEUE_KEY               = "queues:enrichment:cve:errors"
+      CVE_ENRICHMENT_QDRANT_API_KEY                = ""
+      CVE_ENRICHMENT_QDRANT_COLLECTION             = "medusa-advisories"
+      CVE_ENRICHMENT_QDRANT_URL                    = ""
+      CVE_ENRICHMENT_QUEUE_KEY                     = "queues:enrichment:cve"
+      CVE_ENRICHMENT_RESULT_QUEUE_KEY              = "queues:enrichment:cve:results"
+      MEDUSA_ANALYST_API_KEY                       = ""
+      MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN         = local.medusa_callback_tokens.binary_fuzzing
+      MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL          = "queues:binary:fuzzing"
+      MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL       = "queues:binary:preprocess"
+      MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN = local.medusa_callback_tokens.binary_static
+      MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL  = "queues:binary:static-analysis"
+      MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL          = "queues:enrichment:cve"
+      MEDUSA_DATABASE_URL                          = format(
         "postgresql://{{ .medusaDatabaseUsername }}:{{ .medusaDatabasePassword }}@%s:%d/%s",
         module.rds.controller_context.hostname,
         module.rds.controller_context.port,
         module.rds.controller_context.database,
       )
-      MEDUSA_NUCLEI_CALLBACK_TOKEN               = local.medusa_callback_tokens.nuclei
-      NUCLEI_CALLBACK_TOKEN                      = local.medusa_callback_tokens.nuclei
-      MEDUSA_ENRICHMENT_CALLBACK_TOKEN           = local.medusa_callback_tokens.enrichment
-      MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN = local.medusa_callback_tokens.binary_static
-      MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN       = local.medusa_callback_tokens.binary_fuzzing
-      NUCLEI_ARTIFACT_BUCKET                     = local.medusa_bucket_names.artifact
-      BINARY_FUZZING_BUCKET                      = local.medusa_bucket_names.fuzzing
-      BINARY_METADATA_BUCKET                     = local.medusa_bucket_names.metadata
+      MEDUSA_ENRICHMENT_CALLBACK_TOKEN             = local.medusa_callback_tokens.enrichment
+      MEDUSA_JWT_SECRET                            = "change-me"
+      MEDUSA_NUCLEI_CALLBACK_TOKEN                 = local.medusa_callback_tokens.nuclei
+      MEDUSA_NUCLEI_QUEUE_CHANNEL                  = "queues:nuclei:jobs"
+      MEDUSA_POSTGRES_PASSWORD                     = "{{ .medusaDatabasePassword }}"
+      MEDUSA_REDIS_URL                             = "redis://redis-master:6379/0"
+      MEDUSA_SQLMAP_CALLBACK_TOKEN                 = local.medusa_callback_tokens.sqlmap
+      MEDUSA_SQLMAP_DEAD_LETTER_KEY                = "queues:sqlmap:dead"
+      MEDUSA_SQLMAP_QUEUE_CHANNEL                  = "queues:sqlmap:jobs"
+      MEDUSA_VALIDATOR_CALLBACK_TOKEN              = local.medusa_callback_tokens.validator
+      MEDUSA_VALIDATOR_DEAD_LETTER_KEY             = "queues:validator:dead"
+      MEDUSA_VALIDATOR_QUEUE_CHANNEL               = "queues:validator:jobs"
+      MEDUSA_ZAP_CALLBACK_TOKEN                    = local.medusa_callback_tokens.zap
+      MEDUSA_ZAP_DEAD_LETTER_KEY                   = "queues:zap:dead"
+      MEDUSA_ZAP_QUEUE_CHANNEL                     = "queues:zap:jobs"
+      NUCLEI_ARTIFACT_BUCKET                       = local.medusa_bucket_names.artifact
+      NUCLEI_CALLBACK_TOKEN                        = local.medusa_callback_tokens.nuclei
+      SQLMAP_CALLBACK_TOKEN                        = local.medusa_callback_tokens.sqlmap
+      VALIDATOR_CALLBACK_TOKEN                     = local.medusa_callback_tokens.validator
+      ZAP_CALLBACK_TOKEN                           = local.medusa_callback_tokens.zap
     },
     var.medusa_inline_secret_overrides,
   )
@@ -172,9 +213,23 @@ locals {
     }
   } : var.medusa_external_secret_configuration
 
-  medusa_secret_strategy_effective         = local.external_secrets_operator_enabled ? "externalSecret" : var.medusa_secret_strategy
-  medusa_manage_inline_secret_effective    = local.external_secrets_operator_enabled ? false : var.medusa_manage_inline_secret
-  medusa_manage_external_secret_effective  = local.external_secrets_operator_enabled ? true : var.medusa_manage_external_secret
+  medusa_secret_strategy_effective = local.external_secrets_operator_enabled ? "externalSecret" : var.medusa_secret_strategy
+
+  medusa_manage_inline_secret_effective = (
+    local.medusa_secret_strategy_effective == "inline"
+    && !local.external_secrets_operator_enabled
+  ) ? var.medusa_manage_inline_secret : false
+
+  medusa_manage_external_secret_effective = local.medusa_secret_strategy_effective == "externalSecret" ? (
+    local.external_secrets_operator_enabled ? true : var.medusa_manage_external_secret
+  ) : false
+
+  medusa_manage_sealed_secret_effective = (
+    local.medusa_secret_strategy_effective == "sealedSecret"
+    && !local.external_secrets_operator_enabled
+  ) ? var.medusa_manage_sealed_secret : false
+
+  medusa_sealed_secret_configuration_effective = local.medusa_secret_strategy_effective == "sealedSecret" ? var.medusa_sealed_secret_configuration : null
 
   alb_controller_enabled = var.enable_aws_lb_controller
 
@@ -310,6 +365,7 @@ module "medusa" {
 
   manage_inline_secret   = local.medusa_manage_inline_secret_effective
   manage_external_secret = local.medusa_manage_external_secret_effective
+  manage_sealed_secret   = local.medusa_manage_sealed_secret_effective
 
   database = {
     hostname          = module.rds.controller_context.hostname
@@ -326,6 +382,7 @@ module "medusa" {
 
   inline_secret_overrides       = var.medusa_inline_secret_overrides
   external_secret_configuration = local.medusa_external_secret_configuration_effective
+  sealed_secret_configuration   = local.medusa_sealed_secret_configuration_effective
   controller_additional_env     = var.medusa_controller_additional_env
   extra_values = concat(
     var.medusa_extra_values,
@@ -512,6 +569,9 @@ locals {
     }
     binary_static_analysis = {
       helm_worker_key = "binaryStaticAnalysis"
+    }
+    validator = {
+      helm_worker_key = "validator"
     }
   }
 

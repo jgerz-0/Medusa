@@ -26,7 +26,7 @@ contributions deterministic, auditable, and secure.
   - Use `pnpm lint` and `pnpm test`.
   - Keep API clients typed and document any unsafe casting.
 - **Infrastructure-as-code**
-  - Validate Terraform via `terraform fmt` and `terraform validate`.
+  - Run Terraform guardrails from `infra/terraform` before every commit: `terraform fmt -check -recursive`, `terraform init -backend=false`, and `terraform validate`. CI blocks merges when these checks fail, so mirror the workflow locally to catch drift early and keep IaC reproducible.
   - Run `helm lint` and `kubeconform` for Kubernetes manifests.
 
 ## Adding a New Scanner or Agent
@@ -84,6 +84,11 @@ contributions deterministic, auditable, and secure.
 Security automation must be deterministic. Always run the following before opening a pull request:
 
 ```bash
+cd infra/terraform
+terraform fmt -check -recursive
+terraform init -backend=false
+terraform validate
+
 poetry run ruff check controller workers/web/nuclei
 poetry run mypy controller workers/web/nuclei
 poetry run pytest controller/tests workers/web/nuclei/tests
