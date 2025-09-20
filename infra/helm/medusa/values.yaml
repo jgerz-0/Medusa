@@ -326,6 +326,19 @@ workers:
           - ALL
     podAnnotations: {}
     podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
 
   binaryPreprocess:
     enabled: true
@@ -376,6 +389,19 @@ workers:
     podLabels: {}
     extraVolumeMounts: []
     extraVolumes: []
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
 
   binaryFuzzing:
     enabled: true
@@ -437,6 +463,19 @@ workers:
     podLabels: {}
     extraVolumeMounts: []
     extraVolumes: []
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
   cveEnrichment:
     enabled: true
     type: job
@@ -487,6 +526,19 @@ workers:
           - ALL
     podAnnotations: {}
     podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
 
 networkPolicies:
   enabled: true
