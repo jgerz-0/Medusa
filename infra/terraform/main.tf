@@ -134,6 +134,7 @@ locals {
   medusa_bucket_names = merge(
     {
       artifact = module.s3.artifact_bucket.name
+      analysis = module.s3.artifact_bucket.name
       fuzzing  = module.s3.artifact_bucket.name
       metadata = module.s3.artifact_bucket.name
     },
@@ -149,20 +150,54 @@ locals {
 
   medusa_external_secret_template_data = merge(
     {
-      MEDUSA_DATABASE_URL                        = format(
+      BINARY_ANALYSIS_BUCKET                       = local.medusa_bucket_names.analysis
+      BINARY_ANALYSIS_PREFIX                       = "analysis/reports/"
+      BINARY_FUZZING_BUCKET                        = local.medusa_bucket_names.fuzzing
+      BINARY_FUZZING_DEAD_LETTER_KEY               = "queues:binary:fuzzing:dead"
+      BINARY_FUZZING_PREFIX                        = "analysis/fuzzing/"
+      BINARY_METADATA_BUCKET                       = local.medusa_bucket_names.metadata
+      BINARY_METADATA_PREFIX                       = "preprocess/metadata/"
+      BINARY_PREPROCESS_DEAD_LETTER_KEY            = "queues:binary:preprocess:dead"
+      BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY       = "queues:binary:static-analysis:dead"
+      CVE_ENRICHMENT_ERROR_QUEUE_KEY               = "queues:enrichment:cve:errors"
+      CVE_ENRICHMENT_QDRANT_API_KEY                = ""
+      CVE_ENRICHMENT_QDRANT_COLLECTION             = "medusa-advisories"
+      CVE_ENRICHMENT_QDRANT_URL                    = ""
+      CVE_ENRICHMENT_QUEUE_KEY                     = "queues:enrichment:cve"
+      CVE_ENRICHMENT_RESULT_QUEUE_KEY              = "queues:enrichment:cve:results"
+      MEDUSA_ANALYST_API_KEY                       = ""
+      MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN         = local.medusa_callback_tokens.binary_fuzzing
+      MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL          = "queues:binary:fuzzing"
+      MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL       = "queues:binary:preprocess"
+      MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN = local.medusa_callback_tokens.binary_static
+      MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL  = "queues:binary:static-analysis"
+      MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL          = "queues:enrichment:cve"
+      MEDUSA_DATABASE_URL                          = format(
         "postgresql://{{ .medusaDatabaseUsername }}:{{ .medusaDatabasePassword }}@%s:%d/%s",
         module.rds.controller_context.hostname,
         module.rds.controller_context.port,
         module.rds.controller_context.database,
       )
-      MEDUSA_NUCLEI_CALLBACK_TOKEN               = local.medusa_callback_tokens.nuclei
-      NUCLEI_CALLBACK_TOKEN                      = local.medusa_callback_tokens.nuclei
-      MEDUSA_ENRICHMENT_CALLBACK_TOKEN           = local.medusa_callback_tokens.enrichment
-      MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN = local.medusa_callback_tokens.binary_static
-      MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN       = local.medusa_callback_tokens.binary_fuzzing
-      NUCLEI_ARTIFACT_BUCKET                     = local.medusa_bucket_names.artifact
-      BINARY_FUZZING_BUCKET                      = local.medusa_bucket_names.fuzzing
-      BINARY_METADATA_BUCKET                     = local.medusa_bucket_names.metadata
+      MEDUSA_ENRICHMENT_CALLBACK_TOKEN             = local.medusa_callback_tokens.enrichment
+      MEDUSA_JWT_SECRET                            = "change-me"
+      MEDUSA_NUCLEI_CALLBACK_TOKEN                 = local.medusa_callback_tokens.nuclei
+      MEDUSA_NUCLEI_QUEUE_CHANNEL                  = "queues:nuclei:jobs"
+      MEDUSA_POSTGRES_PASSWORD                     = "{{ .medusaDatabasePassword }}"
+      MEDUSA_REDIS_URL                             = "redis://redis-master:6379/0"
+      MEDUSA_SQLMAP_CALLBACK_TOKEN                 = local.medusa_callback_tokens.sqlmap
+      MEDUSA_SQLMAP_DEAD_LETTER_KEY                = "queues:sqlmap:dead"
+      MEDUSA_SQLMAP_QUEUE_CHANNEL                  = "queues:sqlmap:jobs"
+      MEDUSA_VALIDATOR_CALLBACK_TOKEN              = local.medusa_callback_tokens.validator
+      MEDUSA_VALIDATOR_DEAD_LETTER_KEY             = "queues:validator:dead"
+      MEDUSA_VALIDATOR_QUEUE_CHANNEL               = "queues:validator:jobs"
+      MEDUSA_ZAP_CALLBACK_TOKEN                    = local.medusa_callback_tokens.zap
+      MEDUSA_ZAP_DEAD_LETTER_KEY                   = "queues:zap:dead"
+      MEDUSA_ZAP_QUEUE_CHANNEL                     = "queues:zap:jobs"
+      NUCLEI_ARTIFACT_BUCKET                       = local.medusa_bucket_names.artifact
+      NUCLEI_CALLBACK_TOKEN                        = local.medusa_callback_tokens.nuclei
+      SQLMAP_CALLBACK_TOKEN                        = local.medusa_callback_tokens.sqlmap
+      VALIDATOR_CALLBACK_TOKEN                     = local.medusa_callback_tokens.validator
+      ZAP_CALLBACK_TOKEN                           = local.medusa_callback_tokens.zap
     },
     var.medusa_inline_secret_overrides,
   )
