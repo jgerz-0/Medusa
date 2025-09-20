@@ -171,6 +171,36 @@ variable "medusa_extra_values" {
   default     = []
 }
 
+variable "enable_medusa_irsa" {
+  description = "Enable creation of IAM Roles for Service Accounts (IRSA) for the Medusa controller and workers."
+  type        = bool
+  default     = false
+}
+
+variable "medusa_irsa_controller_service_account" {
+  description = "Optional overrides for the controller service account and IAM role naming when IRSA is enabled."
+  type = object({
+    name        = optional(string)
+    create      = optional(bool)
+    role_name   = optional(string)
+    annotations = optional(map(string))
+  })
+  default = {}
+}
+
+variable "medusa_irsa_worker_service_accounts" {
+  description = "Overrides for worker service accounts used when rendering IRSA roles. Keys should match the artifact worker identifiers."
+  type = map(object({
+    helm_worker_key      = optional(string)
+    service_account_name = optional(string)
+    role_name            = optional(string)
+    create               = optional(bool)
+    enabled              = optional(bool)
+    annotations          = optional(map(string))
+  }))
+  default = {}
+}
+
 variable "medusa_bucket_overrides" {
   description = "Optional overrides for Medusa bucket mappings (artifact, fuzzing, metadata)."
   type        = map(string)

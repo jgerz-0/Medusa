@@ -72,3 +72,12 @@ output "artifact_storage" {
   description = "Aggregated artifact storage configuration consumed by downstream modules."
   value       = module.s3.context
 }
+
+output "medusa_irsa" {
+  description = "IAM Roles for Service Accounts (IRSA) metadata for the Medusa deployment."
+  value = {
+    enabled    = module.irsa.enabled
+    controller = module.irsa.controller
+    workers    = module.irsa.workers
+  }
+}
