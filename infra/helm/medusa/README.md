@@ -71,6 +71,35 @@ workers:
 
 Populate the matching secret keys—`MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL`, `BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY`, `BINARY_ANALYSIS_BUCKET`, `BINARY_ANALYSIS_PREFIX`, and `MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN`—through your selected secrets strategy (`inline`, `ExternalSecret`, or `SealedSecret`). These credentials gate which jobs the worker can dequeue and where findings are stored, so rotate them alongside Redis credentials during routine maintenance. Development overrides in `values-dev.yaml` mirror the same wiring with shorter poll timeouts for faster feedback.
 
+## ZAP worker configuration
+
+The OWASP ZAP worker performs authenticated baseline scans against web targets. The Helm values mirror the Python worker's environment contract so you can deterministically control queue bindings, retry behavior, and how the reports land on disk before upload.
+
+```yaml
+workers:
+  zap:
+    enabled: true                      # Defaults to false so you can opt in explicitly
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_ZAP_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_ZAP_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_ZAP_CALLBACK_TOKEN
+      verifyTLS: false                 # Disable when calling the controller over self-signed TLS in dev
+      binary: "/zap/zap-baseline.py"   # Path inside the worker image
+      workDir: "/tmp/zap"              # Must line up with the mounted report volume
+      pollTimeout: 5
+      maxRetries: 3
+      callbackTimeout: 30
+    reportVolume:
+      mount:
+        mountPath: /tmp/zap           # Name defaults to <release>-medusa-worker-zap-reports when omitted
+      volume:
+        emptyDir: {}                  # Swap for a PVC when you need persisted artifacts
+```
+
+Secret keys `MEDUSA_ZAP_QUEUE_CHANNEL`, `MEDUSA_ZAP_DEAD_LETTER_KEY`, and `MEDUSA_ZAP_CALLBACK_TOKEN` must exist in the rendered secret so the worker can authenticate with Redis and the controller. Set `verifyTLS` to `true` (the default) in production clusters so callbacks validate the API server certificate chain. The `reportVolume` block automatically renders an `emptyDir` that mounts to `ZAP_WORK_DIR`; override the volume definition if compliance controls require the reports to persist outside the pod lifecycle.
+
 ## Validator worker configuration
 
 The validator worker reenacts high-value findings prior to promotion. Configure its queue bindings and callback secrets so it can stream jobs from Redis and post signed results back to the controller.

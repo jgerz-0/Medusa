@@ -94,6 +94,32 @@ workers:
               name: medusa-secrets
               key: NUCLEI_ARTIFACT_BUCKET
 
+  zap:
+    enabled: true
+    image:
+      repository: medusa/worker-zap
+      tag: latest
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_ZAP_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_ZAP_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_ZAP_CALLBACK_TOKEN
+      verifyTLS: false
+      binary: "/zap/zap-baseline.py"
+      workDir: "/tmp/zap"
+      pollTimeout: 2
+      maxRetries: 3
+      callbackTimeout: 30
+      extra: []
+    reportVolume:
+      mount:
+        name: zap-reports
+        mountPath: /tmp/zap
+      volume:
+        name: zap-reports
+        emptyDir: {}
+
   validator:
     image:
       repository: medusa/worker-validator
@@ -286,4 +312,7 @@ secrets:
     BINARY_FUZZING_DEAD_LETTER_KEY: queues:binary:fuzzing:dead
     BINARY_FUZZING_BUCKET: ""
     BINARY_FUZZING_PREFIX: analysis/fuzzing/
+    MEDUSA_ZAP_QUEUE_CHANNEL: queues:zap:jobs
+    MEDUSA_ZAP_DEAD_LETTER_KEY: queues:zap:dead
+    MEDUSA_ZAP_CALLBACK_TOKEN: local-dev-zap-callback
     MEDUSA_VALIDATOR_DEAD_LETTER_KEY: queues:validator:dead

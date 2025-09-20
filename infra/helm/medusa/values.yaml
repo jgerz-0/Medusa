@@ -56,6 +56,9 @@ secrets:
     BINARY_FUZZING_DEAD_LETTER_KEY: "queues:binary:fuzzing:dead"
     BINARY_FUZZING_BUCKET: ""
     BINARY_FUZZING_PREFIX: "analysis/fuzzing/"
+    MEDUSA_ZAP_QUEUE_CHANNEL: "queues:zap:jobs"
+    MEDUSA_ZAP_DEAD_LETTER_KEY: "queues:zap:dead"
+    MEDUSA_ZAP_CALLBACK_TOKEN: "change-me"
     MEDUSA_VALIDATOR_DEAD_LETTER_KEY: "queues:validator:dead"
     MEDUSA_POSTGRES_PASSWORD: "change-me"
     MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: "queues:enrichment:cve"
@@ -333,6 +336,73 @@ workers:
       values:
         S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
       extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
+  zap:
+    enabled: false
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-zap
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: zap-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+      queueSecretKey: MEDUSA_ZAP_QUEUE_CHANNEL
+      deadLetterSecretKey: MEDUSA_ZAP_DEAD_LETTER_KEY
+      callbackTokenSecretKey: MEDUSA_ZAP_CALLBACK_TOKEN
+      verifyTLS: true
+      binary: "/zap/zap-baseline.py"
+      workDir: "/tmp/zap"
+      pollTimeout: 5
+      maxRetries: 3
+      callbackTimeout: 30
+      extra: []
+    reportVolume:
+      mount:
+        name: zap-reports
+        mountPath: /tmp/zap
+      volume:
+        name: zap-reports
+        emptyDir: {}
     resources:
       requests:
         cpu: 250m
