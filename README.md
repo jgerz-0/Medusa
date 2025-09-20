@@ -4,7 +4,7 @@ Medusa is an **agentic AI-driven Cyber Reasoning System** that orchestrates reco
 
 ## Core Capabilities
 - **Agentic pipeline** – Recon → Scan → Validate → Enrich → Report with auditable hand-offs.
-- **Multi-scanner coverage** – Nuclei, ZAP, SQLMap, AFL, angr, and static analyzers running inside isolated containers.
+- **Multi-scanner coverage** – Nuclei, ZAP, SQLMap, AFL/libFuzzer fuzzing, and checksec/bandit static analyzers running inside isolated containers. (Angr-based symbolic execution remains on the roadmap.)
 - **Deterministic CVE mapping** – NVD/CIRCL lookups with vector-store enrichment that never overrides scanner facts.
 - **Security-first architecture** – Explicit scope enforcement, RBAC, and immutable job logs across all services.
 - **Cloud-native execution** – Containerized workers with optional Kubernetes orchestration for horizontal scale.
