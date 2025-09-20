@@ -15,12 +15,14 @@ logger = logging.getLogger(__name__)
 SAMPLE_TARGETS = (
     {
         "name": "Medusa Demo Web",
-        "scope": "demo.medusa.internal",
+        # Explicitly specify scheme to satisfy HTTP scope validation.
+        "scope": "https://demo.medusa.internal",
         "is_authorized": True,
     },
     {
         "name": "Medusa API",
-        "scope": "api.medusa.internal",
+        # API endpoint is also accessed over HTTPS in local testing.
+        "scope": "https://api.medusa.internal",
         "is_authorized": True,
     },
     {
