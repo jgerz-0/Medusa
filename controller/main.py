@@ -2627,6 +2627,7 @@ def _authenticate_oidc(
         )
         .first()
     )
+    just_provisioned = False
     if record is None:
         revoked_record = (
             db.query(PrincipalCredential)
@@ -2690,9 +2691,10 @@ def _authenticate_oidc(
                     extra_metadata=deny_metadata,
                 )
 
-            expires_at = (
-                now + timedelta(seconds=settings.oidc_auto_provision_expires_in_seconds)
-                if settings.oidc_auto_provision_expires_in_seconds
+            ttl_seconds = settings.oidc_auto_provision_expires_in_seconds
+            expiration_candidate = (
+                now + timedelta(seconds=ttl_seconds)
+                if ttl_seconds
                 else None
             )
             transaction = db.begin_nested() if db.in_transaction() else db.begin()
@@ -2701,7 +2703,7 @@ def _authenticate_oidc(
                 auth_method="oidc",
                 roles=desired_roles,
                 description="Auto-provisioned via OIDC group mapping",
-                expires_at=expires_at,
+                expires_at=expiration_candidate,
                 source="oidc_auto",
             )
             try:
@@ -2735,6 +2737,7 @@ def _authenticate_oidc(
 
             record = new_record
             db.refresh(record)
+            just_provisioned = True
             provision_actor = Principal(
                 subject=record.subject,
                 auth_method="oidc",
@@ -2784,18 +2787,20 @@ def _authenticate_oidc(
     stored_role_set = set(stored_roles)
     desired_role_set = set(desired_roles)
     current_expiry = _normalize_timestamp(record.expires_at)
-    new_expires_at = (
-        now + timedelta(seconds=settings.oidc_auto_provision_expires_in_seconds)
-        if settings.oidc_auto_provision_expires_in_seconds
-        else None
-    )
 
     if auto_enabled and record.source == "oidc_auto":
+        ttl_seconds = settings.oidc_auto_provision_expires_in_seconds
+        expiration_candidate: Optional[datetime] = None
+        expiration_changed = False
+        if ttl_seconds is not None and not just_provisioned:
+            expiration_base = (
+                current_expiry if current_expiry and current_expiry > now else now
+            )
+            expiration_candidate = expiration_base + timedelta(seconds=ttl_seconds)
+            if current_expiry is None or expiration_candidate > current_expiry:
+                expiration_changed = True
         needs_role_update = desired_role_set != stored_role_set
-        needs_expiry_update = (
-            settings.oidc_auto_provision_expires_in_seconds is not None
-            and current_expiry != new_expires_at
-        )
+        needs_expiry_update = bool(expiration_candidate and expiration_changed)
         if needs_role_update or needs_expiry_update:
             previous_roles = list(stored_roles)
             transaction = db.begin_nested() if db.in_transaction() else db.begin()
@@ -2803,8 +2808,8 @@ def _authenticate_oidc(
                 with transaction:
                     if needs_role_update:
                         record.roles = desired_roles
-                    if settings.oidc_auto_provision_expires_in_seconds is not None:
-                        record.expires_at = new_expires_at
+                    if expiration_candidate and expiration_changed:
+                        record.expires_at = expiration_candidate
             except SQLAlchemyError:
                 if db.in_transaction():
                     db.rollback()
@@ -2855,6 +2860,10 @@ def _authenticate_oidc(
                     ),
                 }
             )
+            if needs_expiry_update:
+                sync_metadata["previous_expires_at"] = (
+                    current_expiry.isoformat() if current_expiry else None
+                )
             record_audit_event(
                 db,
                 actor=sync_actor,

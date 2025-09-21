@@ -226,6 +226,99 @@ def test_oidc_auto_provision_syncs_roles_and_extends_expiry(
     get_oidc_validator.cache_clear()  # type: ignore[attr-defined]
 
 
+def test_oidc_auto_provision_refreshes_unexpired_expiration(
+    controller_api_client: Tuple[TestClient, object, sessionmaker, Settings],
+) -> None:
+    _client, _queue, session_factory, settings = controller_api_client
+    get_oidc_validator.cache_clear()  # type: ignore[attr-defined]
+
+    _configure_oidc(settings)
+    settings.oidc_auto_provision = True
+    settings.oidc_auto_provision_allowed_issuers = [settings.oidc_issuer]
+    settings.oidc_group_role_map = {
+        "medusa-analysts": [ROLE_TARGETS_READ],
+    }
+    settings.oidc_auto_provision_role_allow_list = [ROLE_TARGETS_READ]
+    settings.oidc_auto_provision_expires_in_seconds = 600
+
+    validator = _build_validator(settings)
+    ttl_seconds = settings.oidc_auto_provision_expires_in_seconds
+    assert ttl_seconds is not None
+
+    base_time = datetime.now(tz=timezone.utc).replace(microsecond=0)
+
+    with session_factory() as session:
+        session.add(
+            PrincipalCredential(
+                subject="oidc-auto",
+                auth_method="oidc",
+                roles=[ROLE_TARGETS_READ],
+                source="oidc_auto",
+                expires_at=base_time + timedelta(seconds=ttl_seconds),
+            )
+        )
+        session.commit()
+
+        seeded_credential = (
+            session.query(PrincipalCredential)
+            .filter(PrincipalCredential.subject == "oidc-auto")
+            .one()
+        )
+        previous_expiry = _as_utc(seeded_credential.expires_at)
+
+        payload = {
+            "sub": "oidc-auto",
+            "iss": settings.oidc_issuer,
+            "aud": settings.oidc_audience,
+            "iat": int(base_time.timestamp()),
+            "exp": int((base_time + timedelta(minutes=5)).timestamp()),
+            "groups": ["medusa-analysts"],
+        }
+        token = jwt.encode(
+            payload,
+            TEST_SHARED_SECRET,
+            algorithm="HS256",
+            headers={"kid": TEST_KID},
+        )
+
+        principal = _authenticate_oidc(
+            token,
+            validator=validator,
+            settings=settings,
+            db=session,
+        )
+
+        assert principal.subject == "oidc-auto"
+        assert principal.roles == [ROLE_TARGETS_READ]
+
+        refreshed_credential = (
+            session.query(PrincipalCredential)
+            .filter(PrincipalCredential.subject == "oidc-auto")
+            .one()
+        )
+
+        refreshed_expiry = _as_utc(refreshed_credential.expires_at)
+        assert refreshed_expiry > previous_expiry
+
+        delta_seconds = (refreshed_expiry - previous_expiry).total_seconds()
+        assert ttl_seconds - 2 <= delta_seconds <= ttl_seconds + 2
+
+        audit_entry = (
+            session.query(AuditLog)
+            .filter(AuditLog.action == "oidc_role_sync")
+            .order_by(AuditLog.created_at.desc())
+            .first()
+        )
+        assert audit_entry is not None
+        metadata = audit_entry.evidence_snapshot
+        assert metadata["previous_roles"] == [ROLE_TARGETS_READ]
+        assert metadata["updated_roles"] == [ROLE_TARGETS_READ]
+        assert metadata["expires_at"] == refreshed_expiry.isoformat()
+        assert metadata.get("previous_expires_at") == previous_expiry.isoformat()
+
+    get_oidc_validator.cache_clear()  # type: ignore[attr-defined]
+
+
 def test_oidc_revoked_principal_is_denied(
     controller_api_client: Tuple[TestClient, object, sessionmaker, Settings],
 ) -> None:
