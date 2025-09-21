@@ -3,19 +3,37 @@ import { fetchScans, fetchTargets } from '@/lib/api';
 import { ScansTable } from '@/components/ScansTable';
 import { ScanLaunchForm } from '@/components/ScanLaunchForm';
 import type { Target } from '@/lib/types';
+import type { SearchParamsInput } from '@/lib/searchParams';
 
 export const metadata: Metadata = {
   title: 'Scans | Medusa Operations Console'
 };
 
-export default async function ScansPage() {
+interface ScansPageProps {
+  searchParams?: SearchParamsInput;
+}
+
+function parsePositiveInteger(value: string | string[] | undefined, fallback: number): number {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== 'string') {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export default async function ScansPage({ searchParams }: ScansPageProps) {
   let error: string | null = null;
-  let scans: Awaited<ReturnType<typeof fetchScans>> = [];
+  let scansResponse: Awaited<ReturnType<typeof fetchScans>> | null = null;
   let targets: Target[] = [];
   let targetError: string | null = null;
 
+  const page = parsePositiveInteger(searchParams?.page, 1);
+  const pageSize = parsePositiveInteger(searchParams?.page_size, 25);
+
   try {
-    scans = await fetchScans();
+    scansResponse = await fetchScans({ page, pageSize });
   } catch (err) {
     error = err instanceof Error ? err.message : 'Failed to load scans.';
   }
@@ -51,7 +69,11 @@ export default async function ScansPage() {
           {error}
         </div>
       ) : (
-        <ScansTable scans={scans} />
+        <ScansTable
+          scans={scansResponse?.data ?? []}
+          pagination={scansResponse?.pagination ?? undefined}
+          searchParams={searchParams}
+        />
       )}
     </section>
   );

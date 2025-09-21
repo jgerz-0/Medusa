@@ -13,8 +13,15 @@ import type {
   FindingTicket
 } from './types';
 
+interface PaginationMetadata {
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 type ApiCollectionResponse<T> = {
   data: T;
+  meta?: PaginationMetadata;
 };
 
 type ApiItemResponse<T> = {
@@ -31,6 +38,22 @@ interface ReconRunCollectionResponse extends ApiCollectionResponse<ReconRun[]> {
 interface ReconObservationCollectionResponse
   extends ApiCollectionResponse<ReconObservation[]> {}
 
+export interface PaginationState {
+  page: number;
+  pageSize: number;
+  total: number;
+}
+
+export interface PaginatedResponse<T> {
+  data: T;
+  pagination: PaginationState | null;
+}
+
+export interface PaginationQuery {
+  page?: number;
+  pageSize?: number;
+}
+
 export interface FindingsQuery {
   targetId?: string;
   scanId?: string;
@@ -41,6 +64,8 @@ export interface FindingsQuery {
   from?: string;
   to?: string;
   scope?: string;
+  page?: number;
+  pageSize?: number;
 }
 
 function buildPath(
@@ -75,6 +100,23 @@ function buildPath(
 
   const query = search.toString();
   return query ? `${path}?${query}` : path;
+}
+
+function deserializePagination(meta?: PaginationMetadata): PaginationState | null {
+  if (!meta) {
+    return null;
+  }
+
+  const pageSize = Number.isFinite(meta.limit) && meta.limit > 0 ? Math.trunc(meta.limit) : 1;
+  const offset = Number.isFinite(meta.offset) && meta.offset >= 0 ? Math.trunc(meta.offset) : 0;
+  const total = Number.isFinite(meta.total) && meta.total >= 0 ? Math.trunc(meta.total) : 0;
+  const page = pageSize > 0 ? Math.floor(offset / pageSize) + 1 : 1;
+
+  return {
+    page,
+    pageSize,
+    total
+  } satisfies PaginationState;
 }
 
 export interface ValidationIssue {
@@ -253,12 +295,24 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function fetchScans(): Promise<Scan[]> {
-  const payload = await request<ApiCollectionResponse<Scan[]>>('/scans');
-  return payload.data;
+export interface FetchScansParams extends PaginationQuery {
+  targetId?: string;
 }
 
-export async function fetchFindings(query?: FindingsQuery): Promise<Finding[]> {
+export async function fetchScans(params?: FetchScansParams): Promise<PaginatedResponse<Scan[]>> {
+  const path = buildPath('/scans', {
+    target_id: params?.targetId,
+    page: params?.page ? `${params.page}` : undefined,
+    page_size: params?.pageSize ? `${params.pageSize}` : undefined
+  });
+  const payload = await request<ApiCollectionResponse<Scan[]>>(path);
+  return {
+    data: payload.data,
+    pagination: deserializePagination(payload.meta)
+  } satisfies PaginatedResponse<Scan[]>;
+}
+
+export async function fetchFindings(query?: FindingsQuery): Promise<PaginatedResponse<Finding[]>> {
   const path = buildPath('/findings', {
     target_id: query?.targetId,
     scan_id: query?.scanId,
@@ -268,10 +322,15 @@ export async function fetchFindings(query?: FindingsQuery): Promise<Finding[]> {
     assigned_to: query?.assignedTo,
     from: query?.from,
     to: query?.to,
-    scope: query?.scope
+    scope: query?.scope,
+    page: query?.page ? `${query.page}` : undefined,
+    page_size: query?.pageSize ? `${query.pageSize}` : undefined
   });
   const payload = await request<ApiCollectionResponse<Finding[]>>(path);
-  return payload.data;
+  return {
+    data: payload.data,
+    pagination: deserializePagination(payload.meta)
+  } satisfies PaginatedResponse<Finding[]>;
 }
 
 export async function fetchFinding(id: string): Promise<Finding> {
@@ -296,7 +355,7 @@ export async function fetchFindingTimeline(
 }
 
 export async function fetchFindingsTimeline(
-  query?: FindingsQuery
+  query?: Omit<FindingsQuery, 'page' | 'pageSize'>
 ): Promise<FindingsTimelineBucket[]> {
   const path = buildPath('/findings/timeline', {
     target_id: query?.targetId,
