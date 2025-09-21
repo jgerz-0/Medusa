@@ -87,6 +87,41 @@ function TimelineEvent({ event }: { event: FindingTimelineEvent }) {
   );
 }
 
+type StatusBadgeValue = Parameters<typeof StatusBadge>[0]['value'];
+
+const statusBadgeValues = new Set<StatusBadgeValue>([
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'open',
+  'acknowledged',
+  'resolved',
+  'critical',
+  'high',
+  'medium',
+  'low',
+  'info'
+]);
+
+function TicketStatusBadge({ status }: { status: string }) {
+  // Normalize casing to ensure consistent badge styling even if integrations vary.
+  const normalized = status.toLowerCase();
+
+  if (statusBadgeValues.has(normalized as StatusBadgeValue)) {
+    return <StatusBadge value={normalized as StatusBadgeValue} />;
+  }
+
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border border-surface-muted/60 bg-surface-muted/30 px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-gray-200"
+    >
+      {/* Preserve the original status label for analyst auditing when unknown. */}
+      {status}
+    </span>
+  );
+}
+
 export default async function FindingDetailPage({ params }: FindingDetailPageProps) {
   let error: string | null = null;
 
@@ -265,11 +300,32 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
           ) : (
             <ul className="space-y-2">
               {finding.tickets.map((ticket) => (
-                <li key={ticket.id} className="flex items-center justify-between rounded border border-surface-muted/50 bg-surface-muted/20 px-3 py-2 text-xs text-gray-300">
-                  <span className="font-mono text-gray-200">
-                    {ticket.integration}:{ticket.reference}
-                  </span>
-                  <span>{formatTimestamp(ticket.created_at)}</span>
+                <li
+                  key={ticket.id}
+                  className="rounded border border-surface-muted/50 bg-surface-muted/20 px-3 py-2 text-xs text-gray-300"
+                >
+                  <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-gray-200">
+                        {ticket.url ? (
+                          <a
+                            href={ticket.url}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="underline-offset-2 hover:text-sky-300 hover:underline focus-visible:text-sky-300 focus-visible:underline"
+                          >
+                            {ticket.integration}:{ticket.reference}
+                          </a>
+                        ) : (
+                          `${ticket.integration}:${ticket.reference}`
+                        )}
+                      </span>
+                      <TicketStatusBadge status={ticket.status} />
+                    </div>
+                    <span className="text-[11px] uppercase tracking-wide text-gray-500">
+                      {formatTimestamp(ticket.created_at)}
+                    </span>
+                  </div>
                 </li>
               ))}
             </ul>

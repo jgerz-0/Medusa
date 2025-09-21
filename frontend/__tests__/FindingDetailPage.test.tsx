@@ -4,6 +4,17 @@ import FindingDetailPage from '@/app/findings/[findingId]/page';
 import { fetchFinding, fetchFindingComments, fetchFindingTimeline } from '@/lib/api';
 import type { Finding, FindingComment, FindingTimelineEvent } from '@/lib/types';
 
+jest.mock('@/app/findings/[findingId]/forms', () => ({
+  AssignFindingForm: ({ children }: { children?: ReactNode }) => (
+    <div data-testid="assign-form">{children}</div>
+  ),
+  UpdateStatusForm: () => <div data-testid="update-status-form" />, 
+  UpdateTagsForm: () => <div data-testid="update-tags-form" />, 
+  CreateCommentForm: () => <div data-testid="create-comment-form" />, 
+  CreateJiraTicketForm: () => <div data-testid="create-jira-ticket-form" />, 
+  CreateGitHubTicketForm: () => <div data-testid="create-github-ticket-form" /> 
+}));
+
 jest.mock('next/link', () => ({
   __esModule: true,
   default: ({
@@ -90,5 +101,47 @@ describe('FindingDetailPage RBAC notice', () => {
     expect(noticeContent.getByText('ticket:create')).toBeInTheDocument();
     expect(noticeContent.getByText('Export formal reports')).toBeInTheDocument();
     expect(noticeContent.getByText('report:export')).toBeInTheDocument();
+  });
+
+  it('renders ticket status badges and hyperlinks when available', async () => {
+    const findingWithTickets: Finding = {
+      ...baseFinding,
+      tickets: [
+        {
+          id: 'ticket-1',
+          integration: 'jira',
+          reference: 'JIRA-123',
+          status: 'queued',
+          url: 'https://jira.example.com/browse/JIRA-123',
+          created_at: '2024-01-01T02:00:00.000Z',
+          metadata: {}
+        },
+        {
+          id: 'ticket-2',
+          integration: 'github',
+          reference: 'GH-1',
+          status: 'acknowledged',
+          url: null,
+          created_at: '2024-01-01T03:00:00.000Z',
+          metadata: {}
+        }
+      ]
+    };
+
+    mockFetchFinding.mockResolvedValue(findingWithTickets);
+    mockFetchFindingComments.mockResolvedValue([] as FindingComment[]);
+    mockFetchFindingTimeline.mockResolvedValue([] as FindingTimelineEvent[]);
+
+    const ui = await FindingDetailPage({ params: { findingId: findingWithTickets.id } });
+
+    render(ui);
+
+    const jiraLink = screen.getByRole('link', { name: 'jira:JIRA-123' });
+    expect(jiraLink).toHaveAttribute('href', 'https://jira.example.com/browse/JIRA-123');
+    expect(screen.getByTestId('status-queued')).toBeInTheDocument();
+
+    expect(screen.getByText('github:GH-1')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'github:GH-1' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('status-acknowledged')).toBeInTheDocument();
   });
 });
