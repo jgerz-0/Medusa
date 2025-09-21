@@ -22,6 +22,9 @@ describe('Route loading states', () => {
   it('renders the findings table skeleton with accessible markup', () => {
     render(<FindingsLoading />);
 
+    const filterSkeletons = screen.getAllByRole('status', { name: /loading findings filters/i });
+    expect(filterSkeletons).toHaveLength(1);
+
     const tableStatus = screen.getByRole('status', { name: /loading findings table/i });
     expect(tableStatus).toBeInTheDocument();
 

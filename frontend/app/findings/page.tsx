@@ -114,7 +114,6 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
             }
           ]}
         />
-        <FindingsFilters searchParams={searchParams} />
         <FindingsFilters searchParams={filterParams} />
         {hasFilters ? (
           <div className="card border-surface-muted/60 bg-surface-muted/20 px-4 py-3 text-xs text-gray-300">
