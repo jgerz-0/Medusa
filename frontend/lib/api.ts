@@ -362,6 +362,7 @@ export async function fetchFindingsTimeline(
     scan_id: query?.scanId,
     severity: query?.severity,
     status: query?.status,
+    scope: query?.scope,
     tag: query?.tag,
     assigned_to: query?.assignedTo,
     from: query?.from,

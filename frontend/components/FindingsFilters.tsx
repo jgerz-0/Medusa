@@ -2,12 +2,15 @@ import Link from 'next/link';
 
 const severityOptions = ['critical', 'high', 'medium', 'low', 'info'];
 const statusOptions = ['open', 'acknowledged', 'resolved'];
+// Controller scope enforcement yields these discrete values; avoid sending arbitrary strings.
+const scopeOptions = ['unknown', 'in_scope', 'out_of_scope', 'mixed'];
 
 type FindingsFiltersProps = {
   searchParams?: {
     scan?: string;
     severity?: string;
     status?: string;
+    scope?: string;
     tag?: string;
     assigned?: string;
     from?: string;
@@ -19,7 +22,7 @@ export function FindingsFilters({ searchParams }: FindingsFiltersProps) {
   return (
     <form className="card border-surface-muted/60 bg-surface-muted/10 px-4 py-3 text-xs" method="get">
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <div className="grid flex-1 grid-cols-1 gap-3 md:grid-cols-6">
+        <div className="grid flex-1 grid-cols-1 gap-3 md:grid-cols-7">
           <label className="flex flex-col gap-1 text-[11px] uppercase tracking-wide text-gray-400">
             Scan ID
             <input
@@ -46,6 +49,17 @@ export function FindingsFilters({ searchParams }: FindingsFiltersProps) {
             <select name="status" defaultValue={searchParams?.status ?? ''} className="input">
               <option value="">Any</option>
               {statusOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[11px] uppercase tracking-wide text-gray-400">
+            Scope Status
+            <select name="scope" defaultValue={searchParams?.scope ?? ''} className="input">
+              <option value="">Any</option>
+              {scopeOptions.map((option) => (
                 <option key={option} value={option}>
                   {option}
                 </option>
@@ -97,7 +111,7 @@ export function FindingsFilters({ searchParams }: FindingsFiltersProps) {
           <button type="submit" className="btn btn-primary">
             Apply
           </button>
-          <Link href="/findings" className="btn btn-secondary">
+          <Link href="/findings" prefetch={false} className="btn btn-secondary">
             Reset
           </Link>
         </div>
