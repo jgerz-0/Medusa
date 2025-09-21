@@ -84,18 +84,33 @@ matches.
 
 The following baseline roles are supported:
 
-| Role            | Capabilities                                                            |
-|-----------------|-------------------------------------------------------------------------|
-| `admin`         | Full access to all controller routes (implicit superset of other roles). |
-| `scan:enqueue`  | Permission to enqueue scans via `POST /scan`.                            |
-| `targets:write` | Permission to create and manage targets via `POST /targets`.             |
-| `findings:read` | Permission to list findings via `GET /findings` and other read-only data.|
-| `analyst`       | Convenience label for subjects limited to read-only access.              |
+| Role              | Capabilities                                                                                             |
+|-------------------|----------------------------------------------------------------------------------------------------------|
+| `admin`           | Full access to every controller route (implicit superset of other roles).                                |
+| `analyst`         | Composite role bundling read permissions plus workflow mutation (comments, assignments, status updates). |
+| `findings:read`   | Permission to list findings via `GET /findings` along with timeline analytics and related read-only data. |
+| `scans:read`      | Permission to enumerate scans via `GET /scans` and retrieve their metadata.                              |
+| `targets:read`    | Permission to list authorized targets via `GET /targets` for scope validation.                            |
+| `scan:enqueue`    | Permission to enqueue scans via `POST /scan`.                                                             |
+| `targets:write`   | Permission to create and manage targets via `POST /targets`.                                              |
 
 Routes can require multiple roles; holding `admin` always satisfies the
 requirement. The `admin` role remains a superset of `targets:write` and
 `findings:read`, so existing integrations using administrative credentials do
 not require immediate updates.
+
+## UI Role Requirements
+
+The Medusa Operations Console surfaces the controller RBAC requirements inline
+so analysts know which scopes unlock each interaction. The UI indicators link
+back to this section for reference.
+
+- **Scans overview** – Listing the scans table requires `scans:read`; populating
+  the launch form pulls targets with `targets:read`; dispatching nuclei, ZAP, or
+  SQLMap jobs requires `scan:enqueue`.
+- **Findings workspace** – Viewing normalized findings and their timeline
+  analytics requires `findings:read`. Editing workflows (assignment, status,
+  tagging, and comments) additionally requires the composite `analyst` role.
 
 ## Enforcement Points
 
