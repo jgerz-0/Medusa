@@ -92,6 +92,8 @@ def api_client() -> (
         binary_static_analysis_callback_token="binary-static-secret",
         binary_fuzzing_queue_channel="binary-fuzzing:test",
         binary_fuzzing_callback_token="binary-fuzzing-secret",
+        recon_queue_channel="recon:test",
+        recon_callback_token="recon-secret",
     )
 
     engine = create_engine(
@@ -1938,6 +1940,7 @@ def test_principal_creation_validates_and_expands_roles(
             "validation:enqueue",
             "report:export",
             "ticket:create",
+            "recon:enqueue",
         ]
     )
 

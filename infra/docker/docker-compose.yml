@@ -87,12 +87,14 @@ services:
       MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: ${MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL:-queues:binary:preprocess}
       MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: ${MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL:-queues:binary:static-analysis}
       MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: ${MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL:-queues:binary:fuzzing}
+      MEDUSA_RECON_QUEUE_CHANNEL: ${MEDUSA_RECON_QUEUE_CHANNEL:-queues:recon:jobs}
       MEDUSA_NUCLEI_CALLBACK_TOKEN: ${MEDUSA_NUCLEI_CALLBACK_TOKEN:-local-dev-nuclei-callback}
       MEDUSA_ZAP_CALLBACK_TOKEN: ${MEDUSA_ZAP_CALLBACK_TOKEN:-local-dev-zap-callback}
       MEDUSA_SQLMAP_CALLBACK_TOKEN: ${MEDUSA_SQLMAP_CALLBACK_TOKEN:-local-dev-sqlmap-callback}
       MEDUSA_ENRICHMENT_CALLBACK_TOKEN: ${MEDUSA_ENRICHMENT_CALLBACK_TOKEN:-local-dev-enrichment-callback}
       MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: ${MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN:-local-dev-binary-static-callback}
       MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: ${MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN:-local-dev-binary-fuzzing-callback}
+      MEDUSA_RECON_CALLBACK_TOKEN: ${MEDUSA_RECON_CALLBACK_TOKEN:-local-dev-recon-callback}
       MEDUSA_JWT_SECRET: ${MEDUSA_JWT_SECRET:-change-this-in-production}
       MEDUSA_CVE_ENRICHMENT_QDRANT_URL: ${MEDUSA_CVE_ENRICHMENT_QDRANT_URL:-http://qdrant:6333}
       MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION: ${MEDUSA_CVE_ENRICHMENT_QDRANT_COLLECTION:-medusa-advisories}
@@ -250,6 +252,31 @@ services:
         condition: service_healthy
     volumes:
       - ../../workers/web/sqlmap:/app:delegated
+
+  recon-worker:
+    build:
+      context: ../..
+      dockerfile: workers/recon/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_recon_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      RECON_QUEUE_KEY: ${RECON_QUEUE_KEY:-queues:recon:jobs}
+      RECON_DEAD_LETTER_KEY: ${RECON_DEAD_LETTER_KEY:-queues:recon:dead}
+      RECON_CALLBACK_TOKEN: ${RECON_CALLBACK_TOKEN:-local-dev-recon-callback}
+      RECON_POLL_TIMEOUT: ${RECON_POLL_TIMEOUT:-2}
+      RECON_MAX_RETRIES: ${RECON_MAX_RETRIES:-3}
+      RECON_HTTP_TIMEOUT: ${RECON_HTTP_TIMEOUT:-10}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/recon:/app/workers/recon:delegated
+      - ../../controller:/app/controller:delegated
 
   binary-preprocess-worker:
     build:

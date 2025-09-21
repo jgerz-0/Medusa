@@ -18,6 +18,7 @@ from email.message import EmailMessage
 from io import BytesIO
 from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
+from urllib.parse import urlparse
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, Union
 
 import jwt
@@ -58,6 +59,7 @@ from controller.db.models import (
     PrincipalCredential,
     Scan,
     Target,
+    ReconDiscovery,
 )
 from controller.db.session import SessionLocal
 from controller.notifications import (
@@ -95,6 +97,7 @@ ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
 ROLE_REPORT_EXPORT = "report:export"
 ROLE_TICKETING_CREATE = "ticket:create"
 ROLE_VALIDATION_ENQUEUE = "validation:enqueue"
+ROLE_RECON_ENQUEUE = "recon:enqueue"
 
 ALLOWED_ROLES = {
     ROLE_ADMIN,
@@ -111,6 +114,7 @@ ALLOWED_ROLES = {
     ROLE_VALIDATION_ENQUEUE,
     ROLE_REPORT_EXPORT,
     ROLE_TICKETING_CREATE,
+    ROLE_RECON_ENQUEUE,
 }
 
 FINDING_STATUS_PENDING_VALIDATION = "pending_validation"
@@ -125,6 +129,9 @@ FINDING_SCOPE_STATUS_UNKNOWN = "unknown"
 FINDING_SCOPE_STATUS_IN_SCOPE = "in_scope"
 FINDING_SCOPE_STATUS_OUT_OF_SCOPE = "out_of_scope"
 FINDING_SCOPE_STATUS_MIXED = "mixed"
+RECON_STATUS_NEW = "new"
+RECON_STATUS_APPROVED = "approved"
+RECON_STATUS_REJECTED = "rejected"
 
 DEFAULT_ANALYST_ROLES = [
     ROLE_ANALYST,
@@ -154,6 +161,7 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_VALIDATION_ENQUEUE,
     ROLE_REPORT_EXPORT,
     ROLE_TICKETING_CREATE,
+    ROLE_RECON_ENQUEUE,
 ]
 
 CALLBACK_TOKEN_HEADER = "X-Callback-Token"
@@ -595,6 +603,10 @@ class Settings(BaseSettings):
         "queues:validator:jobs",
         description="Redis list channel for validation agent jobs.",
     )
+    recon_queue_channel: str = Field(
+        "queues:recon:jobs",
+        description="Redis list channel for authorized recon pull jobs.",
+    )
     jwt_secret: str = Field(
         ..., description="JWT secret used to validate bearer tokens."
     )
@@ -646,6 +658,9 @@ class Settings(BaseSettings):
     )
     validator_callback_token: str = Field(
         ..., description="Shared secret required for validator agent callbacks."
+    )
+    recon_callback_token: str = Field(
+        ..., description="Shared secret required for recon worker callbacks."
     )
     binary_static_analysis_callback_token: str = Field(
         ...,
@@ -965,6 +980,106 @@ class TargetResponse(BaseModel):
 
 class TargetCollectionResponse(BaseModel):
     data: List[TargetResponse]
+
+
+class ReconFeedConfig(BaseModel):
+    type: Literal["csv", "api"]
+    url: str = Field(..., min_length=1, max_length=2048)
+    delimiter: Optional[str] = Field(default=",", min_length=1, max_length=8)
+    asset_column: Optional[str] = Field(default="asset", min_length=1, max_length=128)
+    asset_type_column: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    encoding: str = Field(default="utf-8", min_length=1, max_length=64)
+    method: Optional[str] = Field(default="GET", min_length=3, max_length=8)
+    items_path: List[str] = Field(default_factory=list)
+    asset_field: Optional[str] = Field(default="asset", min_length=1, max_length=128)
+    type_field: Optional[str] = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _enforce_type_requirements(self) -> "ReconFeedConfig":
+        if self.type == "csv":
+            if not self.asset_column:
+                raise ValueError("asset_column is required for CSV feeds")
+            if self.method and self.method.upper() != "GET":
+                raise ValueError("CSV feeds only support GET requests")
+        elif self.type == "api":
+            if not self.asset_field:
+                raise ValueError("asset_field is required for API feeds")
+        return self
+
+
+class ReconJobRequest(BaseModel):
+    source: str = Field(..., min_length=1, max_length=128)
+    feed: ReconFeedConfig
+    authorized_scopes: List[str] = Field(
+        default_factory=list,
+        description="List of domains or CIDR blocks that bound authorized assets",
+    )
+    labels: List[str] = Field(
+        default_factory=list,
+        description="Optional static labels recorded with each discovery",
+    )
+
+    @field_validator("authorized_scopes", mode="before")
+    @classmethod
+    def _normalize_scopes(cls, value: Optional[Iterable[str]]) -> List[str]:
+        scopes: List[str] = []
+        for item in value or []:
+            if not isinstance(item, str):
+                continue
+            candidate = item.strip()
+            if candidate:
+                scopes.append(candidate)
+        if not scopes:
+            raise ValueError("At least one authorized scope must be provided")
+        return scopes
+
+    @field_validator("labels", mode="before")
+    @classmethod
+    def _normalize_labels(cls, value: Optional[Iterable[str]]) -> List[str]:
+        normalized: List[str] = []
+        for item in value or []:
+            if not isinstance(item, str):
+                continue
+            candidate = item.strip().lower()
+            if candidate and candidate not in normalized:
+                normalized.append(candidate)
+        return normalized
+
+
+class ReconJobResponse(BaseModel):
+    job_id: str
+    queued_at: datetime
+    source: str
+    authorized_scopes: List[str]
+
+
+class ReconAssetPayload(BaseModel):
+    asset_type: Literal["domain", "ipv4", "ipv6", "url"]
+    normalized_value: str = Field(..., min_length=1, max_length=1024)
+    raw_value: Optional[str] = Field(default=None, max_length=1024)
+    matched_scope: Optional[str] = Field(default=None, max_length=512)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+    occurrences: int = Field(default=1, ge=1)
+
+
+class ReconCallbackRequest(BaseModel):
+    job_id: str = Field(..., min_length=1, max_length=128)
+    source: str = Field(..., min_length=1, max_length=128)
+    retrieved_at: datetime
+    assets: List[ReconAssetPayload]
+
+    @model_validator(mode="after")
+    def _ensure_assets(self) -> "ReconCallbackRequest":
+        if not self.assets:
+            raise ValueError("At least one discovery must be submitted")
+        return self
+
+
+class ReconApproveRequest(BaseModel):
+    target_name: str = Field(..., min_length=1, max_length=255)
+    scope: Optional[str] = Field(default=None, min_length=1, max_length=255)
 
 
 class ScanRequest(BaseModel):
@@ -2197,6 +2312,22 @@ def authenticate_enrichment_worker(
     )
 
 
+def authenticate_recon_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
+) -> Principal:
+    """Authenticate recon worker callbacks using a dedicated shared secret."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.recon_callback_token,
+        subject="worker:recon",
+        db=db,
+        resource_id="recon",
+    )
+
+
 def authenticate_zap_worker(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -2779,6 +2910,412 @@ def list_targets(
             for target in targets
         ]
     )
+
+
+def _coerce_recon_timestamp(
+    value: Optional[datetime], fallback: datetime
+) -> datetime:
+    candidate = value or fallback
+    if candidate.tzinfo is None:
+        candidate = candidate.replace(tzinfo=timezone.utc)
+    return candidate
+
+
+def _aggregate_recon_assets(
+    payload: ReconCallbackRequest,
+) -> List[Dict[str, Any]]:
+    retrieved_at = _coerce_recon_timestamp(
+        payload.retrieved_at, datetime.now(tz=timezone.utc)
+    )
+    aggregated: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for asset in payload.assets:
+        normalized = asset.normalized_value.strip()
+        if not normalized:
+            continue
+        key = (asset.asset_type, normalized)
+        metadata_payload = asset.metadata if isinstance(asset.metadata, dict) else {}
+        first_seen = _coerce_recon_timestamp(asset.first_seen, retrieved_at)
+        last_seen = _coerce_recon_timestamp(asset.last_seen, retrieved_at)
+        occurrences = max(1, asset.occurrences)
+        existing = aggregated.get(key)
+        if existing is None:
+            aggregated[key] = {
+                "asset_type": asset.asset_type,
+                "value": normalized,
+                "raw_value": asset.raw_value.strip() if asset.raw_value else None,
+                "matched_scope": asset.matched_scope.strip()
+                if asset.matched_scope
+                else None,
+                "metadata": dict(metadata_payload),
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "occurrences": occurrences,
+            }
+            continue
+
+        existing_first = _coerce_recon_timestamp(existing.get("first_seen"), retrieved_at)
+        existing_last = _coerce_recon_timestamp(existing.get("last_seen"), retrieved_at)
+
+        existing["occurrences"] += occurrences
+        if asset.raw_value and not existing.get("raw_value"):
+            existing["raw_value"] = asset.raw_value.strip()
+        if asset.matched_scope and not existing.get("matched_scope"):
+            existing["matched_scope"] = asset.matched_scope.strip()
+        existing_metadata = existing.setdefault("metadata", {})
+        existing_metadata.update(metadata_payload)
+        if first_seen < existing_first:
+            existing_first = first_seen
+        if last_seen > existing_last:
+            existing_last = last_seen
+        existing["first_seen"] = existing_first
+        existing["last_seen"] = existing_last
+
+    return list(aggregated.values())
+
+
+def _merge_recon_metadata(
+    existing: Dict[str, Any],
+    incoming: Dict[str, Any],
+    *,
+    source: str,
+    existing_source: str,
+) -> Dict[str, Any]:
+    merged = dict(existing)
+    if incoming:
+        merged.update(incoming)
+    if source and source != existing_source:
+        sources = set()
+        recorded = merged.get("sources")
+        if isinstance(recorded, list):
+            sources.update(str(value) for value in recorded)
+        sources.add(existing_source)
+        sources.add(source)
+        merged["sources"] = sorted(sources)
+    return merged
+
+
+def _default_scope_for_discovery(discovery: ReconDiscovery) -> str:
+    if discovery.asset_type == "url":
+        parsed = urlparse(discovery.value)
+        host = parsed.hostname
+        if host:
+            return host.lower()
+    return discovery.value
+
+
+def _asset_in_scope(asset_type: str, asset_value: str, scope: str) -> bool:
+    candidate = scope.strip()
+    if not candidate:
+        return False
+    if asset_type in {"ipv4", "ipv6"}:
+        try:
+            ip_value = ip_address(asset_value)
+        except ValueError:
+            return False
+        try:
+            network = ip_network(candidate, strict=False)
+        except ValueError:
+            try:
+                ip_candidate = ip_address(candidate)
+            except ValueError:
+                return False
+            return ip_value == ip_candidate
+        return ip_value in network
+    if asset_type == "url":
+        parsed = urlparse(asset_value)
+        host = parsed.hostname
+        if host is None:
+            return False
+        try:
+            ip_value = ip_address(host)
+        except ValueError:
+            return _asset_in_scope("domain", host.lower(), candidate)
+        return _asset_in_scope(
+            "ipv6" if ip_value.version == 6 else "ipv4", str(ip_value), candidate
+        )
+    normalized_asset = asset_value.lower().rstrip(".")
+    normalized_scope = candidate.lower().rstrip(".")
+    if normalized_scope == normalized_asset:
+        return True
+    return normalized_asset.endswith(f".{normalized_scope}")
+
+
+def _scope_within(candidate: str, reference: str) -> bool:
+    candidate_value = candidate.strip()
+    reference_value = reference.strip()
+    if not candidate_value or not reference_value:
+        return False
+
+    try:
+        reference_network = ip_network(reference_value, strict=False)
+    except ValueError:
+        try:
+            reference_ip = ip_address(reference_value)
+        except ValueError:
+            candidate_domain = candidate_value.lower().rstrip(".")
+            reference_domain = reference_value.lower().rstrip(".")
+            if candidate_domain == reference_domain:
+                return True
+            return candidate_domain.endswith(f".{reference_domain}")
+        else:
+            try:
+                candidate_ip = ip_address(candidate_value)
+            except ValueError:
+                try:
+                    candidate_network = ip_network(candidate_value, strict=False)
+                except ValueError:
+                    return False
+                single_reference = ip_network(
+                    f"{reference_ip}/{reference_ip.max_prefixlen}", strict=False
+                )
+                return candidate_network == single_reference
+            return candidate_ip == reference_ip
+
+    try:
+        candidate_network = ip_network(candidate_value, strict=False)
+    except ValueError:
+        try:
+            candidate_ip = ip_address(candidate_value)
+        except ValueError:
+            return False
+        return candidate_ip in reference_network
+    return candidate_network.subnet_of(reference_network) or candidate_network == reference_network
+
+
+def _upsert_recon_discovery(
+    db: Session,
+    *,
+    source: str,
+    asset_type: str,
+    value: str,
+    raw_value: Optional[str],
+    matched_scope: Optional[str],
+    metadata: Dict[str, Any],
+    first_seen: datetime,
+    last_seen: datetime,
+    occurrences: int,
+) -> Tuple[ReconDiscovery, bool]:
+    record = (
+        db.query(ReconDiscovery)
+        .filter(
+            ReconDiscovery.asset_type == asset_type,
+            ReconDiscovery.value == value,
+        )
+        .one_or_none()
+    )
+    if record is None:
+        record = ReconDiscovery(
+            source=source,
+            asset_type=asset_type,
+            value=value,
+            raw_value=raw_value or value,
+            matched_scope=matched_scope,
+            metadata_json=dict(metadata),
+            first_seen=first_seen,
+            last_seen=last_seen,
+            occurrences=max(1, occurrences),
+        )
+        db.add(record)
+        return record, True
+
+    existing_last_seen = _coerce_recon_timestamp(record.last_seen, last_seen)
+    existing_first_seen = _coerce_recon_timestamp(record.first_seen, first_seen)
+    incoming_last_seen = _coerce_recon_timestamp(last_seen, existing_last_seen)
+    incoming_first_seen = _coerce_recon_timestamp(first_seen, existing_first_seen)
+
+    record.last_seen = max(existing_last_seen, incoming_last_seen)
+    record.first_seen = min(existing_first_seen, incoming_first_seen)
+    record.occurrences = max(1, record.occurrences + max(1, occurrences))
+    if raw_value and not record.raw_value:
+        record.raw_value = raw_value
+    if matched_scope and not record.matched_scope:
+        record.matched_scope = matched_scope
+    record.metadata_json = _merge_recon_metadata(
+        record.metadata_json, metadata, source=source, existing_source=record.source
+    )
+    return record, False
+
+
+@app.post(
+    "/recon/jobs",
+    response_model=ReconJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def schedule_recon_job(
+    request: ReconJobRequest,
+    http_request: Request,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
+) -> ReconJobResponse:
+    """Queue a recon worker job to pull authorized inventory feeds."""
+
+    enforce_roles(
+        principal,
+        [ROLE_RECON_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/recon/jobs",
+    )
+
+    job_id = str(uuid.uuid4())
+    queued_at = datetime.now(tz=timezone.utc)
+    callback_url = str(http_request.url_for("recon_callback"))
+    job_payload = {
+        "job_id": job_id,
+        "source": request.source,
+        "feed": request.feed.model_dump(exclude_none=True),
+        "authorized_scopes": list(request.authorized_scopes),
+        "labels": list(request.labels),
+        "queued_at": queued_at.isoformat(),
+        "requested_by": principal.subject,
+        "callback_url": callback_url,
+    }
+
+    queue.enqueue(settings.recon_queue_channel, job_payload)
+    metrics.record_job_enqueued("recon")
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enqueue_recon_job",
+        resource_type="recon_job",
+        resource_id=job_id,
+        metadata={
+            "source": request.source,
+            "authorized_scopes": list(request.authorized_scopes),
+            "labels": list(request.labels),
+        },
+    )
+
+    return ReconJobResponse(
+        job_id=job_id,
+        queued_at=queued_at,
+        source=request.source,
+        authorized_scopes=list(request.authorized_scopes),
+    )
+
+
+@app.post(
+    "/recon/discoveries/{discovery_id}/approve",
+    response_model=TargetResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def approve_recon_discovery(
+    discovery_id: str,
+    request: ReconApproveRequest,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> TargetResponse:
+    """Approve a recon discovery and onboard it as an authorized target."""
+
+    resource_id = f"/recon/discoveries/{discovery_id}/approve"
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_WRITE],
+        db,
+        resource_type="endpoint",
+        resource_id=resource_id,
+    )
+
+    discovery = db.get(ReconDiscovery, discovery_id)
+    if discovery is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Discovery not found",
+        )
+
+    if discovery.status == RECON_STATUS_APPROVED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Discovery has already been approved",
+        )
+
+    if discovery.status == RECON_STATUS_REJECTED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Discovery has been rejected and cannot be approved",
+        )
+
+    default_scope = _default_scope_for_discovery(discovery).strip()
+    requested_scope = (request.scope or default_scope).strip()
+    if not requested_scope:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to derive a valid scope for the discovery",
+        )
+
+    if not _asset_in_scope(discovery.asset_type, discovery.value, requested_scope):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Discovery asset does not fall within the requested scope",
+        )
+
+    if (
+        discovery.matched_scope
+        and not _scope_within(requested_scope, discovery.matched_scope)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Requested scope exceeds the authorized boundary",
+        )
+
+    existing_target = (
+        db.query(Target).filter(Target.scope == requested_scope).one_or_none()
+    )
+    if existing_target is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A target with the requested scope already exists",
+        )
+
+    target = Target(
+        name=request.target_name.strip(),
+        scope=requested_scope,
+        is_authorized=True,
+    )
+    discovery.status = RECON_STATUS_APPROVED
+    discovery.approved_at = datetime.now(tz=timezone.utc)
+    discovery.approved_by = principal.subject
+    discovery.approved_target = target
+    metadata = dict(discovery.metadata_json)
+    metadata["approved_scope"] = requested_scope
+    metadata["approved_by"] = principal.subject
+    discovery.metadata_json = metadata
+
+    db.add(target)
+    db.add(discovery)
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        LOGGER.exception(
+            "Failed to approve recon discovery",
+            extra={"discovery_id": discovery_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to approve discovery",
+        ) from exc
+
+    db.refresh(target)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="approve_recon_discovery",
+        resource_type="recon_discovery",
+        resource_id=discovery_id,
+        metadata={
+            "target_id": target.id,
+            "target_scope": target.scope,
+            "discovery_status": discovery.status,
+        },
+    )
+
+    return TargetResponse.model_validate(target, from_attributes=True)
 
 
 @app.post("/scan", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -3995,6 +4532,89 @@ def _persist_binary_fuzzing_callback(
         ) from exc
 
     return scan, sample, findings_count
+
+
+@app.post(
+    "/internal/recon",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def recon_callback(
+    payload: ReconCallbackRequest,
+    principal: Principal = Depends(authenticate_recon_worker),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Persist recon discoveries emitted by the recon worker."""
+
+    aggregated = _aggregate_recon_assets(payload)
+    if not aggregated:
+        LOGGER.info(
+            "Recon callback received without assets",
+            extra={"job_id": payload.job_id, "source": payload.source},
+        )
+        metrics.record_worker_callback("recon", 0)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    processed = 0
+    created_count = 0
+    try:
+        for asset in aggregated:
+            _, created = _upsert_recon_discovery(
+                db,
+                source=payload.source,
+                asset_type=asset["asset_type"],
+                value=asset["value"],
+                raw_value=asset.get("raw_value"),
+                matched_scope=asset.get("matched_scope"),
+                metadata=asset.get("metadata", {}),
+                first_seen=asset["first_seen"],
+                last_seen=asset["last_seen"],
+                occurrences=asset["occurrences"],
+            )
+            processed += 1
+            if created:
+                created_count += 1
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        LOGGER.exception(
+            "Failed to persist recon discoveries",
+            extra={"job_id": payload.job_id, "source": payload.source},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist recon discoveries",
+        ) from exc
+
+    metrics.record_worker_callback("recon", processed)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="recon_callback",
+        resource_type="recon_discovery",
+        resource_id=None,
+        metadata={
+            "job_id": payload.job_id,
+            "source": payload.source,
+            "assets_received": len(payload.assets),
+            "assets_persisted": processed,
+            "assets_created": created_count,
+        },
+    )
+
+    LOGGER.info(
+        "Persisted recon discoveries",
+        extra={
+            "job_id": payload.job_id,
+            "source": payload.source,
+            "processed": processed,
+            "created": created_count,
+            "worker_subject": principal.subject,
+        },
+    )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post(

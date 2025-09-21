@@ -17,6 +17,7 @@ from sqlalchemy import (
     ForeignKey,
     String,
     Text,
+    UniqueConstraint,
     event,
     func,
     inspect,
@@ -114,6 +115,17 @@ def _normalize_scope_status(value: Optional[str]) -> str:
     return "unknown"
 
 
+def _normalize_recon_status(value: Optional[str]) -> str:
+    """Clamp recon discovery workflow state to the supported vocabulary."""
+
+    allowed = {"new", "approved", "rejected"}
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in allowed:
+            return lowered
+    return "new"
+
+
 class TimestampMixin:
     """Reusable timestamp columns."""
 
@@ -181,6 +193,43 @@ class Scan(TimestampMixin, Base):
     binary_fuzzing_findings: Mapped[list["BinaryFuzzingFinding"]] = relationship(
         back_populates="scan", cascade="all, delete-orphan"
     )
+
+
+class ReconDiscovery(TimestampMixin, Base):
+    """Pending recon assets awaiting analyst approval."""
+
+    __tablename__ = "recon_discoveries"
+
+    __table_args__ = (
+        UniqueConstraint("asset_type", "value", name="ux_recon_discovery_asset"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    value: Mapped[str] = mapped_column(String(512), nullable=False)
+    raw_value: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    matched_scope: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), default="new", nullable=False)
+    first_seen: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_seen: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    occurrences: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    approved_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    approved_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    approved_target_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("targets.id", ondelete="SET NULL"), nullable=True
+    )
+
+    approved_target: Mapped[Optional[Target]] = relationship(back_populates=None)
 
 
 class Finding(TimestampMixin, Base):
@@ -495,6 +544,66 @@ class BinaryFuzzingFinding(TimestampMixin, Base):
 
     sample: Mapped["BinarySample"] = relationship(back_populates="fuzzing_findings")
     scan: Mapped["Scan"] = relationship(back_populates="binary_fuzzing_findings")
+
+
+@event.listens_for(ReconDiscovery, "before_insert", propagate=True)
+def _recon_discovery_prepare_insert(
+    mapper, connection, target: ReconDiscovery
+) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    target.status = _normalize_recon_status(target.status)
+    if target.asset_type:
+        target.asset_type = target.asset_type.strip().lower()
+    if target.value:
+        target.value = target.value.strip()
+    if target.raw_value:
+        target.raw_value = target.raw_value.strip()
+    if target.matched_scope:
+        target.matched_scope = target.matched_scope.strip()
+    if target.approved_by:
+        target.approved_by = target.approved_by.strip()
+    if target.first_seen is None:
+        target.first_seen = datetime.datetime.now(datetime.timezone.utc)
+    if target.first_seen.tzinfo is None:
+        target.first_seen = target.first_seen.replace(tzinfo=datetime.timezone.utc)
+    if target.last_seen is None:
+        target.last_seen = target.first_seen
+    if target.last_seen.tzinfo is None:
+        target.last_seen = target.last_seen.replace(tzinfo=datetime.timezone.utc)
+    if target.last_seen < target.first_seen:
+        target.last_seen = target.first_seen
+    if target.occurrences is None or target.occurrences <= 0:
+        target.occurrences = 1
+
+
+@event.listens_for(ReconDiscovery, "before_update", propagate=True)
+def _recon_discovery_prepare_update(
+    mapper, connection, target: ReconDiscovery
+) -> None:
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    target.status = _normalize_recon_status(target.status)
+    if target.asset_type:
+        target.asset_type = target.asset_type.strip().lower()
+    if target.value:
+        target.value = target.value.strip()
+    if target.raw_value:
+        target.raw_value = target.raw_value.strip()
+    if target.matched_scope:
+        target.matched_scope = target.matched_scope.strip()
+    if target.approved_by:
+        target.approved_by = target.approved_by.strip()
+    if target.first_seen is None:
+        target.first_seen = datetime.datetime.now(datetime.timezone.utc)
+    if target.first_seen.tzinfo is None:
+        target.first_seen = target.first_seen.replace(tzinfo=datetime.timezone.utc)
+    if target.last_seen is None:
+        target.last_seen = target.first_seen
+    if target.last_seen.tzinfo is None:
+        target.last_seen = target.last_seen.replace(tzinfo=datetime.timezone.utc)
+    if target.last_seen < target.first_seen:
+        target.last_seen = target.first_seen
+    if target.occurrences is None or target.occurrences <= 0:
+        target.occurrences = 1
 
 
 @event.listens_for(BinarySample, "before_insert", propagate=True)
