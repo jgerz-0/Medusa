@@ -48,6 +48,7 @@ locals {
       enrichment    = null,
       binary_static = null,
       binary_fuzzing = null,
+      binary_symbolic = null,
       zap           = null,
       validator     = null,
     },
@@ -65,6 +66,9 @@ locals {
       BINARY_METADATA_PREFIX                       = "preprocess/metadata/"
       BINARY_PREPROCESS_DEAD_LETTER_KEY            = "queues:binary:preprocess:dead"
       BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY       = "queues:binary:static-analysis:dead"
+      BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY    = "queues:binary:symbolic-execution:dead"
+      BINARY_SYMBOLIC_EXECUTION_BUCKET             = local.bucket_names.analysis
+      BINARY_SYMBOLIC_EXECUTION_PREFIX             = "analysis/symbolic/"
       CVE_ENRICHMENT_ERROR_QUEUE_KEY               = "queues:enrichment:cve:errors"
       CVE_ENRICHMENT_QDRANT_API_KEY                = ""
       CVE_ENRICHMENT_QDRANT_COLLECTION             = "medusa-advisories"
@@ -77,6 +81,8 @@ locals {
       MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL       = "queues:binary:preprocess"
       MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN = local.callback_tokens.binary_static
       MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL  = "queues:binary:static-analysis"
+      MEDUSA_BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN = local.callback_tokens.binary_symbolic
+      MEDUSA_BINARY_SYMBOLIC_EXECUTION_QUEUE_CHANNEL  = "queues:binary:symbolic-execution"
       MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL          = "queues:enrichment:cve"
       MEDUSA_DATABASE_URL                          = var.database.connection_string
       MEDUSA_ENRICHMENT_CALLBACK_TOKEN             = local.callback_tokens.enrichment

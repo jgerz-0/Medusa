@@ -35,6 +35,7 @@ def test_zap_worker_config_defaults(monkeypatch):
         anomaly_callback_token="anomaly-secret",
         binary_static_analysis_callback_token="static-secret",
         binary_fuzzing_callback_token="fuzzing-secret",
+        binary_symbolic_execution_callback_token="binary-symbolic-secret",
         recon_callback_token="recon-secret",
     )
     assert config.queue_key == settings.zap_queue_channel

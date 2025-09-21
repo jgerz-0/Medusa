@@ -1078,6 +1078,10 @@ variable "artifact_worker_prefixes" {
       prefix       = "analysis/reports/"
       allow_delete = true
     }
+    binary_symbolic_execution = {
+      prefix       = "analysis/symbolic/"
+      allow_delete = true
+    }
     binary_fuzzing = {
       prefix       = "analysis/fuzzing/"
       allow_delete = true

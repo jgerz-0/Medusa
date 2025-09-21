@@ -32,6 +32,7 @@ secrets:
     MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: "queues:binary:preprocess"
     MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: "queues:binary:static-analysis"
     MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: "queues:binary:fuzzing"
+    MEDUSA_BINARY_SYMBOLIC_EXECUTION_QUEUE_CHANNEL: "queues:binary:symbolic-execution"
     MEDUSA_VALIDATOR_QUEUE_CHANNEL: "queues:validator:jobs"
     MEDUSA_NUCLEI_CALLBACK_TOKEN: "change-me"
     MEDUSA_SQLMAP_QUEUE_CHANNEL: "queues:sqlmap:jobs"
@@ -65,6 +66,9 @@ secrets:
     BINARY_FUZZING_DEAD_LETTER_KEY: "queues:binary:fuzzing:dead"
     BINARY_FUZZING_BUCKET: ""
     BINARY_FUZZING_PREFIX: "analysis/fuzzing/"
+    BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY: "queues:binary:symbolic-execution:dead"
+    BINARY_SYMBOLIC_EXECUTION_BUCKET: ""
+    BINARY_SYMBOLIC_EXECUTION_PREFIX: "analysis/symbolic/"
     MEDUSA_ZAP_QUEUE_CHANNEL: "queues:zap:jobs"
     MEDUSA_ZAP_DEAD_LETTER_KEY: "queues:zap:dead"
     MEDUSA_ZAP_CALLBACK_TOKEN: "change-me"
@@ -73,6 +77,7 @@ secrets:
     MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL: "queues:enrichment:cve"
     MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: "change-me"
     MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: "change-me"
+    MEDUSA_BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN: "change-me"
     CVE_ENRICHMENT_QUEUE_KEY: "queues:enrichment:cve"
     CVE_ENRICHMENT_RESULT_QUEUE_KEY: "queues:enrichment:cve:results"
     CVE_ENRICHMENT_ERROR_QUEUE_KEY: "queues:enrichment:cve:errors"
@@ -721,6 +726,76 @@ workers:
         BINARY_STATIC_ANALYSIS_ENABLE_CHECKSEC: "1"
         BINARY_STATIC_ANALYSIS_ENABLE_BANDIT: "1"
         BINARY_STATIC_ANALYSIS_TOOL_TIMEOUT: "120"
+      extra: []
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    extraVolumeMounts: []
+    extraVolumes: []
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
+  binarySymbolicExecution:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-binary-symbolic
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: binary-symbolic-execution-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        BINARY_SYMBOLIC_EXECUTION_QUEUE_KEY: MEDUSA_BINARY_SYMBOLIC_EXECUTION_QUEUE_CHANNEL
+        BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY: BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY
+        BINARY_SYMBOLIC_EXECUTION_BUCKET: BINARY_SYMBOLIC_EXECUTION_BUCKET
+        BINARY_SYMBOLIC_EXECUTION_PREFIX: BINARY_SYMBOLIC_EXECUTION_PREFIX
+        BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN: MEDUSA_BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN
+        S3_ACCESS_KEY_ID: S3_ACCESS_KEY_ID
+        S3_SECRET_ACCESS_KEY: S3_SECRET_ACCESS_KEY
+      values:
+        S3_ENDPOINT_URL: "{{ printf \"http://%s-minio:%d\" (include \"medusa.fullname\" $) $.Values.minio.service.apiPort }}"
+        AWS_DEFAULT_REGION: "us-east-1"
+        BINARY_SYMBOLIC_EXECUTION_POLL_TIMEOUT: "5"
+        BINARY_SYMBOLIC_EXECUTION_MAX_ATTEMPTS: "3"
+        BINARY_SYMBOLIC_EXECUTION_RUNTIME: "docker"
+        BINARY_SYMBOLIC_EXECUTION_RUNTIME_FLAGS: ""
+        BINARY_SYMBOLIC_EXECUTION_IMAGE: "docker.io/medusa/angr:latest"
+        BINARY_SYMBOLIC_EXECUTION_COMMAND: "/opt/medusa/run_angr"
+        BINARY_SYMBOLIC_EXECUTION_TIMEOUT: "300"
       extra: []
     resources:
       requests:

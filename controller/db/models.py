@@ -190,6 +190,9 @@ class Scan(TimestampMixin, Base):
     binary_analysis_findings: Mapped[list["BinaryStaticAnalysisFinding"]] = (
         relationship(back_populates="scan", cascade="all, delete-orphan")
     )
+    binary_symbolic_execution_findings: Mapped[
+        list["BinarySymbolicExecutionFinding"]
+    ] = relationship(back_populates="scan", cascade="all, delete-orphan")
     binary_fuzzing_findings: Mapped[list["BinaryFuzzingFinding"]] = relationship(
         back_populates="scan", cascade="all, delete-orphan"
     )
@@ -477,6 +480,9 @@ class BinarySample(TimestampMixin, Base):
     analysis_findings: Mapped[list["BinaryStaticAnalysisFinding"]] = relationship(
         back_populates="sample", cascade="all, delete-orphan"
     )
+    symbolic_findings: Mapped[list["BinarySymbolicExecutionFinding"]] = relationship(
+        back_populates="sample", cascade="all, delete-orphan"
+    )
     fuzzing_findings: Mapped[list["BinaryFuzzingFinding"]] = relationship(
         back_populates="sample", cascade="all, delete-orphan"
     )
@@ -512,6 +518,40 @@ class BinaryStaticAnalysisFinding(TimestampMixin, Base):
 
     sample: Mapped["BinarySample"] = relationship(back_populates="analysis_findings")
     scan: Mapped["Scan"] = relationship(back_populates="binary_analysis_findings")
+
+
+class BinarySymbolicExecutionFinding(TimestampMixin, Base):
+    """Symbolic execution findings produced by angr workers."""
+
+    __tablename__ = "binary_symbolic_execution_findings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    sample_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("binary_samples.id", ondelete="CASCADE"), nullable=False
+    )
+    scan_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False
+    )
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_bucket: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    artifact_key: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    executed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    sample: Mapped["BinarySample"] = relationship(back_populates="symbolic_findings")
+    scan: Mapped["Scan"] = relationship(
+        back_populates="binary_symbolic_execution_findings"
+    )
 
 
 class BinaryFuzzingFinding(TimestampMixin, Base):
@@ -636,6 +676,21 @@ def _binary_static_analysis_set_hash(
         target.evidence_hash = _hash_evidence(payload)
 
 
+@event.listens_for(BinarySymbolicExecutionFinding, "before_insert", propagate=True)
+def _binary_symbolic_execution_set_hash(
+    mapper, connection, target: BinarySymbolicExecutionFinding
+) -> None:
+    target.severity = normalize_severity(target.severity)
+    target.metadata_json = _coerce_evidence(target.metadata_json)
+    target.evidence = _coerce_evidence(target.evidence)
+    if not target.evidence_hash:
+        payload = {
+            "metadata": target.metadata_json,
+            "evidence": target.evidence,
+        }
+        target.evidence_hash = _hash_evidence(payload)
+
+
 @event.listens_for(BinaryFuzzingFinding, "before_insert", propagate=True)
 def _binary_fuzzing_set_hash(mapper, connection, target: BinaryFuzzingFinding) -> None:
     target.severity = normalize_severity(target.severity)
@@ -663,6 +718,24 @@ def _binary_fuzzing_prevent_mutation(
         or hash_attr.history.has_changes()
     ):
         raise ValueError("Fuzzing evidence payloads are immutable once persisted.")
+
+
+@event.listens_for(BinarySymbolicExecutionFinding, "before_update", propagate=True)
+def _binary_symbolic_prevent_mutation(
+    mapper, connection, target: BinarySymbolicExecutionFinding
+) -> None:
+    state = inspect(target)
+    metadata_attr = state.attrs.metadata_json
+    evidence_attr = state.attrs.evidence
+    hash_attr = state.attrs.evidence_hash
+    if (
+        metadata_attr.history.has_changes()
+        or evidence_attr.history.has_changes()
+        or hash_attr.history.has_changes()
+    ):
+        raise ValueError(
+            "Symbolic execution evidence payloads are immutable once persisted."
+        )
 
 
 @event.listens_for(BinaryStaticAnalysisFinding, "before_update", propagate=True)

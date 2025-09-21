@@ -315,6 +315,71 @@ workers:
         - name: BINARY_STATIC_ANALYSIS_TOOL_TIMEOUT
           value: "120"
 
+  binarySymbolicExecution:
+    image:
+      repository: medusa/worker-binary-symbolic
+      tag: latest
+    env:
+      extra:
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_REDIS_URL
+        - name: BINARY_SYMBOLIC_EXECUTION_QUEUE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_BINARY_SYMBOLIC_EXECUTION_QUEUE_CHANNEL
+        - name: BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY
+        - name: BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: MEDUSA_BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN
+        - name: BINARY_SYMBOLIC_EXECUTION_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: BINARY_SYMBOLIC_EXECUTION_BUCKET
+        - name: BINARY_SYMBOLIC_EXECUTION_PREFIX
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: BINARY_SYMBOLIC_EXECUTION_PREFIX
+        - name: S3_ENDPOINT_URL
+          value: http://medusa-medusa-minio:9000
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_ACCESS_KEY_ID
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: medusa-secrets
+              key: S3_SECRET_ACCESS_KEY
+        - name: AWS_DEFAULT_REGION
+          value: us-east-1
+        - name: BINARY_SYMBOLIC_EXECUTION_POLL_TIMEOUT
+          value: "2"
+        - name: BINARY_SYMBOLIC_EXECUTION_MAX_ATTEMPTS
+          value: "3"
+        - name: BINARY_SYMBOLIC_EXECUTION_RUNTIME
+          value: docker
+        - name: BINARY_SYMBOLIC_EXECUTION_RUNTIME_FLAGS
+          value: ""
+        - name: BINARY_SYMBOLIC_EXECUTION_IMAGE
+          value: docker.io/medusa/angr:latest
+        - name: BINARY_SYMBOLIC_EXECUTION_COMMAND
+          value: /opt/medusa/run_angr
+        - name: BINARY_SYMBOLIC_EXECUTION_TIMEOUT
+          value: "300"
+
 secrets:
   strategy: inline
   inline:
@@ -324,10 +389,12 @@ secrets:
     MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL: queues:binary:preprocess
     MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL: queues:binary:static-analysis
     MEDUSA_BINARY_FUZZING_QUEUE_CHANNEL: queues:binary:fuzzing
+    MEDUSA_BINARY_SYMBOLIC_EXECUTION_QUEUE_CHANNEL: queues:binary:symbolic-execution
     MEDUSA_VALIDATOR_QUEUE_CHANNEL: queues:validator:jobs
     MEDUSA_NUCLEI_CALLBACK_TOKEN: local-dev-nuclei-callback
     MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: local-dev-binary-static-callback
     MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: local-dev-binary-fuzzing-callback
+    MEDUSA_BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN: local-dev-binary-symbolic-callback
     MEDUSA_VALIDATOR_CALLBACK_TOKEN: local-dev-validator-callback
     MEDUSA_JWT_SECRET: change-this-in-production
     MINIO_ROOT_USER: medusaadmin
@@ -350,6 +417,9 @@ secrets:
     BINARY_FUZZING_DEAD_LETTER_KEY: queues:binary:fuzzing:dead
     BINARY_FUZZING_BUCKET: ""
     BINARY_FUZZING_PREFIX: analysis/fuzzing/
+    BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY: queues:binary:symbolic-execution:dead
+    BINARY_SYMBOLIC_EXECUTION_BUCKET: ""
+    BINARY_SYMBOLIC_EXECUTION_PREFIX: analysis/symbolic/
     MEDUSA_ZAP_QUEUE_CHANNEL: queues:zap:jobs
     MEDUSA_ZAP_DEAD_LETTER_KEY: queues:zap:dead
     MEDUSA_ZAP_CALLBACK_TOKEN: local-dev-zap-callback

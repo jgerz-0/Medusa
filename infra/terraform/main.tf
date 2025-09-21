@@ -111,6 +111,7 @@ resource "random_password" "medusa_callback" {
     enrichment    = true
     binary_static = true
     binary_fuzzing = true
+    binary_symbolic = true
     sqlmap        = true
     zap           = true
     validator     = true
@@ -126,6 +127,7 @@ locals {
     enrichment     = random_password.medusa_callback["enrichment"].result
     binary_static  = random_password.medusa_callback["binary_static"].result
     binary_fuzzing = random_password.medusa_callback["binary_fuzzing"].result
+    binary_symbolic = random_password.medusa_callback["binary_symbolic"].result
     sqlmap         = random_password.medusa_callback["sqlmap"].result
     zap            = random_password.medusa_callback["zap"].result
     validator      = random_password.medusa_callback["validator"].result
@@ -159,6 +161,9 @@ locals {
       BINARY_METADATA_PREFIX                       = "preprocess/metadata/"
       BINARY_PREPROCESS_DEAD_LETTER_KEY            = "queues:binary:preprocess:dead"
       BINARY_STATIC_ANALYSIS_DEAD_LETTER_KEY       = "queues:binary:static-analysis:dead"
+      BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY    = "queues:binary:symbolic-execution:dead"
+      BINARY_SYMBOLIC_EXECUTION_BUCKET             = local.medusa_bucket_names.analysis
+      BINARY_SYMBOLIC_EXECUTION_PREFIX             = "analysis/symbolic/"
       CVE_ENRICHMENT_ERROR_QUEUE_KEY               = "queues:enrichment:cve:errors"
       CVE_ENRICHMENT_QDRANT_API_KEY                = ""
       CVE_ENRICHMENT_QDRANT_COLLECTION             = "medusa-advisories"
@@ -171,6 +176,8 @@ locals {
       MEDUSA_BINARY_PREPROCESS_QUEUE_CHANNEL       = "queues:binary:preprocess"
       MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN = local.medusa_callback_tokens.binary_static
       MEDUSA_BINARY_STATIC_ANALYSIS_QUEUE_CHANNEL  = "queues:binary:static-analysis"
+      MEDUSA_BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN = local.medusa_callback_tokens.binary_symbolic
+      MEDUSA_BINARY_SYMBOLIC_EXECUTION_QUEUE_CHANNEL  = "queues:binary:symbolic-execution"
       MEDUSA_CVE_ENRICHMENT_QUEUE_CHANNEL          = "queues:enrichment:cve"
       MEDUSA_DATABASE_URL                          = format(
         "postgresql://{{ .medusaDatabaseUsername }}:{{ .medusaDatabasePassword }}@%s:%d/%s",

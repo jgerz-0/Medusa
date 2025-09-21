@@ -52,6 +52,8 @@ def api_client() -> (
         binary_static_analysis_callback_token="binary-static-secret",
         binary_fuzzing_queue_channel="binary-fuzzing:test",
         binary_fuzzing_callback_token="binary-fuzzing-secret",
+        binary_symbolic_execution_queue_channel="binary-symbolic:test",
+        binary_symbolic_execution_callback_token="binary-symbolic-secret",
         recon_queue_channel="recon:test",
         recon_callback_token="recon-secret",
     )
