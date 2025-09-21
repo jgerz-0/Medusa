@@ -1,9 +1,10 @@
 import clsx from 'clsx';
 import { RBAC_DOCS_URL } from '@/lib/rbac';
+import type { ControllerRole } from '@/lib/rbac';
 
 export interface RoleRequirement {
   title: string;
-  roles: string[];
+  roles: ControllerRole[];
   description?: string;
 }
 

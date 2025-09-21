@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import { DiscoveryDashboard } from '@/components/DiscoveryDashboard';
+import { RequiredRolesNotice } from '@/components/RequiredRolesNotice';
 import { fetchReconDiscoveries, fetchReconRuns } from '@/lib/api';
+import { ROLE_TARGETS_READ, ROLE_TARGETS_WRITE } from '@/lib/rbac';
 
 export const metadata: Metadata = {
   title: 'Discovery | Medusa Operations Console'
@@ -46,6 +48,20 @@ export default async function DiscoveryPage() {
             controller.
           </p>
         </div>
+        <RequiredRolesNotice
+          sections={[
+            {
+              title: 'Inspect recon telemetry',
+              description: 'Requires target read scope because discoveries are reconciled against the authorized registry.',
+              roles: [ROLE_TARGETS_READ]
+            },
+            {
+              title: 'Promote discoveries to targets',
+              description: 'Enables onboarding vetted assets from recon directly into the controller target catalog.',
+              roles: [ROLE_TARGETS_WRITE]
+            }
+          ]}
+        />
       </header>
 
       {discoveryError ? (

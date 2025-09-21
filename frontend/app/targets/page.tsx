@@ -2,6 +2,8 @@ import type { Metadata } from 'next';
 import { fetchTargets } from '@/lib/api';
 import { TargetRegistrationForm } from '@/components/TargetRegistrationForm';
 import { TargetsTable } from '@/components/TargetsTable';
+import { RequiredRolesNotice } from '@/components/RequiredRolesNotice';
+import { ROLE_TARGETS_READ, ROLE_TARGETS_WRITE } from '@/lib/rbac';
 
 export const metadata: Metadata = {
   title: 'Targets | Medusa Operations Console'
@@ -30,6 +32,20 @@ export default async function TargetsPage() {
             Every change is audited; review carefully before onboarding or removing a target.
           </p>
         </div>
+        <RequiredRolesNotice
+          sections={[
+            {
+              title: 'Review target inventory',
+              description: 'Loads the authorized scope catalog to validate controller state before scheduling scans.',
+              roles: [ROLE_TARGETS_READ]
+            },
+            {
+              title: 'Register or update targets',
+              description: 'Allows onboarding new assets or adjusting authorization flags for existing scope.',
+              roles: [ROLE_TARGETS_WRITE]
+            }
+          ]}
+        />
       </header>
 
       <TargetRegistrationForm />
