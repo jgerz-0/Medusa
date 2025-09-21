@@ -12,13 +12,13 @@ import { ROLE_ANALYST, ROLE_REPORT_EXPORT, ROLE_TICKETING_CREATE } from '@/lib/r
 import { StatusBadge } from '@/components/StatusBadge';
 import { RequiredRolesNotice, type RoleRequirement } from '@/components/RequiredRolesNotice';
 import {
-  assignFindingAction,
-  updateStatusAction,
-  updateTagsAction,
-  createCommentAction,
-  createJiraTicketAction,
-  createGitHubTicketAction
-} from './actions';
+  AssignFindingForm,
+  UpdateStatusForm,
+  UpdateTagsForm,
+  CreateCommentForm,
+  CreateJiraTicketForm,
+  CreateGitHubTicketForm
+} from './forms';
 
 interface FindingDetailPageProps {
   params: {
@@ -222,53 +222,14 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
       <article className="card space-y-4 p-6">
         <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-300">Workflow Controls</h3>
         <div className="grid gap-4 md:grid-cols-2">
-          <form action={assignFindingAction} className="flex flex-col gap-2">
-            <input type="hidden" name="findingId" value={finding.id} />
-            <label className="text-xs uppercase tracking-wide text-gray-400">
-              Assign to
-              <input
-                type="text"
-                name="assignee"
-                defaultValue={finding.assigned_to ?? ''}
-                className="input mt-1"
-                placeholder="analyst"
-              />
-            </label>
-            <button type="submit" className="btn btn-primary w-fit text-xs uppercase tracking-wide">
-              Update Assignee
-            </button>
-          </form>
-          <form action={updateStatusAction} className="flex flex-col gap-2">
-            <input type="hidden" name="findingId" value={finding.id} />
-            <label className="text-xs uppercase tracking-wide text-gray-400">
-              Status
-              <select name="status" defaultValue={finding.status} className="input mt-1">
-                <option value="open">open</option>
-                <option value="acknowledged">acknowledged</option>
-                <option value="resolved">resolved</option>
-              </select>
-            </label>
-            <button type="submit" className="btn btn-secondary w-fit text-xs uppercase tracking-wide">
-              Update Status
-            </button>
-          </form>
+          <AssignFindingForm findingId={finding.id} defaultAssignee={finding.assigned_to} />
+          <UpdateStatusForm findingId={finding.id} currentStatus={finding.status} />
         </div>
-        <form action={updateTagsAction} className="flex flex-col gap-2 md:w-1/2">
-          <input type="hidden" name="findingId" value={finding.id} />
-          <label className="text-xs uppercase tracking-wide text-gray-400">
-            Tags (comma separated)
-            <input
-              type="text"
-              name="tags"
-              defaultValue={finding.tags.join(', ')}
-              className="input mt-1"
-              placeholder="scope:risk, workflow:triage"
-            />
-          </label>
-          <button type="submit" className="btn btn-tertiary w-fit text-xs uppercase tracking-wide">
-            Update Tags
-          </button>
-        </form>
+        <UpdateTagsForm
+          findingId={finding.id}
+          defaultTags={finding.tags.join(', ')}
+          className="md:w-1/2"
+        />
       </article>
 
       <article className="card space-y-4 p-6">
@@ -290,22 +251,7 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
             <li className="text-sm text-gray-500">No analyst comments recorded yet.</li>
           ) : null}
         </ul>
-        <form action={createCommentAction} className="flex flex-col gap-2">
-          <input type="hidden" name="findingId" value={finding.id} />
-          <label className="text-xs uppercase tracking-wide text-gray-400">
-            Add Comment
-            <textarea
-              name="message"
-              rows={3}
-              className="input mt-1"
-              placeholder="Document analyst observations or next steps"
-              required
-            />
-          </label>
-          <button type="submit" className="btn btn-primary w-fit text-xs uppercase tracking-wide">
-            Submit Comment
-          </button>
-        </form>
+        <CreateCommentForm findingId={finding.id} />
       </article>
 
       <article className="card space-y-4 p-6">
@@ -330,27 +276,8 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
           )}
         </div>
         <div className="grid gap-4 md:grid-cols-2">
-          <form action={createJiraTicketAction} className="flex flex-col gap-2">
-            <input type="hidden" name="findingId" value={finding.id} />
-            <h4 className="text-xs uppercase tracking-wide text-gray-400">Create Jira Ticket</h4>
-            <input className="input" name="projectKey" placeholder="Project Key" required />
-            <input className="input" name="issueType" placeholder="Issue Type" defaultValue="Bug" />
-            <input className="input" name="summary" placeholder="Summary" required />
-            <textarea className="input" name="description" placeholder="Description" rows={2} />
-            <button type="submit" className="btn btn-secondary w-fit text-xs uppercase tracking-wide">
-              Queue Jira Ticket
-            </button>
-          </form>
-          <form action={createGitHubTicketAction} className="flex flex-col gap-2">
-            <input type="hidden" name="findingId" value={finding.id} />
-            <h4 className="text-xs uppercase tracking-wide text-gray-400">Create GitHub Issue</h4>
-            <input className="input" name="repository" placeholder="org/repository" required />
-            <input className="input" name="title" placeholder="Issue Title" required />
-            <textarea className="input" name="body" placeholder="Issue Body" rows={2} />
-            <button type="submit" className="btn btn-tertiary w-fit text-xs uppercase tracking-wide">
-              Queue GitHub Issue
-            </button>
-          </form>
+          <CreateJiraTicketForm findingId={finding.id} />
+          <CreateGitHubTicketForm findingId={finding.id} />
         </div>
       </article>
 
