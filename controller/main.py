@@ -7046,6 +7046,12 @@ def list_findings_timeline(
         None, alias="status", description="Filter by workflow status"
     ),
     tag: Optional[str] = Query(None, description="Filter by tag"),
+    scope: Optional[str] = Query(
+        None,
+        description=(
+            "Filter by scope compliance status (unknown, in_scope, out_of_scope, mixed)"
+        ),
+    ),
     assigned_to: Optional[str] = Query(None, description="Filter by assignee"),
     since: Optional[datetime] = Query(None, alias="from"),
     until: Optional[datetime] = Query(None, alias="to"),
@@ -7094,7 +7100,7 @@ def list_findings_timeline(
         assigned_to=assigned_to,
         since=since,
         until=until,
-        scope_status=None,
+        scope_status=scope,
     )
 
     buckets = _build_timeline_buckets(filtered)

@@ -1530,6 +1530,7 @@ def test_findings_scope_filter(api_client: Tuple[TestClient, InMemoryQueue, sess
             evidence={"url": "https://app.corp.example/login"},
             evidence_hash="",
             scope_status="in_scope",
+            status="open",
         )
         out_scope_finding = Finding(
             scan_id=out_scope_scan.id,
@@ -1540,6 +1541,7 @@ def test_findings_scope_filter(api_client: Tuple[TestClient, InMemoryQueue, sess
             evidence={"url": "http://attacker.example"},
             evidence_hash="",
             scope_status="out_of_scope",
+            status="open",
         )
         session.add_all([in_scope_finding, out_scope_finding])
         session.commit()
@@ -1569,6 +1571,26 @@ def test_findings_scope_filter(api_client: Tuple[TestClient, InMemoryQueue, sess
     assert scope_endpoint.status_code == 200, scope_endpoint.text
     scope_payload = scope_endpoint.json()["data"]
     assert {item["id"] for item in scope_payload} == {out_scope_id}
+
+    out_timeline = client.get(
+        "/findings/timeline",
+        params={"scope": "out_of_scope"},
+        headers=auth_headers(),
+    )
+    assert out_timeline.status_code == 200, out_timeline.text
+    out_timeline_payload = out_timeline.json()["data"]
+    assert sum(bucket["total"] for bucket in out_timeline_payload) == 1
+    assert all(bucket["open"] == bucket["total"] for bucket in out_timeline_payload)
+
+    in_timeline = client.get(
+        "/findings/timeline",
+        params={"scope": "in_scope"},
+        headers=auth_headers(),
+    )
+    assert in_timeline.status_code == 200, in_timeline.text
+    in_timeline_payload = in_timeline.json()["data"]
+    assert sum(bucket["total"] for bucket in in_timeline_payload) == 1
+    assert all(bucket["open"] == bucket["total"] for bucket in in_timeline_payload)
 
 
 def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:
