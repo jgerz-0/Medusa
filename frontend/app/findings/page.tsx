@@ -35,11 +35,18 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
   const page = parsePositiveInteger(searchParams?.page, 1);
   const pageSize = parsePositiveInteger(searchParams?.page_size, 50);
 
+  const normalizedSeverity =
+    typeof searchParams?.severity === 'string' ? searchParams.severity.toLowerCase() : undefined;
+  const normalizedStatus =
+    typeof searchParams?.status === 'string' ? searchParams.status.toLowerCase() : undefined;
+  const normalizedScope =
+    typeof searchParams?.scope === 'string' ? searchParams.scope.toLowerCase() : undefined;
+
   const filterParams = {
     scan: typeof searchParams?.scan === 'string' ? searchParams?.scan : undefined,
-    severity: typeof searchParams?.severity === 'string' ? searchParams?.severity : undefined,
-    status: typeof searchParams?.status === 'string' ? searchParams?.status : undefined,
-    scope: typeof searchParams?.scope === 'string' ? searchParams?.scope : undefined,
+    severity: normalizedSeverity,
+    status: normalizedStatus,
+    scope: normalizedScope,
     tag: typeof searchParams?.tag === 'string' ? searchParams?.tag : undefined,
     assigned: typeof searchParams?.assigned === 'string' ? searchParams?.assigned : undefined,
     from: typeof searchParams?.from === 'string' ? searchParams?.from : undefined,
