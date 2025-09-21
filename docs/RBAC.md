@@ -14,7 +14,12 @@ following attributes:
   authenticates.
 - **key_hash** – SHA-256 hash of the API key secret. Empty for JWT/OIDC subjects.
 - **roles** – JSON array describing the permissions the subject holds.
+- **expires_at** – optional timestamp after which the credential is considered
+  inactive. Auto-provisioned OIDC principals refresh this value each login when
+  a TTL is configured.
 - **revoked_at** – null when active, timestamp when the credential is revoked.
+- **source** – string describing how the credential was created (`manual`,
+  `oidc_auto`, etc.) to support downstream automation policies.
 
 API keys are compared using the stored hash; JWT and OIDC subjects must also be
 present in this table to be accepted. The controller rejects any credential that
@@ -42,6 +47,38 @@ All API key authentication therefore depends on presence in the
 principals using `controller.scripts.seed_principals` and manage the records
 through migrations or automation pipelines so keys can be revoked centrally
 without redeploying the controller.
+
+### OIDC Auto-Provisioning Controls
+
+Security teams can map identity-provider groups to Medusa roles without
+manually pre-seeding every subject. The controller only provisions or updates
+an OIDC subject when all of the following safeguards are in place:
+
+- `MEDUSA_OIDC_AUTO_PROVISION` is `true`.
+- `MEDUSA_OIDC_AUTO_PROVISION_ALLOWED_ISSUERS` includes the token's `iss`
+  claim. Tokens from untrusted issuers are rejected even if other claims match.
+- `MEDUSA_OIDC_GROUP_ROLE_MAP` maps IdP groups (read from the
+  `MEDUSA_OIDC_GROUP_CLAIM`, default `groups`) to Medusa roles.
+- `MEDUSA_OIDC_AUTO_PROVISION_ROLE_ALLOW_LIST` enumerates the roles that may be
+  granted automatically. Roles outside this allow-list are ignored.
+- `MEDUSA_OIDC_AUTO_PROVISION_EXPIRES_IN_SECONDS` (optional) sets a TTL that is
+  refreshed on every successful login. Expired principals are denied until the
+  IdP asserts an allowed group again.
+
+When these conditions are met, `_authenticate_oidc` creates or updates a
+`principal_credentials` row with `source = "oidc_auto"`. Auto-provisioned
+subjects that drift from the configured role mapping trigger audit events:
+
+- `oidc_auto_provision` – recorded whenever a new principal is created.
+- `oidc_role_sync` – emitted when roles/expiration are brought back into
+  alignment with IdP claims.
+- `oidc_role_drift_detected` – emitted when a token asserts roles that exceed a
+  manually managed credential's permissions.
+
+Administrators can permanently block a subject by revoking the credential; the
+controller refuses to re-provision any subject with a revoked record on file,
+ensuring revocation is authoritative even when upstream group membership still
+matches.
 
 ## Roles
 
