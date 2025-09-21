@@ -84,15 +84,24 @@ matches.
 
 The following baseline roles are supported:
 
-| Role              | Capabilities                                                                                             |
-|-------------------|----------------------------------------------------------------------------------------------------------|
-| `admin`           | Full access to every controller route (implicit superset of other roles).                                |
-| `analyst`         | Composite role bundling read permissions plus workflow mutation (comments, assignments, status updates). |
-| `findings:read`   | Permission to list findings via `GET /findings` along with timeline analytics and related read-only data. |
-| `scans:read`      | Permission to enumerate scans via `GET /scans` and retrieve their metadata.                              |
-| `targets:read`    | Permission to list authorized targets via `GET /targets` for scope validation.                            |
-| `scan:enqueue`    | Permission to enqueue scans via `POST /scan`.                                                             |
-| `targets:write`   | Permission to create and manage targets via `POST /targets`.                                              |
+| Role                        | Capabilities |
+|-----------------------------|---------------|
+| `admin`                     | Full access to every controller route (implicit superset of other roles). |
+| `analyst`                   | Composite role layering findings workflow mutations (assignment, status, tagging, comments) on top of read scopes surfaced in the Operations Console. See [Analyst Workflow](REPORTING.md#analyst-workflow). |
+| `findings:read`             | View normalized findings, timelines, validations, and linked tickets via `GET /findings` and related endpoints. See [Findings Schema](interfaces/FINDINGS.md). |
+| `scans:read`                | Enumerate historical scans and inspect metadata through `GET /scans` for situational awareness. |
+| `scan:enqueue`              | Launch approved network scans (`POST /scan`) including nuclei, ZAP, and SQLMap presets. |
+| `binary:preprocess`         | Queue binary preprocessing jobs (`POST /preprocess`) for artifact intake. See [Binary Preprocessing Workflow](BINARY.md). |
+| `binary:static-analysis`    | Schedule binary static analysis workers (`POST /binary/static-analysis`) for deterministic tooling. See [Binary Preprocessing Workflow](BINARY.md#static-analysis-worker). |
+| `binary:fuzzing`            | Queue binary fuzzing workloads (`POST /binary/fuzzing`) that drive AFL/libFuzzer harnesses. See [Binary Preprocessing Workflow](BINARY.md#fuzzing-worker). |
+| `binary:symbolic-execution` | Queue angr symbolic execution workloads (`POST /binary/symbolic-execution`) once the worker is deployed to guard advanced binary workflows. See [Binary Preprocessing Workflow](BINARY.md#phase-four-introduces-the-angr-symbolic-execution-worker). |
+| `targets:read`              | List authorized targets via `GET /targets` to confirm scan scope before execution. |
+| `targets:write`             | Register or update targets (`POST /targets`) to expand or revoke authorized scope. |
+| `enrich:enqueue`            | Trigger CVE enrichment jobs for findings (`POST /enrich`) as described in [CVE Enrichment Job Contract](interfaces/ENRICHMENT_CVE.md). |
+| `validation:enqueue`        | Submit validation retests for findings (`POST /validate`) to confirm remediation. See [Validation Lifecycle](interfaces/FINDINGS.md#validation-lifecycle). |
+| `report:export`             | Generate analyst reports through `POST /reports/export`; must be paired with `findings:read`. See [Export Pipeline](REPORTING.md#export-pipeline). |
+| `ticket:create`             | Create outbound tickets (`POST /tickets/jira`, `POST /tickets/github`) with immutable audit trails. See [Ticketing](REPORTING.md#ticketing). |
+| `recon:enqueue`             | Schedule reconnaissance jobs (`POST /recon/jobs`) for inventory discovery. See [Recon Job & Callback Schema](interfaces/RECON.md). |
 
 Routes can require multiple roles; holding `admin` always satisfies the
 requirement. The `admin` role remains a superset of `targets:write` and
@@ -111,6 +120,17 @@ back to this section for reference.
 - **Findings workspace** – Viewing normalized findings and their timeline
   analytics requires `findings:read`. Editing workflows (assignment, status,
   tagging, and comments) additionally requires the composite `analyst` role.
+- **Reporting exports** – Downloading PDF/HTML reports prompts for `report:export`
+  alongside `findings:read`. The UI links to [Export Pipeline](REPORTING.md#export-pipeline)
+  for expected output formats.
+- **Ticket integrations** – Launching JIRA or GitHub tickets from the findings
+  drawer requires `ticket:create` with `findings:read`, mirroring the API
+  contract in [Ticketing](REPORTING.md#ticketing).
+- **Validation retests** – Requesting a retest from the findings panel requires
+  `validation:enqueue` to queue the validator worker and surfaces guidance from
+  the [Validation Lifecycle](interfaces/FINDINGS.md#validation-lifecycle).
+- **Recon scheduling** – Initiating recon jobs from the recon console requires
+  `recon:enqueue`; inline help references the [Recon Job & Callback Schema](interfaces/RECON.md).
 
 ## Enforcement Points
 
@@ -119,11 +139,14 @@ back to this section for reference.
 - `GET /findings` – requires `findings:read` (or `admin`).
 - `GET /audit-log` – requires `admin`. This route exposes sensitive telemetry
   about every privileged operation and must stay locked down.
+- `POST /reports/export` – requires `report:export` **and** `findings:read` (or
+  `admin`).
+- `POST /tickets/jira` and `/tickets/github` – require `ticket:create` **and**
+  `findings:read` (or `admin`).
+- `POST /validate` – requires `validation:enqueue` (or `admin`).
+- `POST /recon/jobs` – requires `recon:enqueue` (or `admin`).
 
-Each RBAC decision—successful authorizations and explicit denials—is recorded
-via the audit logging pipeline. This ensures post-incident review includes both
-the sensitive operations that executed and the attempts that were blocked for
-missing roles or revoked credentials.
+Each RBAC decision—successful authorizations and explicit denials—is recorded via the audit logging pipeline. This ensures post-incident review includes both the sensitive operations that executed and the attempts that were blocked for missing roles or revoked credentials.
 
 ### Request Rate Limiting
 
