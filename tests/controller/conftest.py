@@ -92,7 +92,9 @@ def client():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    TestingSessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
+    TestingSessionLocal = sessionmaker(
+        bind=engine, expire_on_commit=False, class_=Session
+    )
     Base.metadata.create_all(bind=engine)
 
     with TestingSessionLocal() as session:
@@ -104,6 +106,7 @@ def client():
                     key_hash=_hash_secret("test-key"),
                     roles=list(DEFAULT_ADMIN_ROLES),
                     description="Controller admin",
+                    source="manual",
                 ),
                 PrincipalCredential(
                     subject="svc-analyst",
@@ -111,18 +114,21 @@ def client():
                     key_hash=_hash_secret("analyst-key"),
                     roles=list(DEFAULT_ANALYST_ROLES),
                     description="Read-only analyst",
+                    source="manual",
                 ),
                 PrincipalCredential(
                     subject="jwt-admin",
                     auth_method="jwt",
                     roles=["admin"],
                     description="JWT admin",
+                    source="manual",
                 ),
                 PrincipalCredential(
                     subject="jwt-analyst",
                     auth_method="jwt",
                     roles=["analyst"],
                     description="JWT analyst",
+                    source="manual",
                 ),
             ]
         )

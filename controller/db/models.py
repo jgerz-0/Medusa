@@ -587,9 +587,7 @@ class BinaryFuzzingFinding(TimestampMixin, Base):
 
 
 @event.listens_for(ReconDiscovery, "before_insert", propagate=True)
-def _recon_discovery_prepare_insert(
-    mapper, connection, target: ReconDiscovery
-) -> None:
+def _recon_discovery_prepare_insert(mapper, connection, target: ReconDiscovery) -> None:
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.status = _normalize_recon_status(target.status)
     if target.asset_type:
@@ -617,9 +615,7 @@ def _recon_discovery_prepare_insert(
 
 
 @event.listens_for(ReconDiscovery, "before_update", propagate=True)
-def _recon_discovery_prepare_update(
-    mapper, connection, target: ReconDiscovery
-) -> None:
+def _recon_discovery_prepare_update(mapper, connection, target: ReconDiscovery) -> None:
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.status = _normalize_recon_status(target.status)
     if target.asset_type:
@@ -972,6 +968,10 @@ class PrincipalCredential(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), default=func.now(), nullable=False
     )
+    expires_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     revoked_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    source: Mapped[str] = mapped_column(String(64), default="manual", nullable=False)

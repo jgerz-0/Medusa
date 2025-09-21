@@ -13,7 +13,7 @@ import textwrap
 import time
 import uuid
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from io import BytesIO
 from functools import lru_cache
@@ -782,6 +782,45 @@ class Settings(BaseSettings):
         ge=1,
         description="Timeout in seconds for JWKS retrieval requests.",
     )
+    oidc_auto_provision: bool = Field(
+        default=False,
+        description=(
+            "Automatically create or update OIDC principals using identity-provider"
+            " group mappings when enabled."
+        ),
+    )
+    oidc_auto_provision_allowed_issuers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Allow-list of OIDC issuers permitted to auto-provision principals."
+        ),
+    )
+    oidc_group_claim: str = Field(
+        default="groups",
+        min_length=1,
+        description=(
+            "Claim containing IdP groups used for automatic role assignments."
+        ),
+    )
+    oidc_group_role_map: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of identity-provider groups to Medusa roles for auto-provisioning."
+        ),
+    )
+    oidc_auto_provision_role_allow_list: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Subset of Medusa roles that may be granted during OIDC auto-provisioning."
+        ),
+    )
+    oidc_auto_provision_expires_in_seconds: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional TTL applied to auto-provisioned principals (seconds from last login)."
+        ),
+    )
     rate_limit_max_requests: int = Field(
         default=300,
         ge=0,
@@ -796,6 +835,93 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Subjects exempt from rate limiting (e.g., automation principals).",
     )
+
+    @field_validator("oidc_auto_provision_allowed_issuers", mode="before")
+    @classmethod
+    def _normalize_oidc_allowed_issuers(
+        cls, value: Optional[Iterable[str]]
+    ) -> List[str]:
+        issuers: List[str] = []
+        for issuer in value or []:
+            if isinstance(issuer, str):
+                candidate = issuer.strip()
+                if candidate:
+                    issuers.append(candidate)
+        return issuers
+
+    @field_validator("oidc_auto_provision_role_allow_list", mode="before")
+    @classmethod
+    def _normalize_auto_provision_roles(
+        cls, value: Optional[Iterable[str]]
+    ) -> List[str]:
+        roles: List[str] = []
+        seen: set[str] = set()
+        for role in value or []:
+            if isinstance(role, str):
+                candidate = role.strip()
+            elif isinstance(role, int):
+                candidate = str(role)
+            else:
+                candidate = ""
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                roles.append(candidate)
+        return roles
+
+    @field_validator("oidc_auto_provision_role_allow_list")
+    @classmethod
+    def _validate_auto_provision_roles(cls, value: List[str]) -> List[str]:
+        invalid = [role for role in value if role not in ALLOWED_ROLES]
+        if invalid:
+            raise ValueError(
+                "Unsupported roles configured for OIDC auto-provisioning: "
+                + ", ".join(sorted(invalid))
+            )
+        return value
+
+    @field_validator("oidc_group_role_map", mode="before")
+    @classmethod
+    def _normalize_group_role_map(
+        cls, value: Optional[Dict[str, Iterable[str]]]
+    ) -> Dict[str, List[str]]:
+        if not value:
+            return {}
+        normalized: Dict[str, List[str]] = {}
+        for raw_group, raw_roles in value.items():
+            group = str(raw_group).strip()
+            if not group:
+                continue
+            roles: List[str] = []
+            seen: set[str] = set()
+            for role in raw_roles or []:
+                if isinstance(role, str):
+                    candidate = role.strip()
+                elif isinstance(role, int):
+                    candidate = str(role)
+                else:
+                    candidate = ""
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    roles.append(candidate)
+            if roles:
+                normalized[group] = roles
+        return normalized
+
+    @field_validator("oidc_group_role_map")
+    @classmethod
+    def _validate_group_role_map(
+        cls, value: Dict[str, List[str]]
+    ) -> Dict[str, List[str]]:
+        validated: Dict[str, List[str]] = {}
+        for group, roles in value.items():
+            invalid = [role for role in roles if role not in ALLOWED_ROLES]
+            if invalid:
+                raise ValueError(
+                    f"Unsupported roles configured for group '{group}': "
+                    + ", ".join(sorted(invalid))
+                )
+            validated[group] = roles
+        return validated
 
     model_config = ConfigDict(env_prefix="MEDUSA_", case_sensitive=False)
 
@@ -892,6 +1018,16 @@ def _fingerprint_from_hash(key_hash: Optional[str]) -> Optional[str]:
     if not key_hash:
         return None
     return key_hash[:KEY_FINGERPRINT_LENGTH]
+
+
+def _normalize_timestamp(value: Optional[datetime]) -> Optional[datetime]:
+    """Coerce naive datetimes to UTC-aware timestamps."""
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _scope_to_network(scope: str) -> Optional[Network]:
@@ -1171,7 +1307,8 @@ class BinaryFuzzingRequest(BaseModel):
 
 class BinarySymbolicExecutionRequest(BaseModel):
     sample_id: str = Field(
-        ..., description="Identifier of the normalized binary sample to execute symbolically"
+        ...,
+        description="Identifier of the normalized binary sample to execute symbolically",
     )
     target_id: Optional[str] = Field(
         default=None,
@@ -1824,6 +1961,7 @@ class PrincipalCredentialCreateRequest(BaseModel):
     roles: List[str] = Field(default_factory=list)
     description: Optional[str] = Field(default=None, max_length=255)
     secret: Optional[str] = Field(default=None, min_length=8, max_length=255)
+    expires_at: Optional[datetime] = Field(default=None)
 
     @field_validator("roles", mode="before")
     @classmethod
@@ -1847,6 +1985,13 @@ class PrincipalCredentialCreateRequest(BaseModel):
             )
         return value
 
+    @field_validator("expires_at")
+    @classmethod
+    def _validate_expiration(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("expires_at must include timezone information")
+        return value
+
 
 class PrincipalCredentialResponse(BaseModel):
     id: int
@@ -1855,7 +2000,9 @@ class PrincipalCredentialResponse(BaseModel):
     roles: List[str] = Field(default_factory=list)
     description: Optional[str]
     created_at: datetime
+    expires_at: Optional[datetime]
     revoked_at: Optional[datetime]
+    source: str
     key_fingerprint: Optional[str] = Field(
         default=None,
         description=(
@@ -1988,6 +2135,7 @@ def _authenticate_api_key(
 
     api_key_hash = _hash_secret(candidate_api_key)
     fingerprint = _fingerprint_from_hash(api_key_hash)
+    now = datetime.now(tz=timezone.utc)
 
     if candidate_api_key in settings.api_keys:
         subject_hash = _hash_secret(candidate_api_key)
@@ -2007,6 +2155,30 @@ def _authenticate_api_key(
         .first()
     )
     if active_credential:
+        expires_at = _normalize_timestamp(active_credential.expires_at)
+        if expires_at and expires_at <= now:
+            expired_principal = Principal(
+                subject=active_credential.subject,
+                auth_method="api_key",
+                roles=list(active_credential.roles or []),
+            )
+            log_access_denied(
+                db,
+                principal=expired_principal,
+                required_roles=[],
+                resource_type="principal_credential",
+                resource_id=str(active_credential.id),
+                reason="credential_expired",
+                detail="API key expired",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                extra_metadata={
+                    "credential_id": str(active_credential.id),
+                    "credential_status": "expired",
+                    "key_fingerprint": fingerprint,
+                    "expires_at": expires_at.isoformat(),
+                    "api_key_source": source,
+                },
+            )
         return Principal(
             subject=active_credential.subject,
             auth_method="api_key",
@@ -2121,6 +2293,7 @@ def _authenticate_jwt(
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
+    now = datetime.now(tz=timezone.utc)
     record = (
         db.query(PrincipalCredential)
         .filter(
@@ -2145,6 +2318,29 @@ def _authenticate_jwt(
             reason="subject_not_authorized",
             detail="Subject not authorized",
             status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    expires_at = _normalize_timestamp(record.expires_at)
+    if expires_at and expires_at <= now:
+        expired_principal = Principal(
+            subject=record.subject,
+            auth_method="jwt",
+            roles=list(record.roles or []),
+        )
+        log_access_denied(
+            db,
+            principal=expired_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=str(record.id),
+            reason="credential_expired",
+            detail="JWT principal expired",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata={
+                "credential_id": str(record.id),
+                "credential_status": "expired",
+                "expires_at": expires_at.isoformat(),
+            },
         )
 
     roles = list(record.roles or [])
@@ -2202,12 +2398,60 @@ def _authenticate_oidc(
             extra_metadata={"claim": subject_claim},
         )
 
+    now = datetime.now(tz=timezone.utc)
     token_roles_claim = settings.oidc_roles_claim or validator.roles_claim
     raw_roles = payload.get(token_roles_claim) or []
     normalized_roles = [
         str(role).strip() for role in raw_roles if isinstance(role, (str, int))
     ]
     filtered_roles = [role for role in normalized_roles if role in ALLOWED_ROLES]
+
+    auto_allowed_roles = (
+        set(settings.oidc_auto_provision_role_allow_list)
+        if settings.oidc_auto_provision_role_allow_list
+        else set(ALLOWED_ROLES)
+    )
+    auto_roles_from_token = [
+        role for role in filtered_roles if role in auto_allowed_roles
+    ]
+
+    raw_groups: Any = None
+    if settings.oidc_group_claim:
+        raw_groups = payload.get(settings.oidc_group_claim)
+    groups: List[str] = []
+    if isinstance(raw_groups, str):
+        raw_groups = [raw_groups]
+    if isinstance(raw_groups, (list, tuple, set)):
+        for item in raw_groups:
+            if isinstance(item, (str, int)):
+                candidate = str(item).strip()
+                if candidate:
+                    groups.append(candidate)
+
+    mapped_roles: List[str] = []
+    for group in groups:
+        for medusa_role in settings.oidc_group_role_map.get(group, []):
+            if medusa_role in auto_allowed_roles:
+                mapped_roles.append(medusa_role)
+
+    desired_roles = sorted(set(auto_roles_from_token + mapped_roles))
+    issuer_value = str(payload.get("iss") or validator.issuer or "")
+    allowed_issuers = set(settings.oidc_auto_provision_allowed_issuers)
+    if settings.oidc_auto_provision and not allowed_issuers:
+        LOGGER.warning(
+            "OIDC auto-provision is enabled but no issuers are allow-listed",
+            extra={"subject": subject_value, "issuer": issuer_value},
+        )
+    issuer_allowed = bool(allowed_issuers) and issuer_value in allowed_issuers
+    auto_enabled = settings.oidc_auto_provision and issuer_allowed
+
+    metadata_base: Dict[str, Any] = {
+        "issuer": issuer_value,
+        "token_roles": filtered_roles,
+        "mapped_roles": sorted(set(mapped_roles)),
+        "groups": groups,
+        "kid": header.get("kid"),
+    }
 
     record = (
         db.query(PrincipalCredential)
@@ -2219,39 +2463,304 @@ def _authenticate_oidc(
         .first()
     )
     if record is None:
-        unauthorized_principal = Principal(
-            subject=str(subject_value),
+        revoked_record = (
+            db.query(PrincipalCredential)
+            .filter(
+                PrincipalCredential.auth_method == "oidc",
+                PrincipalCredential.subject == subject_value,
+                PrincipalCredential.revoked_at.isnot(None),
+            )
+            .order_by(PrincipalCredential.revoked_at.desc())
+            .first()
+        )
+        if revoked_record is not None:
+            revoked_principal = Principal(
+                subject=str(subject_value),
+                auth_method="oidc",
+                roles=list(revoked_record.roles or []),
+            )
+            revoked_metadata = dict(metadata_base)
+            revoked_metadata.update(
+                {
+                    "credential_id": str(revoked_record.id),
+                    "credential_status": "revoked",
+                    "revoked_at": (
+                        revoked_record.revoked_at.isoformat()
+                        if revoked_record.revoked_at
+                        else None
+                    ),
+                    "source": revoked_record.source,
+                }
+            )
+            log_access_denied(
+                db,
+                principal=revoked_principal,
+                required_roles=[],
+                resource_type="principal_credential",
+                resource_id=str(revoked_record.id),
+                reason="credential_revoked",
+                detail="OIDC credential revoked",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                extra_metadata=revoked_metadata,
+            )
+
+        if auto_enabled:
+            if not desired_roles:
+                unauthorized_principal = Principal(
+                    subject=str(subject_value),
+                    auth_method="oidc",
+                    roles=[],
+                )
+                deny_metadata = dict(metadata_base)
+                deny_metadata["issuer_allowed"] = issuer_allowed
+                log_access_denied(
+                    db,
+                    principal=unauthorized_principal,
+                    required_roles=[],
+                    resource_type="principal_credential",
+                    resource_id=None,
+                    reason="oidc_provisioning_no_roles",
+                    detail="OIDC token did not map to permitted roles",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    extra_metadata=deny_metadata,
+                )
+
+            expires_at = (
+                now + timedelta(seconds=settings.oidc_auto_provision_expires_in_seconds)
+                if settings.oidc_auto_provision_expires_in_seconds
+                else None
+            )
+            transaction = db.begin_nested() if db.in_transaction() else db.begin()
+            new_record = PrincipalCredential(
+                subject=subject_value,
+                auth_method="oidc",
+                roles=desired_roles,
+                description="Auto-provisioned via OIDC group mapping",
+                expires_at=expires_at,
+                source="oidc_auto",
+            )
+            try:
+                with transaction:
+                    db.add(new_record)
+            except SQLAlchemyError:
+                if db.in_transaction():
+                    db.rollback()
+                LOGGER.exception(
+                    "Failed to auto-provision OIDC principal",
+                    extra={"subject": subject_value, "issuer": issuer_value},
+                )
+                failure_principal = Principal(
+                    subject=str(subject_value),
+                    auth_method="oidc",
+                    roles=[],
+                )
+                failure_metadata = dict(metadata_base)
+                failure_metadata["issuer_allowed"] = issuer_allowed
+                log_access_denied(
+                    db,
+                    principal=failure_principal,
+                    required_roles=[],
+                    resource_type="principal_credential",
+                    resource_id=None,
+                    reason="oidc_provisioning_failed",
+                    detail="OIDC provisioning failed",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    extra_metadata=failure_metadata,
+                )
+
+            record = new_record
+            db.refresh(record)
+            provision_actor = Principal(
+                subject=record.subject,
+                auth_method="oidc",
+                roles=list(record.roles or []),
+            )
+            normalized_expiry = _normalize_timestamp(record.expires_at)
+            provision_metadata = dict(metadata_base)
+            provision_metadata.update(
+                {
+                    "credential_id": str(record.id),
+                    "assigned_roles": provision_actor.roles,
+                    "expires_at": (
+                        normalized_expiry.isoformat() if normalized_expiry else None
+                    ),
+                    "source": record.source,
+                }
+            )
+            record_audit_event(
+                db,
+                actor=provision_actor,
+                action="oidc_auto_provision",
+                resource_type="principal_credential",
+                resource_id=str(record.id),
+                metadata=provision_metadata,
+            )
+        else:
+            unauthorized_principal = Principal(
+                subject=str(subject_value),
+                auth_method="oidc",
+                roles=desired_roles or filtered_roles,
+            )
+            deny_metadata = dict(metadata_base)
+            deny_metadata["issuer_allowed"] = issuer_allowed
+            log_access_denied(
+                db,
+                principal=unauthorized_principal,
+                required_roles=[],
+                resource_type="principal_credential",
+                resource_id=None,
+                reason="subject_not_authorized",
+                detail="Subject not authorized",
+                status_code=status.HTTP_403_FORBIDDEN,
+                extra_metadata=deny_metadata,
+            )
+
+    stored_roles = list(record.roles or [])
+    stored_role_set = set(stored_roles)
+    desired_role_set = set(desired_roles)
+    current_expiry = _normalize_timestamp(record.expires_at)
+    new_expires_at = (
+        now + timedelta(seconds=settings.oidc_auto_provision_expires_in_seconds)
+        if settings.oidc_auto_provision_expires_in_seconds
+        else None
+    )
+
+    if auto_enabled and record.source == "oidc_auto":
+        needs_role_update = desired_role_set != stored_role_set
+        needs_expiry_update = (
+            settings.oidc_auto_provision_expires_in_seconds is not None
+            and current_expiry != new_expires_at
+        )
+        if needs_role_update or needs_expiry_update:
+            previous_roles = list(stored_roles)
+            transaction = db.begin_nested() if db.in_transaction() else db.begin()
+            try:
+                with transaction:
+                    if needs_role_update:
+                        record.roles = desired_roles
+                    if settings.oidc_auto_provision_expires_in_seconds is not None:
+                        record.expires_at = new_expires_at
+            except SQLAlchemyError:
+                if db.in_transaction():
+                    db.rollback()
+                LOGGER.exception(
+                    "Failed to synchronize OIDC roles",
+                    extra={"subject": subject_value, "issuer": issuer_value},
+                )
+                failure_principal = Principal(
+                    subject=record.subject,
+                    auth_method="oidc",
+                    roles=previous_roles,
+                )
+                failure_metadata = dict(metadata_base)
+                failure_metadata.update(
+                    {
+                        "credential_id": str(record.id),
+                        "previous_roles": previous_roles,
+                        "desired_roles": desired_roles,
+                    }
+                )
+                log_access_denied(
+                    db,
+                    principal=failure_principal,
+                    required_roles=[],
+                    resource_type="principal_credential",
+                    resource_id=str(record.id),
+                    reason="oidc_role_sync_failed",
+                    detail="OIDC role synchronization failed",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    extra_metadata=failure_metadata,
+                )
+
+            db.refresh(record)
+            sync_actor = Principal(
+                subject=record.subject,
+                auth_method="oidc",
+                roles=list(record.roles or []),
+            )
+            normalized_expiry = _normalize_timestamp(record.expires_at)
+            sync_metadata = dict(metadata_base)
+            sync_metadata.update(
+                {
+                    "credential_id": str(record.id),
+                    "previous_roles": stored_roles,
+                    "updated_roles": sync_actor.roles,
+                    "expires_at": (
+                        normalized_expiry.isoformat() if normalized_expiry else None
+                    ),
+                }
+            )
+            record_audit_event(
+                db,
+                actor=sync_actor,
+                action="oidc_role_sync",
+                resource_type="principal_credential",
+                resource_id=str(record.id),
+                metadata=sync_metadata,
+            )
+            stored_roles = sync_actor.roles
+            stored_role_set = set(stored_roles)
+    else:
+        token_union = set(filtered_roles) | set(mapped_roles)
+        if token_union and not token_union.issubset(stored_role_set):
+            drift_actor = Principal(
+                subject=record.subject,
+                auth_method="oidc",
+                roles=stored_roles,
+            )
+            drift_metadata = dict(metadata_base)
+            drift_metadata.update(
+                {
+                    "credential_id": str(record.id),
+                    "stored_roles": stored_roles,
+                    "token_roles": sorted(token_union),
+                }
+            )
+            record_audit_event(
+                db,
+                actor=drift_actor,
+                action="oidc_role_drift_detected",
+                resource_type="principal_credential",
+                resource_id=str(record.id),
+                metadata=drift_metadata,
+            )
+            LOGGER.info(
+                "OIDC token roles exceed stored principal permissions",
+                extra={
+                    "subject": subject_value,
+                    "token_roles": sorted(token_union),
+                    "stored_roles": stored_roles,
+                },
+            )
+
+    expires_at = _normalize_timestamp(record.expires_at)
+    if expires_at and expires_at <= now:
+        expired_principal = Principal(
+            subject=record.subject,
             auth_method="oidc",
-            roles=filtered_roles,
+            roles=stored_roles,
+        )
+        expired_metadata = dict(metadata_base)
+        expired_metadata.update(
+            {
+                "credential_id": str(record.id),
+                "credential_status": "expired",
+                "expires_at": expires_at.isoformat(),
+            }
         )
         log_access_denied(
             db,
-            principal=unauthorized_principal,
+            principal=expired_principal,
             required_roles=[],
             resource_type="principal_credential",
-            resource_id=None,
-            reason="subject_not_authorized",
-            detail="Subject not authorized",
-            status_code=status.HTTP_403_FORBIDDEN,
-            extra_metadata={
-                "issuer": validator.issuer,
-                "token_roles": filtered_roles,
-                "kid": header.get("kid"),
-            },
+            resource_id=str(record.id),
+            reason="credential_expired",
+            detail="OIDC principal expired",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            extra_metadata=expired_metadata,
         )
 
-    roles = list(record.roles or [])
-    if filtered_roles and not set(filtered_roles).issubset(set(roles)):
-        LOGGER.info(
-            "OIDC token roles exceed stored principal permissions",
-            extra={
-                "subject": subject_value,
-                "token_roles": filtered_roles,
-                "stored_roles": roles,
-            },
-        )
-
-    return Principal(subject=record.subject, auth_method="oidc", roles=roles)
+    return Principal(subject=record.subject, auth_method="oidc", roles=stored_roles)
 
 
 def enforce_request_rate_limit(
@@ -2846,6 +3355,8 @@ def create_principal_credential(
         key_hash=key_hash,
         roles=assigned_roles,
         description=request.description,
+        expires_at=request.expires_at,
+        source="manual",
     )
     db.add(credential)
     db.commit()
@@ -3015,9 +3526,7 @@ def list_targets(
     )
 
 
-def _coerce_recon_timestamp(
-    value: Optional[datetime], fallback: datetime
-) -> datetime:
+def _coerce_recon_timestamp(value: Optional[datetime], fallback: datetime) -> datetime:
     candidate = value or fallback
     if candidate.tzinfo is None:
         candidate = candidate.replace(tzinfo=timezone.utc)
@@ -3046,9 +3555,9 @@ def _aggregate_recon_assets(
                 "asset_type": asset.asset_type,
                 "value": normalized,
                 "raw_value": asset.raw_value.strip() if asset.raw_value else None,
-                "matched_scope": asset.matched_scope.strip()
-                if asset.matched_scope
-                else None,
+                "matched_scope": (
+                    asset.matched_scope.strip() if asset.matched_scope else None
+                ),
                 "metadata": dict(metadata_payload),
                 "first_seen": first_seen,
                 "last_seen": last_seen,
@@ -3056,7 +3565,9 @@ def _aggregate_recon_assets(
             }
             continue
 
-        existing_first = _coerce_recon_timestamp(existing.get("first_seen"), retrieved_at)
+        existing_first = _coerce_recon_timestamp(
+            existing.get("first_seen"), retrieved_at
+        )
         existing_last = _coerce_recon_timestamp(existing.get("last_seen"), retrieved_at)
 
         existing["occurrences"] += occurrences
@@ -3182,7 +3693,10 @@ def _scope_within(candidate: str, reference: str) -> bool:
         except ValueError:
             return False
         return candidate_ip in reference_network
-    return candidate_network.subnet_of(reference_network) or candidate_network == reference_network
+    return (
+        candidate_network.subnet_of(reference_network)
+        or candidate_network == reference_network
+    )
 
 
 def _upsert_recon_discovery(
@@ -3355,9 +3869,8 @@ def approve_recon_discovery(
             detail="Discovery asset does not fall within the requested scope",
         )
 
-    if (
-        discovery.matched_scope
-        and not _scope_within(requested_scope, discovery.matched_scope)
+    if discovery.matched_scope and not _scope_within(
+        requested_scope, discovery.matched_scope
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
