@@ -141,6 +141,23 @@ workers:
       defaultLevel: 1
       extra: []
 
+  recon:
+    enabled: true
+    image:
+      repository: medusa/worker-recon
+      tag: latest
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        RECON_QUEUE_KEY: MEDUSA_RECON_QUEUE_CHANNEL
+        RECON_DEAD_LETTER_KEY: RECON_DEAD_LETTER_KEY
+        RECON_CALLBACK_TOKEN: RECON_CALLBACK_TOKEN
+      values:
+        RECON_POLL_TIMEOUT: "2"
+        RECON_MAX_RETRIES: "3"
+        RECON_HTTP_TIMEOUT: "10"
+      extra: []
+
   validator:
     image:
       repository: medusa/worker-validator

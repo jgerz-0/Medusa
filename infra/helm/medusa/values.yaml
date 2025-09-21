@@ -40,6 +40,11 @@ secrets:
     SQLMAP_CALLBACK_TOKEN: "change-me"
     MEDUSA_ENRICHMENT_CALLBACK_TOKEN: "change-me"
     MEDUSA_VALIDATOR_CALLBACK_TOKEN: "change-me"
+    MEDUSA_RECON_QUEUE_CHANNEL: "queues:recon:jobs"
+    RECON_QUEUE_KEY: "queues:recon:jobs"
+    RECON_DEAD_LETTER_KEY: "queues:recon:dead"
+    MEDUSA_RECON_CALLBACK_TOKEN: "change-me"
+    RECON_CALLBACK_TOKEN: "change-me"
     MEDUSA_JWT_SECRET: "change-me"
     MINIO_ROOT_USER: "medusaadmin"
     MINIO_ROOT_PASSWORD: "medusaadmin123"
@@ -476,6 +481,64 @@ workers:
       limits:
         cpu: 500m
         memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
+  recon:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-recon
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: recon-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        REDIS_URL: MEDUSA_REDIS_URL
+        RECON_QUEUE_KEY: MEDUSA_RECON_QUEUE_CHANNEL
+        RECON_DEAD_LETTER_KEY: RECON_DEAD_LETTER_KEY
+        RECON_CALLBACK_TOKEN: RECON_CALLBACK_TOKEN
+      values:
+        RECON_POLL_TIMEOUT: "5"
+        RECON_MAX_RETRIES: "3"
+        RECON_HTTP_TIMEOUT: "10"
+      extra: []
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
     securityContext:
       runAsNonRoot: true
       runAsUser: 1000

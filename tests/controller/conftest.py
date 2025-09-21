@@ -80,6 +80,8 @@ def client():
         binary_static_analysis_callback_token="static-secret",
         binary_fuzzing_queue_channel="test-binary-fuzzing",
         binary_fuzzing_callback_token="fuzzing-secret",
+        recon_queue_channel="test-recon",
+        recon_callback_token="recon-secret",
     )
 
     engine = create_engine(
