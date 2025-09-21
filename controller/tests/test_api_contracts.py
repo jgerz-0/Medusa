@@ -17,6 +17,7 @@ from controller.db.models import (
     BinaryFuzzingFinding,
     BinarySample,
     BinaryStaticAnalysisFinding,
+    BinarySymbolicExecutionFinding,
     Finding,
     FindingEnrichment,
     FindingValidation,
@@ -92,6 +93,8 @@ def api_client() -> (
         binary_static_analysis_callback_token="binary-static-secret",
         binary_fuzzing_queue_channel="binary-fuzzing:test",
         binary_fuzzing_callback_token="binary-fuzzing-secret",
+        binary_symbolic_execution_queue_channel="binary-symbolic:test",
+        binary_symbolic_execution_callback_token="binary-symbolic-secret",
         recon_queue_channel="recon:test",
         recon_callback_token="recon-secret",
     )
@@ -162,6 +165,10 @@ def binary_static_headers() -> dict[str, str]:
 
 def binary_fuzzing_headers() -> dict[str, str]:
     return {"X-Callback-Token": "binary-fuzzing-secret"}
+
+
+def binary_symbolic_headers() -> dict[str, str]:
+    return {"X-Callback-Token": "binary-symbolic-secret"}
 
 
 def anomaly_headers() -> dict[str, str]:
@@ -420,6 +427,76 @@ def test_static_analysis_enqueue_flow(
     assert job["metadata"]["target_id"] == target_payload["id"]
 
 
+def test_symbolic_execution_enqueue_flow(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, queue, session_factory, settings = api_client
+
+    target_response = client.post(
+        "/targets",
+        json={"name": "Firmware", "scope": "firmware.example.com"},
+        headers=auth_headers(),
+    )
+    assert target_response.status_code == 201, target_response.text
+    target_payload = target_response.json()
+
+    with session_factory() as session:
+        preprocess_scan = Scan(
+            target_id=target_payload["id"],
+            scanner="binary_preprocess",
+            initiated_by="tester",
+            status="completed",
+            parameters={},
+        )
+        session.add(preprocess_scan)
+        session.flush()
+
+        sample = BinarySample(
+            scan_id=preprocess_scan.id,
+            target_id=target_payload["id"],
+            file_name="sample.bin",
+            sha256="ef" * 32,
+            file_size=2048,
+            mime_type="application/octet-stream",
+            magic_type="ELF 64-bit",
+            policy_status="allowed",
+            policy_reasons=[],
+            storage_bucket="binary-uploads",
+            storage_key="uploads/sample.bin",
+            metadata_json={"sha256": "ef" * 32},
+            metadata_hash="",
+            processed_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(sample)
+        session.commit()
+        sample_id = sample.id
+
+    response = client.post(
+        "/binary/symbolic-execution",
+        json={
+            "sample_id": sample_id,
+            "target_id": target_payload["id"],
+            "analysis_depth": 256,
+            "timeout_seconds": 600,
+            "metadata": {"strategy": "dfs"},
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["scanner"] == "binary_symbolic_execution"
+
+    assert queue.messages, "symbolic execution enqueue should push a job"
+    channel, job = queue.messages[-1]
+    assert channel == settings.binary_symbolic_execution_queue_channel
+    assert job["sample_id"] == sample_id
+    assert job["metadata"]["analysis_depth"] == 256
+    assert job["metadata"]["timeout_seconds"] == 600
+    assert job["callback_url"].endswith(
+        "/internal/binary/symbolic-execution/callback"
+    )
+
+
 def test_binary_static_analysis_callback_persists_findings(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
@@ -527,6 +604,120 @@ def test_binary_static_analysis_callback_persists_findings(
         assert scan is not None
         assert scan.status == "completed"
         assert scan.completed_at is not None
+
+
+def test_binary_symbolic_execution_callback_persists_findings(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(
+            name="Firmware", scope="firmware.example.com", is_authorized=True
+        )
+        session.add(target)
+        session.flush()
+
+        preprocess_scan = Scan(
+            target_id=target.id,
+            scanner="binary_preprocess",
+            initiated_by="tester",
+            status="completed",
+            parameters={},
+        )
+        session.add(preprocess_scan)
+        session.flush()
+
+        sample = BinarySample(
+            scan_id=preprocess_scan.id,
+            target_id=target.id,
+            file_name="sample.bin",
+            sha256="12" * 32,
+            file_size=4096,
+            mime_type="application/octet-stream",
+            magic_type="ELF 64-bit",
+            policy_status="allowed",
+            policy_reasons=[],
+            storage_bucket="binary-uploads",
+            storage_key="uploads/sample.bin",
+            metadata_json={},
+            metadata_hash="",
+            processed_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(sample)
+        session.flush()
+
+        analysis_scan = Scan(
+            target_id=target.id,
+            scanner="binary_symbolic_execution",
+            initiated_by="tester",
+            status="running",
+            parameters={"sample_id": sample.id},
+        )
+        session.add(analysis_scan)
+        session.commit()
+
+        sample_id = sample.id
+        scan_id = analysis_scan.id
+
+    executed_at = datetime.now(tz=timezone.utc)
+    response = client.post(
+        "/internal/binary/symbolic-execution/callback",
+        json={
+            "job_id": "job-angr-1",
+            "scan_id": scan_id,
+            "sample_id": sample_id,
+            "status": "completed",
+            "processed_at": executed_at.isoformat(),
+            "findings": [
+                {
+                    "tool": "angr",
+                    "severity": "medium",
+                    "title": "Reachable strcpy",
+                    "description": "User controlled path to strcpy",
+                    "metadata": {"sink": "strcpy"},
+                    "evidence": {"input": "AAAA"},
+                    "artifact_bucket": "analysis",
+                    "artifact_key": "symbolic/path.json",
+                    "executed_at": executed_at.isoformat(),
+                }
+            ],
+            "artifacts": [
+                {
+                    "tool": "angr",
+                    "bucket": "analysis",
+                    "key": "symbolic/path.json",
+                }
+            ],
+            "reports": [
+                {
+                    "tool": "angr",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "stdout": "{}",
+                    "stderr": "",
+                    "raw_output": {"metadata": {"paths": 1}},
+                    "executed_at": executed_at.isoformat(),
+                    "duration_seconds": 2.5,
+                }
+            ],
+            "metadata": {"paths": 1},
+        },
+        headers=binary_symbolic_headers(),
+    )
+    assert response.status_code == 204, response.text
+
+    with session_factory() as session:
+        findings = (
+            session.query(BinarySymbolicExecutionFinding)
+            .filter(BinarySymbolicExecutionFinding.scan_id == scan_id)
+            .all()
+        )
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding.title == "Reachable strcpy"
+        assert finding.metadata_json["sink"] == "strcpy"
+        assert finding.scan_id == scan_id
 
 
 def test_binary_fuzzing_enqueue(
@@ -1906,6 +2097,7 @@ def test_principal_creation_validates_and_expands_roles(
             "binary:preprocess",
             "binary:static-analysis",
             "binary:fuzzing",
+            "binary:symbolic-execution",
             "targets:read",
             "enrich:enqueue",
             "validation:enqueue",
@@ -1934,6 +2126,7 @@ def test_principal_creation_validates_and_expands_roles(
             "binary:preprocess",
             "binary:static-analysis",
             "binary:fuzzing",
+            "binary:symbolic-execution",
             "targets:read",
             "targets:write",
             "enrich:enqueue",

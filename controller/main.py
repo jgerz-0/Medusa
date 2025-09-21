@@ -49,6 +49,7 @@ from controller.db.models import (
     AuditLog,
     AnomalyEvent,
     BinaryFuzzingFinding,
+    BinarySymbolicExecutionFinding,
     BinarySample,
     BinaryStaticAnalysisFinding,
     Finding,
@@ -91,6 +92,7 @@ ROLE_SCAN_ENQUEUE = "scan:enqueue"
 ROLE_BINARY_PREPROCESS_ENQUEUE = "binary:preprocess"
 ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE = "binary:static-analysis"
 ROLE_BINARY_FUZZING_ENQUEUE = "binary:fuzzing"
+ROLE_BINARY_SYMBOLIC_EXECUTION_ENQUEUE = "binary:symbolic-execution"
 ROLE_TARGETS_READ = "targets:read"
 ROLE_TARGETS_WRITE = "targets:write"
 ROLE_ENRICHMENT_ENQUEUE = "enrich:enqueue"
@@ -108,6 +110,7 @@ ALLOWED_ROLES = {
     ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE,
     ROLE_BINARY_FUZZING_ENQUEUE,
+    ROLE_BINARY_SYMBOLIC_EXECUTION_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -141,6 +144,7 @@ DEFAULT_ANALYST_ROLES = [
     ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE,
     ROLE_BINARY_FUZZING_ENQUEUE,
+    ROLE_BINARY_SYMBOLIC_EXECUTION_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_ENRICHMENT_ENQUEUE,
     ROLE_VALIDATION_ENQUEUE,
@@ -155,6 +159,7 @@ DEFAULT_ADMIN_ROLES = [
     ROLE_BINARY_PREPROCESS_ENQUEUE,
     ROLE_BINARY_STATIC_ANALYSIS_ENQUEUE,
     ROLE_BINARY_FUZZING_ENQUEUE,
+    ROLE_BINARY_SYMBOLIC_EXECUTION_ENQUEUE,
     ROLE_TARGETS_READ,
     ROLE_TARGETS_WRITE,
     ROLE_ENRICHMENT_ENQUEUE,
@@ -221,6 +226,7 @@ SCAN_TYPE_ZAP = "zap"
 SCAN_TYPE_SQLMAP = "sqlmap"
 SCAN_TYPE_BINARY_STATIC = "binary_static_analysis"
 SCAN_TYPE_BINARY_FUZZING = "binary_fuzzing"
+SCAN_TYPE_BINARY_SYMBOLIC = "binary_symbolic_execution"
 
 ALLOWED_SCANNERS: Tuple[str, ...] = (
     SCAN_TYPE_NUCLEI,
@@ -630,6 +636,10 @@ class Settings(BaseSettings):
         "queues:binary:fuzzing",
         description="Redis list channel for binary fuzzing jobs.",
     )
+    binary_symbolic_execution_queue_channel: str = Field(
+        "queues:binary:symbolic-execution",
+        description="Redis list channel for angr symbolic execution jobs.",
+    )
     cve_enrichment_qdrant_url: Optional[str] = Field(
         default=None,
         description="Base URL for the Qdrant vector collection used by enrichment workers.",
@@ -668,6 +678,10 @@ class Settings(BaseSettings):
     )
     binary_fuzzing_callback_token: str = Field(
         ..., description="Shared secret required for binary fuzzing worker callbacks."
+    )
+    binary_symbolic_execution_callback_token: str = Field(
+        ...,
+        description="Shared secret required for angr symbolic execution worker callbacks.",
     )
     slack_webhook_url: Optional[str] = Field(
         default=None,
@@ -1155,6 +1169,32 @@ class BinaryFuzzingRequest(BaseModel):
     )
 
 
+class BinarySymbolicExecutionRequest(BaseModel):
+    sample_id: str = Field(
+        ..., description="Identifier of the normalized binary sample to execute symbolically"
+    )
+    target_id: Optional[str] = Field(
+        default=None,
+        description="Optional assertion ensuring the sample belongs to the expected target",
+    )
+    analysis_depth: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=1_000_000,
+        description="Optional maximum number of basic blocks explored by angr",
+    )
+    timeout_seconds: Optional[int] = Field(
+        default=None,
+        ge=60,
+        le=7200,
+        description="Optional harness timeout override in seconds",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Operator-provided hints recorded with the symbolic execution job",
+    )
+
+
 class ScanResponse(BaseModel):
     id: str
     target_id: str
@@ -1294,6 +1334,53 @@ class FuzzingCallbackRequest(BaseModel):
     findings: List[FuzzingFindingPayload] = Field(default_factory=list)
     artifacts: List[FuzzingArtifactPayload] = Field(default_factory=list)
     runs: List[FuzzingRunPayload] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+
+
+class SymbolicExecutionArtifactPayload(BaseModel):
+    tool: str
+    bucket: str
+    key: str
+
+
+class SymbolicExecutionFindingPayload(BaseModel):
+    tool: str
+    severity: str
+    title: str
+    description: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    artifact_bucket: Optional[str] = None
+    artifact_key: Optional[str] = None
+    executed_at: datetime
+
+    @field_validator("severity")
+    @classmethod
+    def validate_severity(cls, value: str) -> str:
+        return normalize_severity(value)
+
+
+class SymbolicExecutionReportPayload(BaseModel):
+    tool: str
+    status: Literal["completed", "failed"]
+    exit_code: int
+    stdout: str
+    stderr: str
+    raw_output: Dict[str, Any] = Field(default_factory=dict)
+    executed_at: Optional[datetime] = None
+    duration_seconds: Optional[float] = None
+
+
+class SymbolicExecutionCallbackRequest(BaseModel):
+    job_id: str
+    scan_id: str
+    sample_id: str
+    status: Literal["completed", "failed"]
+    processed_at: datetime
+    findings: List[SymbolicExecutionFindingPayload] = Field(default_factory=list)
+    artifacts: List[SymbolicExecutionArtifactPayload] = Field(default_factory=list)
+    reports: List[SymbolicExecutionReportPayload] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
 
@@ -1463,7 +1550,7 @@ class FindingResponse(BaseModel):
     scanner: str
     sample_id: Optional[str] = None
     tool: Optional[str] = None
-    category: Literal["web", "binary_static", "binary_fuzzing"]
+    category: Literal["web", "binary_static", "binary_fuzzing", "binary_symbolic"]
     assigned_to: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     comment_count: int = 0
@@ -2421,6 +2508,22 @@ def authenticate_binary_fuzzing_worker(
         subject="worker:binary-fuzzing",
         db=db,
         resource_id="binary-fuzzing",
+    )
+
+
+def authenticate_binary_symbolic_worker(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db_session),
+) -> Principal:
+    """Authenticate binary symbolic execution worker callbacks."""
+
+    return _authenticate_callback_worker(
+        request,
+        expected_token=settings.binary_symbolic_execution_callback_token,
+        subject="worker:binary-symbolic-execution",
+        db=db,
+        resource_id="binary-symbolic-execution",
     )
 
 
@@ -3802,6 +3905,139 @@ def enqueue_binary_static_analysis(
 
 
 @app.post(
+    "/binary/symbolic-execution",
+    response_model=ScanResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_binary_symbolic_execution(
+    request: BinarySymbolicExecutionRequest,
+    http_request: Request,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
+) -> ScanResponse:
+    """Queue an angr symbolic execution job for a normalized sample."""
+
+    enforce_roles(
+        principal,
+        [ROLE_BINARY_SYMBOLIC_EXECUTION_ENQUEUE],
+        db,
+        resource_type="endpoint",
+        resource_id="/binary/symbolic-execution",
+    )
+
+    sample = db.get(BinarySample, request.sample_id)
+    if sample is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Sample not found"
+        )
+
+    if request.target_id and request.target_id != sample.target_id:
+        record_audit_event(
+            db,
+            actor=principal,
+            action="symbolic_execution_target_mismatch",
+            resource_type="binary_sample",
+            resource_id=sample.id,
+            scan_id=None,
+            metadata={
+                "provided_target_id": request.target_id,
+                "expected_target_id": sample.target_id,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sample does not belong to the asserted target",
+        )
+
+    target = db.get(Target, sample.target_id)
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Target not found"
+        )
+
+    scan_parameters: Dict[str, Any] = {
+        "sample_id": sample.id,
+        "storage_bucket": sample.storage_bucket,
+        "storage_key": sample.storage_key,
+        "file_name": sample.file_name,
+    }
+    if request.analysis_depth is not None:
+        scan_parameters["analysis_depth"] = request.analysis_depth
+    if request.timeout_seconds is not None:
+        scan_parameters["timeout_seconds"] = request.timeout_seconds
+    if request.metadata:
+        scan_parameters["metadata"] = request.metadata
+
+    scan = Scan(
+        target_id=sample.target_id,
+        scanner=SCAN_TYPE_BINARY_SYMBOLIC,
+        parameters=scan_parameters,
+        initiated_by=principal.subject,
+    )
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+
+    submitted_at = datetime.now(tz=timezone.utc)
+    job_id = str(uuid.uuid4())
+    callback_url = str(http_request.url_for("binary_symbolic_execution_callback"))
+
+    job_metadata: Dict[str, Any] = {
+        "scan_id": str(scan.id),
+        "sample_id": sample.id,
+        "target_id": sample.target_id,
+        "target_scope": target.scope,
+        "initiated_by": principal.subject,
+        "submitted_at": submitted_at.isoformat(),
+    }
+    if request.analysis_depth is not None:
+        job_metadata["analysis_depth"] = request.analysis_depth
+    if request.timeout_seconds is not None:
+        job_metadata["timeout_seconds"] = request.timeout_seconds
+    if request.metadata:
+        job_metadata["analyst_metadata"] = request.metadata
+
+    job_payload = {
+        "job_id": job_id,
+        "scan_id": str(scan.id),
+        "sample_id": sample.id,
+        "target_id": sample.target_id,
+        "object_bucket": sample.storage_bucket,
+        "object_key": sample.storage_key,
+        "file_name": sample.file_name,
+        "callback_url": callback_url,
+        "attempts": 0,
+        "submitted_at": submitted_at.isoformat(),
+        "metadata": job_metadata,
+    }
+
+    queue.enqueue(settings.binary_symbolic_execution_queue_channel, job_payload)
+
+    metrics.record_job_enqueued(SCAN_TYPE_BINARY_SYMBOLIC)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="enqueue_binary_symbolic_execution",
+        resource_type="scan",
+        resource_id=scan.id,
+        scan_id=scan.id,
+        metadata={
+            "sample_id": sample.id,
+            "job_id": job_id,
+            "object_bucket": sample.storage_bucket,
+            "object_key": sample.storage_key,
+            "analysis_depth": request.analysis_depth,
+            "timeout_seconds": request.timeout_seconds,
+        },
+    )
+
+    return serialize_scan(scan)
+
+
+@app.post(
     "/binary/fuzzing",
     response_model=ScanResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -4534,6 +4770,89 @@ def _persist_binary_fuzzing_callback(
     return scan, sample, findings_count
 
 
+def _persist_binary_symbolic_callback(
+    *, db: Session, payload: SymbolicExecutionCallbackRequest
+) -> Tuple[Scan, BinarySample, int]:
+    scan = db.get(Scan, payload.scan_id)
+    if scan is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found"
+        )
+    if scan.scanner != SCAN_TYPE_BINARY_SYMBOLIC:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Scan is not assigned to binary symbolic execution",
+        )
+
+    sample = db.get(BinarySample, payload.sample_id)
+    if sample is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Sample not found"
+        )
+    if sample.target_id != scan.target_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Sample target does not match scan target",
+        )
+
+    existing = (
+        db.query(BinarySymbolicExecutionFinding)
+        .filter(
+            BinarySymbolicExecutionFinding.scan_id == scan.id,
+            BinarySymbolicExecutionFinding.job_id == payload.job_id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Symbolic execution findings already recorded for this job",
+        )
+
+    if scan.started_at is None:
+        scan.started_at = payload.processed_at
+    scan.status = payload.status
+    if payload.status in {"completed", "failed"}:
+        scan.completed_at = payload.processed_at
+
+    findings_count = 0
+    for finding_payload in payload.findings:
+        metadata_payload = deepcopy(_normalize_payload(finding_payload.metadata))
+        evidence_payload = deepcopy(_normalize_payload(finding_payload.evidence))
+        record = BinarySymbolicExecutionFinding(
+            sample_id=sample.id,
+            scan_id=scan.id,
+            job_id=payload.job_id,
+            tool=finding_payload.tool,
+            severity=finding_payload.severity,
+            title=finding_payload.title,
+            description=finding_payload.description,
+            metadata_json=metadata_payload,
+            evidence=evidence_payload,
+            evidence_hash="",
+            artifact_bucket=finding_payload.artifact_bucket,
+            artifact_key=finding_payload.artifact_key,
+            executed_at=finding_payload.executed_at,
+        )
+        db.add(record)
+        findings_count += 1
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:  # pragma: no cover - defensive path
+        db.rollback()
+        LOGGER.exception(
+            "Failed to persist binary symbolic execution callback",
+            extra={"scan_id": scan.id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist binary symbolic execution callback",
+        ) from exc
+
+    return scan, sample, findings_count
+
+
 @app.post(
     "/internal/recon",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -5084,6 +5403,44 @@ def binary_fuzzing_callback(
 
 
 @app.post(
+    "/internal/binary/symbolic-execution/callback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def binary_symbolic_execution_callback(
+    payload: SymbolicExecutionCallbackRequest,
+    principal: Principal = Depends(authenticate_binary_symbolic_worker),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Persist angr symbolic execution findings and emit audit metadata."""
+
+    scan, sample, findings_persisted = _persist_binary_symbolic_callback(
+        db=db,
+        payload=payload,
+    )
+
+    metrics.record_worker_callback(SCAN_TYPE_BINARY_SYMBOLIC, findings_persisted)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="binary_symbolic_execution_callback",
+        resource_type="scan",
+        resource_id=str(scan.id),
+        scan_id=scan.id,
+        metadata={
+            "status": payload.status,
+            "findings_count": findings_persisted,
+            "job_id": payload.job_id,
+            "sample_id": sample.id,
+        },
+        message=payload.error,
+    )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
     "/internal/enrich/callback",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
@@ -5261,6 +5618,7 @@ def _retrieve_finding_records(
 ) -> Tuple[
     List[Finding],
     List[BinaryStaticAnalysisFinding],
+    List[BinarySymbolicExecutionFinding],
     List[BinaryFuzzingFinding],
 ]:
     query = db.query(Finding).options(
@@ -5279,6 +5637,9 @@ def _retrieve_finding_records(
     static_query = db.query(BinaryStaticAnalysisFinding).options(
         selectinload(BinaryStaticAnalysisFinding.scan)
     )
+    symbolic_query = db.query(BinarySymbolicExecutionFinding).options(
+        selectinload(BinarySymbolicExecutionFinding.scan)
+    )
     fuzzing_query = db.query(BinaryFuzzingFinding).options(
         selectinload(BinaryFuzzingFinding.scan)
     )
@@ -5287,11 +5648,17 @@ def _retrieve_finding_records(
         static_query = static_query.filter(
             BinaryStaticAnalysisFinding.scan_id == scan_id
         )
+        symbolic_query = symbolic_query.filter(
+            BinarySymbolicExecutionFinding.scan_id == scan_id
+        )
         fuzzing_query = fuzzing_query.filter(BinaryFuzzingFinding.scan_id == scan_id)
     elif target_id is not None:
         static_query = static_query.join(BinaryStaticAnalysisFinding.scan).filter(
             Scan.target_id == target_id
         )
+        symbolic_query = symbolic_query.join(
+            BinarySymbolicExecutionFinding.scan
+        ).filter(Scan.target_id == target_id)
         fuzzing_query = fuzzing_query.join(BinaryFuzzingFinding.scan).filter(
             Scan.target_id == target_id
         )
@@ -5299,11 +5666,14 @@ def _retrieve_finding_records(
     static_findings = static_query.order_by(
         BinaryStaticAnalysisFinding.executed_at.desc()
     ).all()
+    symbolic_findings = symbolic_query.order_by(
+        BinarySymbolicExecutionFinding.executed_at.desc()
+    ).all()
     fuzzing_findings = fuzzing_query.order_by(
         BinaryFuzzingFinding.executed_at.desc()
     ).all()
 
-    return findings, static_findings, fuzzing_findings
+    return findings, static_findings, symbolic_findings, fuzzing_findings
 
 
 def _get_mutable_finding(db: Session, finding_id: str) -> Finding:
@@ -5568,15 +5938,22 @@ def list_findings(
         resource_id="/findings",
     )
 
-    findings, static_findings, fuzzing_findings = _retrieve_finding_records(
-        db, target_id=target_id, scan_id=scan_id
-    )
+    (
+        findings,
+        static_findings,
+        symbolic_findings,
+        fuzzing_findings,
+    ) = _retrieve_finding_records(db, target_id=target_id, scan_id=scan_id)
 
     aggregated: List[Tuple[datetime, FindingResponse]] = []
     for record in findings:
         aggregated.append((record.created_at, serialize_finding(record)))
     for record in static_findings:
         aggregated.append((record.executed_at, serialize_binary_static_finding(record)))
+    for record in symbolic_findings:
+        aggregated.append(
+            (record.executed_at, serialize_binary_symbolic_finding(record))
+        )
     for record in fuzzing_findings:
         aggregated.append(
             (record.executed_at, serialize_binary_fuzzing_finding(record))
@@ -5600,6 +5977,9 @@ def list_findings(
 
     web_count = sum(1 for record in filtered if record.category == "web")
     static_count = sum(1 for record in filtered if record.category == "binary_static")
+    symbolic_count = sum(
+        1 for record in filtered if record.category == "binary_symbolic"
+    )
     fuzzing_count = sum(1 for record in filtered if record.category == "binary_fuzzing")
 
     record_audit_event(
@@ -5614,6 +5994,7 @@ def list_findings(
             "count": len(filtered),
             "web_count": web_count,
             "binary_static_count": static_count,
+            "binary_symbolic_count": symbolic_count,
             "binary_fuzzing_count": fuzzing_count,
             "filters": metadata_filters,
         },
@@ -5645,15 +6026,22 @@ def list_findings_timeline(
         resource_id="/findings/timeline",
     )
 
-    findings, static_findings, fuzzing_findings = _retrieve_finding_records(
-        db, target_id=target_id, scan_id=scan_id
-    )
+    (
+        findings,
+        static_findings,
+        symbolic_findings,
+        fuzzing_findings,
+    ) = _retrieve_finding_records(db, target_id=target_id, scan_id=scan_id)
 
     aggregated: List[Tuple[datetime, FindingResponse]] = []
     for record in findings:
         aggregated.append((record.created_at, serialize_finding(record)))
     for record in static_findings:
         aggregated.append((record.executed_at, serialize_binary_static_finding(record)))
+    for record in symbolic_findings:
+        aggregated.append(
+            (record.executed_at, serialize_binary_symbolic_finding(record))
+        )
     for record in fuzzing_findings:
         aggregated.append(
             (record.executed_at, serialize_binary_fuzzing_finding(record))
@@ -5771,6 +6159,24 @@ def get_finding(
             },
         )
         return FindingItemResponse(data=serialize_binary_static_finding(static_record))
+
+    symbolic_record = db.get(BinarySymbolicExecutionFinding, finding_id)
+    if symbolic_record is not None:
+        record_audit_event(
+            db,
+            actor=principal,
+            action="get_binary_symbolic_finding",
+            resource_type="finding",
+            resource_id=finding_id,
+            finding_id=finding_id,
+            metadata={
+                "scan_id": symbolic_record.scan_id,
+                "category": "binary_symbolic",
+            },
+        )
+        return FindingItemResponse(
+            data=serialize_binary_symbolic_finding(symbolic_record)
+        )
 
     fuzz_record = db.get(BinaryFuzzingFinding, finding_id)
     if fuzz_record is not None:
@@ -6344,6 +6750,7 @@ def serialize_scan(scan: Scan) -> ScanResponse:
     findings_count = (
         len(scan.findings)
         + len(scan.binary_analysis_findings)
+        + len(scan.binary_symbolic_execution_findings)
         + len(scan.binary_fuzzing_findings)
     )
 
@@ -6671,6 +7078,64 @@ def serialize_binary_static_finding(
         sample_id=str(record.sample_id),
         tool=record.tool,
         category="binary_static",
+        assigned_to=None,
+        tags=[],
+        comment_count=0,
+        tickets=[],
+        validation_status="pending",
+        validated_at=None,
+        validations=[],
+        cvss=_severity_to_cvss(record.severity),
+        scope_status=FINDING_SCOPE_STATUS_UNKNOWN,
+    )
+
+
+def serialize_binary_symbolic_finding(
+    record: BinarySymbolicExecutionFinding,
+) -> FindingResponse:
+    metadata_payload = deepcopy(_normalize_payload(record.metadata_json))
+    metadata_payload.setdefault("scanner", SCAN_TYPE_BINARY_SYMBOLIC)
+    metadata_payload.setdefault("tool", record.tool)
+    metadata_payload.setdefault("severity_score", severity_score(record.severity))
+    metadata_payload.setdefault("validation_status", VALIDATION_STATUS_PASSED)
+    evidence_payload = _normalize_payload(record.evidence)
+    evidence_text = (
+        json.dumps(evidence_payload, sort_keys=True) if evidence_payload else None
+    )
+    template_id_source = (
+        metadata_payload.get("path_id")
+        or metadata_payload.get("trace_id")
+        or metadata_payload.get("finding_id")
+    )
+    template_id = (
+        str(template_id_source) if template_id_source else f"{record.tool}:finding"
+    )
+
+    if "validation" not in metadata_payload:
+        metadata_payload["validation"] = {
+            "status": VALIDATION_STATUS_PASSED,
+            "validated_at": record.executed_at.isoformat(),
+        }
+
+    return FindingResponse(
+        id=str(record.id),
+        scan_id=str(record.scan_id),
+        title=record.title,
+        severity=record.severity,
+        cve_id=metadata_payload.get("cve_id"),
+        description=record.description,
+        detected_at=record.executed_at,
+        updated_at=record.updated_at or record.executed_at,
+        status=FINDING_STATUS_OPEN,
+        template_id=template_id,
+        evidence=evidence_text,
+        remediation=None,
+        enrichments=[],
+        metadata=metadata_payload,
+        scanner=SCAN_TYPE_BINARY_SYMBOLIC,
+        sample_id=str(record.sample_id),
+        tool=record.tool,
+        category="binary_symbolic",
         assigned_to=None,
         tags=[],
         comment_count=0,

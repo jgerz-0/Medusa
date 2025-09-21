@@ -199,6 +199,46 @@ Run the worker locally:
 poetry run python -m workers.binary.preprocess.worker
 ```
 
+### Symbolic Execution Worker
+
+Phase four introduces the angr symbolic execution worker under
+`workers/binary/angr`. The worker consumes jobs from
+`queues:binary:symbolic-execution`, downloads the preprocessed sample, launches a
+hardened angr container, and posts normalized path exploration findings back to
+the controller. Harnesses are locked behind allow-listed runtime flags to keep
+execution deterministic and prevent privilege escalation.
+
+- Jobs are queued via `POST /binary/symbolic-execution`. Analysts must reference
+  a normalized sample and can optionally request a maximum depth or timeout. The
+  controller records an audit entry, creates a
+  `scanner="binary_symbolic_execution"` scan row, and enqueues onto Redis.
+- The angr harness receives environment variables describing the artifact
+  location, scan metadata, and optional analysis depth. Harness output is
+  expected to be JSON containing `findings`, `artifacts`, and execution
+  telemetry.
+- Normalized findings persist into the
+  `binary_symbolic_execution_findings` table with immutable evidence hashes while
+  raw traces are stored in MinIO using the `analysis/symbolic/<sample-id>/...`
+  naming convention.
+- The worker posts results to
+  `/internal/binary/symbolic-execution/callback` using the shared secret in
+  `MEDUSA_BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN`.
+
+#### Symbolic Execution Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `BINARY_SYMBOLIC_EXECUTION_QUEUE_KEY` | Redis list key for symbolic execution jobs (default `queues:binary:symbolic-execution`). |
+| `BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY` | Redis key for failed symbolic execution jobs. |
+| `BINARY_SYMBOLIC_EXECUTION_RUNTIME` | Container runtime binary (`docker` or `podman`). |
+| `BINARY_SYMBOLIC_EXECUTION_RUNTIME_FLAGS` | Space-separated runtime flags validated against the allow-list. |
+| `BINARY_SYMBOLIC_EXECUTION_IMAGE` | Container image delivering the hardened angr harness. |
+| `BINARY_SYMBOLIC_EXECUTION_COMMAND` | Entry command executed inside the angr container. |
+| `BINARY_SYMBOLIC_EXECUTION_TIMEOUT` | Default execution timeout in seconds (default 300). |
+| `BINARY_SYMBOLIC_EXECUTION_BUCKET` | Bucket for persisted symbolic artifacts (defaults to the sample's bucket). |
+| `BINARY_SYMBOLIC_EXECUTION_PREFIX` | Prefix inside the symbolic artifact bucket (default `analysis/symbolic/`). |
+| `MEDUSA_BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN` | Shared secret required for symbolic execution worker callbacks. |
+
 For single-job smoke tests:
 
 ```bash
