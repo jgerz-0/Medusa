@@ -46,6 +46,7 @@ def api_client() -> (
         zap_callback_token="zap-callback",
         sqlmap_callback_token="sqlmap-callback",
         enrichment_callback_token="enrichment-secret",
+        anomaly_callback_token="anomaly-secret",
         validator_callback_token="validator-secret",
         binary_static_analysis_queue_channel="binary-static:test",
         binary_static_analysis_callback_token="binary-static-secret",

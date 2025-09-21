@@ -24,11 +24,12 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
   - Validates incoming scan requests and target scope.
   - Persists scan definitions and issues JWT-scoped job tokens.
   - Emits audit events for every state transition.
-- **Queue (Redis / RabbitMQ)**
-  - Stores pending jobs keyed by agent type.
-  - Ensures idempotent delivery with per-job retry policy.
+- **Queue (Redis)**
+  - The controller `RPUSH`es jobs into Redis lists named `queues:<agent>:jobs` and workers compete on `BLPOP`, ensuring a single agent claims each payload while keeping operations transparent via `redis-cli`.
+  - Failed jobs are retried in-line: workers increment the embedded `attempts` counter and `RPUSH` back to the same list until `max_retries` is hit, then move the payload (with error context) to `queues:<agent>:dead` for manual remediation.
+  - Operators should pin queue channel environment variables (`MEDUSA_*_QUEUE_CHANNEL`, `<worker>_QUEUE_KEY`) to the agreed namespace, monitor the corresponding `:dead` keys, and tune `REDIS_URL` options (TLS, timeouts, connection pooling) per environment because Redis is the sole supported transport today; RabbitMQ support is not yet scheduled on the roadmap.
 - **Workers**
-  - Containerized wrappers around scanners (nuclei, ZAP, SQLMap, AFL, angr).
+  - Containerized wrappers around scanners (nuclei, ZAP, SQLMap, AFL/libFuzzer fuzzing, checksec, bandit).
   - Normalize output into the shared JSON Finding schema.
   - Upload heavy artifacts (pcaps, binaries, logs) to MinIO.
   - **CVE Enrichment Worker** – fetches deterministic advisories from NVD and CIRCL, emits structured metadata for findings, and writes normalized advisory embeddings to Qdrant for semantic enrichment without blocking Redis callbacks.

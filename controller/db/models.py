@@ -78,12 +78,18 @@ def _normalize_tags(value: Optional[Iterable[str]]) -> list[str]:
 def _normalize_status(value: Optional[str]) -> str:
     """Clamp finding workflow status to the supported vocabulary."""
 
-    allowed = {"open", "acknowledged", "resolved"}
+    allowed = {
+        "pending_validation",
+        "open",
+        "invalidated",
+        "acknowledged",
+        "resolved",
+    }
     if isinstance(value, str):
         lowered = value.strip().lower()
         if lowered in allowed:
             return lowered
-    return "open"
+    return "pending_validation"
 
 
 def _normalize_validation_status(value: Optional[str]) -> str:
@@ -95,6 +101,17 @@ def _normalize_validation_status(value: Optional[str]) -> str:
         if lowered in allowed:
             return lowered
     return "pending"
+
+
+def _normalize_scope_status(value: Optional[str]) -> str:
+    """Normalize scope compliance annotations for findings."""
+
+    allowed = {"unknown", "in_scope", "out_of_scope", "mixed"}
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in allowed:
+            return lowered
+    return "unknown"
 
 
 class TimestampMixin:
@@ -184,21 +201,22 @@ class Finding(TimestampMixin, Base):
     )
     evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), default="pending_validation", nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), default="pending_validation", nullable=False
+    )
     validated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    validation_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    validation_status: Mapped[str] = mapped_column(
+        String(32), default="pending", nullable=False
+    )
     validation_metadata: Mapped[Dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False
     )
     assigned_to: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    validation_status: Mapped[str] = mapped_column(
-        String(32), default="pending", nullable=False
-    )
-    validated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
+    scope_status: Mapped[str] = mapped_column(
+        String(32), default="unknown", nullable=False
     )
 
     scan: Mapped["Scan"] = relationship(back_populates="findings")
@@ -302,6 +320,31 @@ class AuditLog(Base):
 
     scan: Mapped[Optional["Scan"]] = relationship(back_populates="audit_entries")
     finding: Mapped[Optional["Finding"]] = relationship(back_populates="audit_entries")
+
+
+class AnomalyEvent(Base):
+    """Structured anomaly callback emitted by the anomaly worker."""
+
+    __tablename__ = "anomaly_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    anomaly_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+    detected_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    first_seen: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_seen: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    window_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
 
 
 class FindingComment(Base):
@@ -539,9 +582,8 @@ def _finding_set_hash(mapper, connection, target: Finding) -> None:
     target.validation_metadata = _coerce_evidence(target.validation_metadata)
     target.tags = _normalize_tags(target.tags)
     target.status = _normalize_status(target.status)
-    target.validation_status = _normalize_validation_status(
-        target.validation_status
-    )
+    target.validation_status = _normalize_validation_status(target.validation_status)
+    target.scope_status = _normalize_scope_status(target.scope_status)
     if target.assigned_to:
         target.assigned_to = target.assigned_to.strip()
     if not target.evidence_hash:
@@ -560,9 +602,8 @@ def _finding_prevent_evidence_mutation(mapper, connection, target: Finding) -> N
     hash_attr = state.attrs.evidence_hash
     target.tags = _normalize_tags(target.tags)
     target.status = _normalize_status(target.status)
-    target.validation_status = _normalize_validation_status(
-        target.validation_status
-    )
+    target.validation_status = _normalize_validation_status(target.validation_status)
+    target.scope_status = _normalize_scope_status(target.scope_status)
     if target.assigned_to:
         target.assigned_to = target.assigned_to.strip()
     if (
@@ -583,7 +624,10 @@ def _finding_comment_set_hash(mapper, connection, target: FindingComment) -> Non
 @event.listens_for(FindingComment, "before_update", propagate=True)
 def _finding_comment_immutable(mapper, connection, target: FindingComment) -> None:
     state = inspect(target)
-    if state.attrs.message.history.has_changes() or state.attrs.metadata_json.history.has_changes():
+    if (
+        state.attrs.message.history.has_changes()
+        or state.attrs.metadata_json.history.has_changes()
+    ):
         raise ValueError("Finding comments are immutable once persisted.")
 
 
@@ -617,9 +661,7 @@ def _finding_ticket_prevent_payload_mutation(
 
 
 @event.listens_for(FindingValidation, "before_insert", propagate=True)
-def _finding_validation_set_hash(
-    mapper, connection, target: FindingValidation
-) -> None:
+def _finding_validation_set_hash(mapper, connection, target: FindingValidation) -> None:
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
     target.status = _normalize_validation_status(target.status)

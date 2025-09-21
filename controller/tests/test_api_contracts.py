@@ -1,13 +1,18 @@
 from datetime import datetime, timedelta, timezone
 import uuid
-from typing import Tuple
+import uuid
+from typing import Generator, Tuple
 
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 import jwt
+import pytest
 from controller.db.models import (
     AuditLog,
+    AnomalyEvent,
     Base,
     BinaryFuzzingFinding,
     BinarySample,
@@ -31,16 +36,12 @@ from controller.main import (
     get_queue_client,
     get_settings,
 )
-from controller.notifications import CriticalFindingNotification, NotificationService
+from controller.notifications import (
+    AnomalyNotification,
+    CriticalFindingNotification,
+    NotificationService,
+)
 from controller.tests.conftest import InMemoryQueue
-
-
-class InMemoryQueue(QueueClient):
-    def __init__(self) -> None:
-        self.messages: list[Tuple[str, dict]] = []
-
-    def enqueue(self, channel: str, payload: dict) -> None:  # type: ignore[override]
-        self.messages.append((channel, payload))
 
 
 class DummyNotificationService(NotificationService):
@@ -55,11 +56,17 @@ class DummyNotificationService(NotificationService):
             smtp_password=None,
             smtp_use_tls=False,
         )
+        self.anomaly_notifications: list[AnomalyNotification] = []
 
     def notify_critical_finding(  # type: ignore[override]
         self, payload: CriticalFindingNotification
     ) -> None:
         return
+
+    def notify_anomaly(  # type: ignore[override]
+        self, payload: AnomalyNotification
+    ) -> None:
+        self.anomaly_notifications.append(payload)
 
 
 @pytest.fixture()
@@ -78,7 +85,8 @@ def api_client() -> (
         nuclei_callback_token="callback-secret",
         zap_callback_token="zap-callback",
         sqlmap_callback_token="sqlmap-callback",
-        validator_callback_token="validator-callback",
+        validator_callback_token="validator-secret",
+        anomaly_callback_token="anomaly-secret",
         enrichment_callback_token="enrichment-secret",
         binary_static_analysis_queue_channel="binary-static:test",
         binary_static_analysis_callback_token="binary-static-secret",
@@ -136,7 +144,6 @@ def api_client() -> (
     get_settings.cache_clear()  # type: ignore[attr-defined]
     Base.metadata.drop_all(engine)
     engine.dispose()
-)
 
 
 def auth_headers() -> dict[str, str]:
@@ -153,6 +160,10 @@ def binary_static_headers() -> dict[str, str]:
 
 def binary_fuzzing_headers() -> dict[str, str]:
     return {"X-Callback-Token": "binary-fuzzing-secret"}
+
+
+def anomaly_headers() -> dict[str, str]:
+    return {"X-Callback-Token": "anomaly-secret"}
 
 
 def _create_finding_record(session_factory: sessionmaker) -> str:
@@ -1040,6 +1051,7 @@ def test_finding_contracts(
     assert finding_item["validated_at"] is None
     assert finding_item["validations"] == []
     assert isinstance(finding_item["cvss"], float)
+    assert finding_item["scope_status"] == "unknown"
     datetime.fromisoformat(finding_item["detected_at"])  # raises on invalid format
 
     detail_response = client.get(f"/findings/{finding_id}", headers=auth_headers())
@@ -1050,6 +1062,7 @@ def test_finding_contracts(
     assert detail_payload["data"]["category"] == "web"
     assert detail_payload["data"]["validation_status"] == "pending"
     assert detail_payload["data"]["validations"] == []
+    assert detail_payload["data"]["scope_status"] == "unknown"
 
 
 def test_validation_enqueue_flow(
@@ -1300,6 +1313,69 @@ def test_findings_detail_rbac_regression(
     assert payload["data"]["id"] == finding_id
 
 
+def test_findings_scope_filter(api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(name="Scope Filter", scope="corp.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        in_scope_scan = Scan(target_id=target.id, scanner="nuclei", status="completed")
+        out_scope_scan = Scan(target_id=target.id, scanner="nuclei", status="completed")
+        session.add_all([in_scope_scan, out_scope_scan])
+        session.flush()
+
+        in_scope_finding = Finding(
+            scan_id=in_scope_scan.id,
+            title="Compliant",
+            severity="medium",
+            description="Within authorized scope",
+            metadata_json={"host": "app.corp.example"},
+            evidence={"url": "https://app.corp.example/login"},
+            evidence_hash="",
+            scope_status="in_scope",
+        )
+        out_scope_finding = Finding(
+            scan_id=out_scope_scan.id,
+            title="Drift",
+            severity="medium",
+            description="Out-of-scope artifact",
+            metadata_json={"host": "attacker.example"},
+            evidence={"url": "http://attacker.example"},
+            evidence_hash="",
+            scope_status="out_of_scope",
+        )
+        session.add_all([in_scope_finding, out_scope_finding])
+        session.commit()
+
+        in_scope_id = str(in_scope_finding.id)
+        out_scope_id = str(out_scope_finding.id)
+
+    out_response = client.get(
+        "/findings", params={"scope": "out_of_scope"}, headers=auth_headers()
+    )
+    assert out_response.status_code == 200, out_response.text
+    out_payload = out_response.json()["data"]
+    assert all(item["scope_status"] == "out_of_scope" for item in out_payload)
+    assert {item["id"] for item in out_payload} == {out_scope_id}
+
+    in_response = client.get(
+        "/findings", params={"scope": "in_scope"}, headers=auth_headers()
+    )
+    assert in_response.status_code == 200, in_response.text
+    in_payload = in_response.json()["data"]
+    assert all(item["scope_status"] == "in_scope" for item in in_payload)
+    assert {item["id"] for item in in_payload} == {in_scope_id}
+
+    scope_endpoint = client.get(
+        "/findings/scope", params={"scope": "out_of_scope"}, headers=auth_headers()
+    )
+    assert scope_endpoint.status_code == 200, scope_endpoint.text
+    scope_payload = scope_endpoint.json()["data"]
+    assert {item["id"] for item in scope_payload} == {out_scope_id}
+
+
 def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:
     with session_factory() as session:
         target = Target(name="Prod API", scope="prod.example.com", is_authorized=True)
@@ -1434,6 +1510,50 @@ def test_enrichment_callback_records_errors(
         audit_entries = session.query(AuditLog).all()
         assert any(entry.action == "list_findings" for entry in audit_entries)
         assert any(entry.action == "get_finding" for entry in audit_entries)
+
+
+def test_anomaly_callback_persists_events_and_notifies(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    detected_at = datetime.now(timezone.utc)
+    first_seen = detected_at - timedelta(minutes=1)
+    last_seen = detected_at
+
+    payload = {
+        "source": "worker:anomaly",
+        "detected_at": detected_at.isoformat(),
+        "anomalies": [
+            {
+                "anomaly_type": "excessive_access_denied",
+                "actor": "svc-tester",
+                "first_seen": first_seen.isoformat(),
+                "last_seen": last_seen.isoformat(),
+                "count": 5,
+                "window_seconds": 600,
+                "metadata": {"reason_counts": {"missing_required_roles": 5}},
+            }
+        ],
+    }
+
+    response = client.post(
+        "/internal/anomalies",
+        json=payload,
+        headers=anomaly_headers(),
+    )
+    assert response.status_code == 204, response.text
+
+    with session_factory() as session:
+        event = session.query(AnomalyEvent).one()
+        assert event.anomaly_type == "excessive_access_denied"
+        assert event.actor == "svc-tester"
+        assert event.metadata_json["reason_counts"]["missing_required_roles"] == 5
+
+    notification_service = app.dependency_overrides[get_notification_service]()
+    assert notification_service.anomaly_notifications
+    message = notification_service.anomaly_notifications[-1]
+    assert message.anomaly_type == "excessive_access_denied"
+    assert message.actor == "svc-tester"
 
 
 def test_rbac_denial_is_audited(

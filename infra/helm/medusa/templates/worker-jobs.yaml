@@ -1,5 +1,9 @@
 {{- range $name, $worker := .Values.workers }}
 {{- if $worker.enabled }}
+{{- $context := dict "root" $ "name" $name "worker" $worker }}
+{{- $serviceAccount := default (dict) $worker.serviceAccount }}
+{{- $serviceAccountName := include "medusa.workerServiceAccountName" $context }}
+{{- $automount := ternary $serviceAccount.automountServiceAccountToken true (hasKey $serviceAccount "automountServiceAccountToken") }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -32,7 +36,14 @@ spec:
         {{ $k }}: {{ $v | quote }}
         {{- end }}
     spec:
+      serviceAccountName: {{ $serviceAccountName }}
+      automountServiceAccountToken: {{ $automount }}
       restartPolicy: OnFailure
+      {{- $zapVolumeConfig := dict }}
+      {{- if eq $name "zap" }}
+      {{- $zapVolumeDefaults := dict "mount" (dict "name" (printf "%s-reports" $name) "mountPath" (default "/tmp/zap" $worker.env.workDir)) "volume" (dict "name" (printf "%s-reports" $name) "emptyDir" (dict)) }}
+      {{- $zapVolumeConfig = merge $zapVolumeDefaults (default (dict) $worker.reportVolume) }}
+      {{- end }}
       containers:
         - name: {{ $name }}
           image: "{{ $worker.image.repository }}:{{ default $.Chart.AppVersion $worker.image.tag }}"
@@ -63,7 +74,6 @@ spec:
             - name: {{ $envName }}
               value: {{ tpl $value $ | quote }}
             {{- end }}
-                  key: MEDUSA_REDIS_URL
             {{- if eq $name "nuclei" }}
             - name: NUCLEI_QUEUE_KEY
               valueFrom:
@@ -92,6 +102,94 @@ spec:
                   key: S3_SECRET_KEY
             - name: S3_ENDPOINT_URL
               value: {{ printf "http://%s-minio:%d" (include "medusa.fullname" $) $.Values.minio.service.apiPort }}
+            {{- else if eq $name "zap" }}
+            - name: ZAP_QUEUE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_ZAP_QUEUE_CHANNEL" $worker.env.queueSecretKey }}
+            - name: ZAP_DEAD_LETTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_ZAP_DEAD_LETTER_KEY" $worker.env.deadLetterSecretKey }}
+            - name: ZAP_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_ZAP_CALLBACK_TOKEN" $worker.env.callbackTokenSecretKey }}
+            - name: ZAP_CALLBACK_VERIFY_TLS
+              value: {{ ternary "true" "false" (default true $worker.env.verifyTLS) | quote }}
+            - name: ZAP_BINARY
+              value: {{ default "/zap/zap-baseline.py" $worker.env.binary | quote }}
+            - name: ZAP_WORK_DIR
+              value: {{ default "/tmp/zap" $worker.env.workDir | quote }}
+            - name: ZAP_POLL_TIMEOUT
+              value: {{ default 5 $worker.env.pollTimeout | int | quote }}
+            - name: ZAP_MAX_RETRIES
+              value: {{ default 3 $worker.env.maxRetries | int | quote }}
+            - name: ZAP_CALLBACK_TIMEOUT
+              value: {{ default 30 $worker.env.callbackTimeout | int | quote }}
+            {{- else if eq $name "sqlmap" }}
+            - name: SQLMAP_QUEUE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_SQLMAP_QUEUE_CHANNEL" $worker.env.queueSecretKey }}
+            - name: SQLMAP_DEAD_LETTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_SQLMAP_DEAD_LETTER_KEY" $worker.env.deadLetterSecretKey }}
+            - name: SQLMAP_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_SQLMAP_CALLBACK_TOKEN" $worker.env.callbackTokenSecretKey }}
+            - name: SQLMAP_CALLBACK_VERIFY_TLS
+              value: {{ ternary "true" "false" (default true $worker.env.verifyTLS) | quote }}
+            - name: SQLMAP_BINARY
+              value: {{ default "/usr/bin/sqlmap" $worker.env.binary | quote }}
+            - name: SQLMAP_WORK_DIR
+              value: {{ default "/tmp/sqlmap" $worker.env.workDir | quote }}
+            - name: SQLMAP_POLL_TIMEOUT
+              value: {{ default 5 $worker.env.pollTimeout | int | quote }}
+            - name: SQLMAP_MAX_RETRIES
+              value: {{ default 3 $worker.env.maxRetries | int | quote }}
+            - name: SQLMAP_CALLBACK_TIMEOUT
+              value: {{ default 30 $worker.env.callbackTimeout | int | quote }}
+            {{- if hasKey $worker.env "defaultLevel" }}
+            - name: SQLMAP_DEFAULT_LEVEL
+              value: {{ default 1 $worker.env.defaultLevel | int | quote }}
+            {{- end }}
+            {{- if hasKey $worker.env "defaultRisk" }}
+            - name: SQLMAP_DEFAULT_RISK
+              value: {{ default 1 $worker.env.defaultRisk | int | quote }}
+            {{- end }}
+            {{- else if eq $name "validator" }}
+            - name: VALIDATOR_QUEUE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_VALIDATOR_QUEUE_CHANNEL" $worker.env.queueSecretKey }}
+            - name: VALIDATOR_DEAD_LETTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_VALIDATOR_DEAD_LETTER_KEY" $worker.env.deadLetterSecretKey }}
+            {{- if $worker.env.callbackTokenSecretKey }}
+            - name: VALIDATOR_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ default "MEDUSA_VALIDATOR_CALLBACK_TOKEN" $worker.env.callbackTokenSecretKey }}
+            {{- end }}
+            - name: VALIDATOR_MAX_RETRIES
+              value: {{ default 3 $worker.env.maxRetries | int | quote }}
+            - name: VALIDATOR_POLL_TIMEOUT
+              value: {{ default 5 $worker.env.pollTimeout | int | quote }}
+            - name: VALIDATOR_HTTP_TIMEOUT
+              value: {{ default 10 $worker.env.httpTimeout | int | quote }}
             {{- else if eq $name "cveEnrichment" }}
             {{- $qdrantURL := default "" $worker.env.qdrant.urlOverride -}}
             {{- if and (not $qdrantURL) (eq $.Values.secrets.strategy "inline") -}}
@@ -149,15 +247,29 @@ spec:
             - {{- toYaml . | nindent 14 }}
             {{- end }}
           {{- end }}
-          {{- if $worker.extraVolumeMounts }}
+          {{- $volumeMounts := list }}
+          {{- if and (eq $name "zap") ($zapVolumeConfig.mount) }}
+          {{- $volumeMounts = append $volumeMounts $zapVolumeConfig.mount }}
+          {{- end }}
+          {{- range $worker.extraVolumeMounts }}
+          {{- $volumeMounts = append $volumeMounts . }}
+          {{- end }}
+          {{- if $volumeMounts }}
           volumeMounts:
-            {{- toYaml $worker.extraVolumeMounts | nindent 12 }}
+            {{- toYaml $volumeMounts | nindent 12 }}
           {{- end }}
           resources:
             {{- toYaml $worker.resources | nindent 12 }}
-      {{- if $worker.extraVolumes }}
+      {{- $volumes := list }}
+      {{- if and (eq $name "zap") ($zapVolumeConfig.volume) }}
+      {{- $volumes = append $volumes $zapVolumeConfig.volume }}
+      {{- end }}
+      {{- range $worker.extraVolumes }}
+      {{- $volumes = append $volumes . }}
+      {{- end }}
+      {{- if $volumes }}
       volumes:
-        {{- toYaml $worker.extraVolumes | nindent 8 }}
+        {{- toYaml $volumes | nindent 8 }}
       {{- end }}
 ---
 {{- end }}

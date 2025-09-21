@@ -20,6 +20,8 @@ infra/terraform
 │   ├── eks/
 │   ├── rds/
 │   ├── s3/
+│   ├── external-secrets/
+│   ├── observability/
 │   └── medusa/
 ├── main.tf
 ├── variables.tf
@@ -35,6 +37,116 @@ terraform validate
 terraform plan -out=tfplan
 terraform apply tfplan
 ```
+
+### External Secrets Operator
+
+The `external-secrets` module installs the External Secrets Operator, provisions a `SecretStore` or `ClusterSecretStore`, and feeds a Terraform-managed `ExternalSecret` into the Medusa release. Enable it by adding the following overrides to your environment `terraform.tfvars`:
+
+```hcl
+enable_external_secrets_operator   = true
+external_secrets_irsa_role_arn     = "arn:aws:iam::123456789012:role/external-secrets-operator"
+external_secrets_secret_store_name = "medusa-prod-cluster-secrets"
+```
+
+Terraform annotates the operator service account with the supplied IRSA role, points the secret store at AWS Secrets Manager, and configures the Medusa module to render an `ExternalSecret` that materialises the RDS credentials and callback tokens. Disable the flag in development environments to fall back to inline secrets.
+
+### Observability
+
+The `observability` module hardens how Prometheus and Grafana are deployed for Medusa. It supports two modes:
+
+- `embedded` (default) – enables the Medusa chart dependencies for Prometheus/Grafana, constrains them with network policies, and keeps the data plane inside the Medusa namespace. This is ideal for development and CI clusters.
+- `kube-prometheus-stack` – deploys the full Prometheus Operator stack with CRDs, Alertmanager, and hardened network policies. Medusa automatically renders a `ServiceMonitor` and waits on the CRDs so Helm does not fail.
+
+Enable the stack in `terraform.tfvars` using the new `observability_*` variables:
+
+```hcl
+enable_observability = true
+observability_mode   = "kube-prometheus-stack" # or "embedded"
+
+# Terraform-managed Grafana credentials (rotate by updating the secret values and re-applying)
+observability_manage_grafana_admin_secret = true
+observability_grafana_admin_credentials = {
+  username = "medusa-ops"
+  password = "GENERATE_AND_ROTATE_THIS"
+}
+
+# Optional ingress and scrape tuning
+observability_grafana_ingress_enabled = true
+observability_grafana_ingress_hosts = [{
+  host = "grafana.prod.example.com"
+  paths = [{ path = "/", path_type = "Prefix" }]
+}]
+observability_service_monitor_interval       = "30s"
+observability_service_monitor_scrape_timeout = "10s"
+
+# Wire alerts into PagerDuty, Opsgenie, etc. using Alertmanager configuration
+observability_enable_alertmanager = true
+observability_alertmanager_config = <<-EOF
+route:
+  receiver: pagerduty
+receivers:
+  - name: pagerduty
+    pagerduty_configs:
+      - routing_key: ${var.pagerduty_routing_key}
+EOF
+```
+
+**Grafana admin rotation.** When Terraform manages the admin secret, rotate credentials by updating `observability_grafana_admin_credentials.password` (or sourcing it from External Secrets) and re-running `terraform apply`. Terraform replaces the Kubernetes secret without downtime. If you disable secret management, provide `observability_grafana_admin_secret_name` to reference an existing Secret or ExternalSecret resource and rotate credentials there.
+
+**External alerting.** The module exposes `observability_alertmanager_config` so Alertmanager can forward incidents to PagerDuty, Slack, email, or SIEM webhooks. Store sensitive tokens in AWS Secrets Manager and render them via External Secrets, then reference the secret in your YAML using the standard Alertmanager templating syntax.
+
+### Pod Security Standards
+
+Terraform owns the Medusa namespace and attaches Kubernetes Pod Security Standards (PSS) labels so admission control is deterministic across clusters. The module sets `pod-security.kubernetes.io/{enforce,audit,warn}=restricted` by default and injects the Helm override `podSecurityStandards.namespaceLabelsOnly=true`. This keeps the Helm release from attempting to recreate or manage the namespace while still enforcing `restricted` level guardrails cluster-side.
+
+Override the PSS levels per environment by setting `namespace_pod_security_standards` in your environment `terraform.tfvars`:
+
+```hcl
+namespace_pod_security_standards = {
+  enforce = "baseline"   # Runtime admission level
+  audit   = "restricted"  # Audit-only warnings
+  warn    = "baseline"    # Warning banner surfaced to operators
+}
+```
+
+Only relax these values for tightly scoped dev clusters and document the justification in the same `tfvars` file. Production and shared environments should stick with `restricted` to maintain blast-radius isolation.
+
+### SQLMap worker IRSA
+
+Provision a dedicated IAM role for the SQLMap worker so Redis queue access and callback tokens stay isolated from other scanners. Extend the IRSA module wiring by adding a `sqlmap` entry to `worker_policy_documents` and referencing it from your environment configuration:
+
+```hcl
+data "aws_iam_policy_document" "sqlmap_worker" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+    ]
+    resources = [aws_secretsmanager_secret.sqlmap_credentials.arn]
+  }
+  statement {
+    effect = "Allow"
+    actions = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.sqlmap_dead_letter.arn]
+  }
+}
+
+module "irsa" {
+  source = "./modules/irsa"
+
+  # ...existing inputs...
+
+  worker_policy_documents = merge(
+    module.s3.worker_policy_documents,
+    {
+      sqlmap = data.aws_iam_policy_document.sqlmap_worker.json
+    },
+  )
+}
+```
+
+Store the SQLMap callback token, queue key, and dead-letter key in AWS Secrets Manager (or your chosen secret store) and expose them via the Medusa Helm chart's ExternalSecret configuration. The IRSA module renders the service account annotations automatically, so only the SQLMap worker pod can assume the generated role and fetch those credentials.
 
 ## Security Considerations
 - Enable AWS IAM roles for service accounts (IRSA) to scope worker pod permissions.

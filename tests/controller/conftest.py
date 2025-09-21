@@ -18,6 +18,7 @@ from controller.main import (
     get_settings,
 )
 from controller.notifications import (
+    AnomalyNotification,
     CriticalFindingNotification,
     NotificationService,
 )
@@ -44,11 +45,17 @@ class FakeNotificationService(NotificationService):
             smtp_use_tls=False,
         )
         self.notifications: list[CriticalFindingNotification] = []
+        self.anomaly_notifications: list[AnomalyNotification] = []
 
     def notify_critical_finding(  # type: ignore[override]
         self, payload: CriticalFindingNotification
     ) -> None:
         self.notifications.append(payload)
+
+    def notify_anomaly(  # type: ignore[override]
+        self, payload: AnomalyNotification
+    ) -> None:
+        self.anomaly_notifications.append(payload)
 
 
 @pytest.fixture()
@@ -67,9 +74,9 @@ def client():
         nuclei_callback_token="callback-secret",
         zap_callback_token="zap-secret",
         sqlmap_callback_token="sqlmap-secret",
-        validator_callback_token="validator-secret",
         enrichment_callback_token="enrichment-secret",
         validator_callback_token="validator-secret",
+        anomaly_callback_token="anomaly-secret",
         binary_static_analysis_callback_token="static-secret",
         binary_fuzzing_queue_channel="test-binary-fuzzing",
         binary_fuzzing_callback_token="fuzzing-secret",
