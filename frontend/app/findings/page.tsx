@@ -98,14 +98,78 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
       filterParams.to
   );
 
+  const exportParams = new URLSearchParams();
+  if (query.scanId) {
+    exportParams.set('scanId', query.scanId);
+  }
+  if (query.severity) {
+    exportParams.set('severity', query.severity);
+  }
+  if (query.status) {
+    exportParams.set('status', query.status);
+  }
+  if (query.scope) {
+    exportParams.set('scope', query.scope);
+  }
+  if (query.tag) {
+    exportParams.set('tag', query.tag);
+  }
+  if (query.assignedTo) {
+    exportParams.set('assigned', query.assignedTo);
+  }
+  if (query.from) {
+    exportParams.set('from', query.from);
+  }
+  if (query.to) {
+    exportParams.set('to', query.to);
+  }
+
+  const exportEnabled = Array.from(exportParams.keys()).length > 0;
+
+  function buildExportHref(format: 'pdf' | 'html'): string {
+    const params = new URLSearchParams(exportParams);
+    params.set('format', format);
+    const queryString = params.toString();
+    return `/api/reports/export?${queryString}`;
+  }
+
   return (
     <section className="space-y-4">
       <header className="space-y-2">
-        <div>
-          <h2 className="text-2xl font-semibold text-white">Findings</h2>
-          <p className="text-sm text-gray-400">
-            Normalized findings aggregated from controller scans with severity and workflow state metadata.
-          </p>
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h2 className="text-2xl font-semibold text-white">Findings</h2>
+            <p className="text-sm text-gray-400">
+              Normalized findings aggregated from controller scans with severity and workflow state metadata.
+            </p>
+          </div>
+          <div className="flex flex-col items-start gap-2 md:items-end">
+            <div className="flex flex-wrap gap-2">
+              <a
+                href={exportEnabled ? buildExportHref('pdf') : '#'}
+                aria-disabled={!exportEnabled}
+                className={`btn btn-primary text-xs uppercase tracking-wide${
+                  exportEnabled ? '' : ' cursor-not-allowed opacity-60'
+                }`}
+              >
+                Export PDF
+              </a>
+              <a
+                href={exportEnabled ? buildExportHref('html') : '#'}
+                aria-disabled={!exportEnabled}
+                className={`btn btn-secondary text-xs uppercase tracking-wide${
+                  exportEnabled ? '' : ' cursor-not-allowed opacity-60'
+                }`}
+              >
+                Export HTML
+              </a>
+            </div>
+            <p className="text-[11px] uppercase tracking-wide text-gray-500">
+              {exportEnabled
+                ? 'Exports respect the active filters applied to this view.'
+                : 'Apply filters or a scan ID to enable exports.'}
+            </p>
+          </div>
         </div>
         <RequiredRolesNotice
           sections={[
