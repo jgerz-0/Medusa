@@ -50,10 +50,13 @@ networkPolicies:
       - binary-preprocess-worker
       - binary-fuzzing-worker
       - binary-static-analysis-worker
+      - binary-symbolic-execution-worker
       - cve-enrichment-worker
 ```
 
 Each entry must match the `app.kubernetes.io/component` label set on the worker pod template. Keeping the list explicit preserves the zero-trust default while still letting operators onboard additional analysis agents without editing templates.
+
+The `binary-symbolic-execution-worker` entry ensures symbolic execution jobs can reach Redis, MinIO, and other stateful services without broadening the policy to unrelated workloads.
 
 ## Binary Static Analysis worker configuration
 
