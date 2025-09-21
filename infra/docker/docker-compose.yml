@@ -253,6 +253,35 @@ services:
     volumes:
       - ../../workers/web/sqlmap:/app:delegated
 
+
+  ticketing-worker:
+    build:
+      context: ../..
+      dockerfile: workers/ticketing/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_ticketing_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
+      TICKETING_POLL_INTERVAL: ${TICKETING_POLL_INTERVAL:-5}
+      TICKETING_BATCH_SIZE: ${TICKETING_BATCH_SIZE:-10}
+      TICKETING_MAX_ATTEMPTS: ${TICKETING_MAX_ATTEMPTS:-3}
+      TICKETING_HTTP_TIMEOUT: ${TICKETING_HTTP_TIMEOUT:-10}
+      TICKETING_JIRA_BASE_URL: ${TICKETING_JIRA_BASE_URL:-https://jira.example.com}
+      TICKETING_JIRA_USER: ${TICKETING_JIRA_USER:-analyst@example.com}
+      TICKETING_JIRA_API_TOKEN: ${TICKETING_JIRA_API_TOKEN:-changeme}
+      TICKETING_GITHUB_BASE_URL: ${TICKETING_GITHUB_BASE_URL:-https://api.github.com}
+      TICKETING_GITHUB_TOKEN: ${TICKETING_GITHUB_TOKEN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/ticketing:/app/workers/ticketing:delegated
+      - ../../controller:/app/controller:delegated
+
   recon-worker:
     build:
       context: ../..
