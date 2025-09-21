@@ -8,7 +8,14 @@ import {
   fetchFindingTimeline
 } from '@/lib/api';
 import type { FindingComment, FindingTimelineEvent } from '@/lib/types';
+import {
+  ROLE_ANALYST,
+  ROLE_FINDINGS_READ,
+  ROLE_REPORT_EXPORT,
+  ROLE_TICKETING_CREATE
+} from '@/lib/rbac';
 import { StatusBadge } from '@/components/StatusBadge';
+import { RequiredRolesNotice } from '@/components/RequiredRolesNotice';
 import {
   assignFindingAction,
   updateStatusAction,
@@ -128,6 +135,31 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
       <Link href="/findings" className="text-sm">
         ← Back to findings
       </Link>
+
+      <RequiredRolesNotice
+        sections={[
+          {
+            title: 'Inspect finding details',
+            description: 'Grants read-only access to evidence, timeline, and remediation metadata.',
+            roles: [ROLE_FINDINGS_READ]
+          },
+          {
+            title: 'Execute workflow changes',
+            description: 'Allows assignment updates, status changes, tagging, and analyst commentary.',
+            roles: [ROLE_ANALYST]
+          },
+          {
+            title: 'Queue external tickets',
+            description: 'Required for creating Jira or GitHub tickets directly from the console.',
+            roles: [ROLE_TICKETING_CREATE]
+          },
+          {
+            title: 'Export formal reports',
+            description: 'Unlocks deterministic HTML/PDF exports for distribution to stakeholders.',
+            roles: [ROLE_REPORT_EXPORT]
+          }
+        ]}
+      />
 
       <article className="card space-y-5 p-6">
         <header className="space-y-2">
