@@ -48,6 +48,7 @@ export interface Finding {
   tags: string[];
   comment_count: number;
   tickets: FindingTicket[];
+  scope_status: 'unknown' | 'in_scope' | 'out_of_scope' | 'mixed';
 }
 
 export interface CVEAdvisory {

@@ -121,6 +121,11 @@ VALIDATION_STATUS_PENDING = "pending"
 VALIDATION_STATUS_PASSED = "passed"
 VALIDATION_STATUS_FAILED = "failed"
 
+FINDING_SCOPE_STATUS_UNKNOWN = "unknown"
+FINDING_SCOPE_STATUS_IN_SCOPE = "in_scope"
+FINDING_SCOPE_STATUS_OUT_OF_SCOPE = "out_of_scope"
+FINDING_SCOPE_STATUS_MIXED = "mixed"
+
 DEFAULT_ANALYST_ROLES = [
     ROLE_ANALYST,
     ROLE_FINDINGS_READ,
@@ -681,7 +686,7 @@ class Settings(BaseSettings):
         default=True,
         description="Enable STARTTLS when connecting to the SMTP server.",
     )
-      
+
     notification_slack_webhook: Optional[str] = Field(
         default=None,
         description="Incoming webhook URL for Slack notifications.",
@@ -1216,7 +1221,9 @@ class EnrichmentResponse(BaseModel):
 
 
 class ValidationRequest(BaseModel):
-    finding_id: str = Field(..., min_length=1, description="Identifier of the finding to retest")
+    finding_id: str = Field(
+        ..., min_length=1, description="Identifier of the finding to retest"
+    )
     notes: Optional[str] = Field(
         default=None,
         max_length=2000,
@@ -1350,6 +1357,12 @@ class FindingResponse(BaseModel):
     validated_at: Optional[datetime] = None
     validations: List[FindingValidationSummary] = Field(default_factory=list)
     cvss: float
+    scope_status: Literal[
+        FINDING_SCOPE_STATUS_UNKNOWN,
+        FINDING_SCOPE_STATUS_IN_SCOPE,
+        FINDING_SCOPE_STATUS_OUT_OF_SCOPE,
+        FINDING_SCOPE_STATUS_MIXED,
+    ]
 
 
 class FindingCollectionResponse(BaseModel):
@@ -1588,6 +1601,7 @@ class AnomalyCallbackRequest(BaseModel):
         if not self.anomalies:
             raise ValueError("At least one anomaly must be provided")
         return self
+
 
 class Principal(BaseModel):
     subject: str
@@ -1989,9 +2003,7 @@ def _authenticate_oidc(
     token_roles_claim = settings.oidc_roles_claim or validator.roles_claim
     raw_roles = payload.get(token_roles_claim) or []
     normalized_roles = [
-        str(role).strip()
-        for role in raw_roles
-        if isinstance(role, (str, int))
+        str(role).strip() for role in raw_roles if isinstance(role, (str, int))
     ]
     filtered_roles = [role for role in normalized_roles if role in ALLOWED_ROLES]
 
@@ -3477,10 +3489,7 @@ def enqueue_validation(
             detail="Finding not found",
         )
 
-    if (
-        not request.force
-        and finding.validation_status in FINAL_VALIDATION_STATUSES
-    ):
+    if not request.force and finding.validation_status in FINAL_VALIDATION_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Finding already validated",
@@ -3756,9 +3765,9 @@ def _build_validation_job(
         "submitted_at": submitted_at.isoformat(),
         "metadata": {
             "source_worker": worker_name,
-            "source_scan_created_at": scan.created_at.isoformat()
-            if scan.created_at
-            else None,
+            "source_scan_created_at": (
+                scan.created_at.isoformat() if scan.created_at else None
+            ),
         },
     }
 
@@ -3766,7 +3775,9 @@ def _build_validation_job(
     uri = evidence.get("uri") or metadata.get("uri")
     if isinstance(uri, str) and uri.strip().lower().startswith(("http://", "https://")):
         method = evidence.get("method") or metadata.get("method") or "GET"
-        expected_status = evidence.get("status") or metadata.get("expected_status") or 200
+        expected_status = (
+            evidence.get("status") or metadata.get("expected_status") or 200
+        )
         http_steps.append(
             {
                 "method": str(method).upper(),
@@ -3779,7 +3790,9 @@ def _build_validation_job(
         job_payload["verification"] = {"http": http_steps}
 
     job_payload["metadata"] = {
-        key: value for key, value in job_payload["metadata"].items() if value is not None
+        key: value
+        for key, value in job_payload["metadata"].items()
+        if value is not None
     }
 
     return job_payload
@@ -4253,9 +4266,11 @@ def validator_callback(
                     target=target_scope,
                     scanner=finding.scan.scanner if finding.scan else None,
                     validation_status=item["status"],
-                    validated_at=finding.validated_at.isoformat()
-                    if finding.validated_at
-                    else None,
+                    validated_at=(
+                        finding.validated_at.isoformat()
+                        if finding.validated_at
+                        else None
+                    ),
                     evidence_hash=finding.evidence_hash,
                     metadata={
                         "scan_id": str(finding.scan_id),
@@ -4700,11 +4715,13 @@ def _filter_finding_responses(
     assigned_to: Optional[str],
     since: Optional[datetime],
     until: Optional[datetime],
+    scope_status: Optional[str],
 ) -> Tuple[List[FindingResponse], Dict[str, Optional[str]]]:
     normalized_severity = severity.lower().strip() if severity else None
     normalized_status = status_filter.lower().strip() if status_filter else None
     normalized_tag = tag.lower().strip() if tag else None
     normalized_assignee = assigned_to.strip() if assigned_to else None
+    normalized_scope = scope_status.lower().strip() if scope_status else None
 
     def _matches(record: FindingResponse) -> bool:
         if normalized_severity and record.severity != normalized_severity:
@@ -4714,6 +4731,8 @@ def _filter_finding_responses(
         if normalized_tag and normalized_tag not in record.tags:
             return False
         if normalized_assignee and record.assigned_to != normalized_assignee:
+            return False
+        if normalized_scope and record.scope_status != normalized_scope:
             return False
         if since and record.detected_at < since:
             return False
@@ -4727,6 +4746,7 @@ def _filter_finding_responses(
         "status": normalized_status,
         "tag": normalized_tag,
         "assigned_to": normalized_assignee,
+        "scope": normalized_scope,
         "from": since.isoformat() if since else None,
         "to": until.isoformat() if until else None,
     }
@@ -4747,7 +4767,11 @@ def _build_timeline_buckets(
     for day in sorted(timeline.keys()):
         counts = timeline[day]
         timestamp = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
-        total = counts.get("open", 0) + counts.get("acknowledged", 0) + counts.get("resolved", 0)
+        total = (
+            counts.get("open", 0)
+            + counts.get("acknowledged", 0)
+            + counts.get("resolved", 0)
+        )
         ordered.append(
             FindingTimelineBucket(
                 date=timestamp,
@@ -4844,11 +4868,13 @@ def _render_report_pdf(findings: List[FindingResponse]) -> bytes:
     for record in findings:
         lines.append("")
         lines.append(f"Finding {record.id}: {record.title} [{record.severity.upper()}]")
-        lines.append(f"Status: {record.status} | CVSS {_severity_to_cvss(record.severity):.1f}")
-        lines.append(f"Detected: {record.detected_at.isoformat()} | Scan: {record.scan_id}")
         lines.append(
-            f"Tags: {', '.join(record.tags) if record.tags else 'none'}"
+            f"Status: {record.status} | CVSS {_severity_to_cvss(record.severity):.1f}"
         )
+        lines.append(
+            f"Detected: {record.detected_at.isoformat()} | Scan: {record.scan_id}"
+        )
+        lines.append(f"Tags: {', '.join(record.tags) if record.tags else 'none'}")
         description = textwrap.wrap(record.description, 90)
         lines.extend(description)
         evidence = record.evidence or "Evidence not provided."
@@ -4884,9 +4910,7 @@ def _render_report_pdf(findings: List[FindingResponse]) -> bytes:
     buffer.write(b"0000000000 65535 f \n")
     for offset in offsets[1:]:
         buffer.write(f"{offset:010} 00000 n \n".encode("utf-8"))
-    buffer.write(
-        b"trailer\n<< /Size %d /Root 1 0 R >>\n" % len(offsets)
-    )
+    buffer.write(b"trailer\n<< /Size %d /Root 1 0 R >>\n" % len(offsets))
     buffer.write(b"startxref\n")
     buffer.write(f"{xref_position}\n".encode("utf-8"))
     buffer.write(b"%%EOF")
@@ -4903,6 +4927,12 @@ def list_findings(
     ),
     tag: Optional[str] = Query(None, description="Filter by tag"),
     assigned_to: Optional[str] = Query(None, description="Filter by assignee"),
+    scope: Optional[str] = Query(
+        None,
+        description=(
+            "Filter by scope compliance status (unknown, in_scope, out_of_scope, mixed)"
+        ),
+    ),
     since: Optional[datetime] = Query(None, alias="from"),
     until: Optional[datetime] = Query(None, alias="to"),
     principal: Principal = Depends(authenticate),
@@ -4926,9 +4956,7 @@ def list_findings(
     for record in findings:
         aggregated.append((record.created_at, serialize_finding(record)))
     for record in static_findings:
-        aggregated.append(
-            (record.executed_at, serialize_binary_static_finding(record))
-        )
+        aggregated.append((record.executed_at, serialize_binary_static_finding(record)))
     for record in fuzzing_findings:
         aggregated.append(
             (record.executed_at, serialize_binary_fuzzing_finding(record))
@@ -4947,6 +4975,7 @@ def list_findings(
         assigned_to=assigned_to,
         since=since,
         until=until,
+        scope_status=scope,
     )
 
     web_count = sum(1 for record in filtered if record.category == "web")
@@ -5004,9 +5033,7 @@ def list_findings_timeline(
     for record in findings:
         aggregated.append((record.created_at, serialize_finding(record)))
     for record in static_findings:
-        aggregated.append(
-            (record.executed_at, serialize_binary_static_finding(record))
-        )
+        aggregated.append((record.executed_at, serialize_binary_static_finding(record)))
     for record in fuzzing_findings:
         aggregated.append(
             (record.executed_at, serialize_binary_fuzzing_finding(record))
@@ -5025,6 +5052,7 @@ def list_findings_timeline(
         assigned_to=assigned_to,
         since=since,
         until=until,
+        scope_status=None,
     )
 
     buckets = _build_timeline_buckets(filtered)
@@ -5044,6 +5072,40 @@ def list_findings_timeline(
     )
 
     return FindingTimelineCollectionResponse(data=buckets)
+
+
+@app.get("/findings/scope", response_model=FindingCollectionResponse)
+def list_findings_by_scope(
+    scope: str = Query(
+        ...,
+        description=("Return findings matching the provided scope compliance status"),
+    ),
+    target_id: Optional[str] = None,
+    scan_id: Optional[str] = None,
+    severity: Optional[str] = Query(None, description="Filter by severity"),
+    status_filter: Optional[str] = Query(
+        None, alias="status", description="Filter by workflow status"
+    ),
+    tag: Optional[str] = Query(None, description="Filter by tag"),
+    assigned_to: Optional[str] = Query(None, description="Filter by assignee"),
+    since: Optional[datetime] = Query(None, alias="from"),
+    until: Optional[datetime] = Query(None, alias="to"),
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> FindingCollectionResponse:
+    return list_findings(
+        target_id=target_id,
+        scan_id=scan_id,
+        severity=severity,
+        status_filter=status_filter,
+        tag=tag,
+        assigned_to=assigned_to,
+        scope=scope,
+        since=since,
+        until=until,
+        principal=principal,
+        db=db,
+    )
 
 
 @app.get("/findings/{finding_id}", response_model=FindingItemResponse)
@@ -5088,9 +5150,7 @@ def get_finding(
                 "category": "binary_static",
             },
         )
-        return FindingItemResponse(
-            data=serialize_binary_static_finding(static_record)
-        )
+        return FindingItemResponse(data=serialize_binary_static_finding(static_record))
 
     fuzz_record = db.get(BinaryFuzzingFinding, finding_id)
     if fuzz_record is not None:
@@ -5106,9 +5166,7 @@ def get_finding(
                 "category": "binary_fuzzing",
             },
         )
-        return FindingItemResponse(
-            data=serialize_binary_fuzzing_finding(fuzz_record)
-        )
+        return FindingItemResponse(data=serialize_binary_fuzzing_finding(fuzz_record))
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
@@ -5184,7 +5242,9 @@ def get_finding_timeline(
     return FindingTimelineResponse(data=events)
 
 
-@app.get("/findings/{finding_id}/comments", response_model=FindingCommentCollectionResponse)
+@app.get(
+    "/findings/{finding_id}/comments", response_model=FindingCommentCollectionResponse
+)
 def list_finding_comments(
     finding_id: str,
     principal: Principal = Depends(authenticate),
@@ -5275,9 +5335,7 @@ def create_finding_comment(
     return serialize_comment(comment)
 
 
-@app.post(
-    "/findings/{finding_id}/assign", response_model=FindingItemResponse
-)
+@app.post("/findings/{finding_id}/assign", response_model=FindingItemResponse)
 def assign_finding(
     finding_id: str,
     request: FindingAssignmentRequest,
@@ -5323,9 +5381,7 @@ def assign_finding(
     return FindingItemResponse(data=serialize_finding(finding))
 
 
-@app.post(
-    "/findings/{finding_id}/status", response_model=FindingItemResponse
-)
+@app.post("/findings/{finding_id}/status", response_model=FindingItemResponse)
 def update_finding_status(
     finding_id: str,
     request: FindingStatusUpdateRequest,
@@ -5363,9 +5419,7 @@ def update_finding_status(
     return FindingItemResponse(data=serialize_finding(finding))
 
 
-@app.post(
-    "/findings/{finding_id}/tags", response_model=FindingItemResponse
-)
+@app.post("/findings/{finding_id}/tags", response_model=FindingItemResponse)
 def update_finding_tags(
     finding_id: str,
     request: FindingTagsUpdateRequest,
@@ -5507,7 +5561,9 @@ def export_findings_report(
     )
 
 
-@app.post("/tickets/jira", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/tickets/jira", response_model=TicketResponse, status_code=status.HTTP_201_CREATED
+)
 def create_jira_ticket(
     request: JiraTicketRequest,
     principal: Principal = Depends(authenticate),
@@ -5723,7 +5779,11 @@ def _post_slack_notification(webhook_url: str, payload: Dict[str, Any]) -> None:
 
 
 def _send_email_notification(settings: Settings, subject: str, body: str) -> None:
-    if not settings.email_smtp_host or not settings.email_from or not settings.email_recipients:
+    if (
+        not settings.email_smtp_host
+        or not settings.email_from
+        or not settings.email_recipients
+    ):
         return
 
     message = EmailMessage()
@@ -5821,9 +5881,8 @@ def serialize_finding(finding: Finding) -> FindingResponse:
     else:
         template_id = "scanner:unspecified"
 
-    scanner_value = (
-        scanner_name
-        or (finding.scan.scanner if finding.scan else "scanner:unknown")
+    scanner_value = scanner_name or (
+        finding.scan.scanner if finding.scan else "scanner:unknown"
     )
     tool_value = metadata_payload.get("tool")
     metadata_payload.setdefault("scanner", scanner_value)
@@ -5862,14 +5921,23 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         else VALIDATION_STATUS_PENDING
     )
 
+    scope_status_value = (
+        (finding.scope_status or FINDING_SCOPE_STATUS_UNKNOWN).strip().lower()
+    )
+    if scope_status_value not in {
+        FINDING_SCOPE_STATUS_UNKNOWN,
+        FINDING_SCOPE_STATUS_IN_SCOPE,
+        FINDING_SCOPE_STATUS_OUT_OF_SCOPE,
+        FINDING_SCOPE_STATUS_MIXED,
+    }:
+        scope_status_value = FINDING_SCOPE_STATUS_UNKNOWN
+
     metadata_payload.setdefault("severity_score", severity_score(finding.severity))
     metadata_payload.setdefault("validation_status", validation_status)
     validation_payload = deepcopy(_normalize_payload(finding.validation_metadata))
     validation_payload.setdefault("status", validation_status)
     if finding.validated_at:
-        validation_payload.setdefault(
-            "validated_at", finding.validated_at.isoformat()
-        )
+        validation_payload.setdefault("validated_at", finding.validated_at.isoformat())
     if "validation" not in metadata_payload:
         metadata_payload["validation"] = validation_payload
     tickets_payload: List[FindingTicketSummary] = []
@@ -5931,6 +5999,7 @@ def serialize_finding(finding: Finding) -> FindingResponse:
         validated_at=finding.validated_at,
         validations=validations_payload,
         cvss=_severity_to_cvss(finding.severity),
+        scope_status=scope_status_value,
     )
 
 
@@ -5954,9 +6023,7 @@ def serialize_binary_static_finding(
         or metadata_payload.get("finding_id")
     )
     template_id = (
-        str(template_id_source)
-        if template_id_source
-        else f"{record.tool}:finding"
+        str(template_id_source) if template_id_source else f"{record.tool}:finding"
     )
 
     if "validation" not in metadata_payload:
@@ -5992,6 +6059,7 @@ def serialize_binary_static_finding(
         validated_at=None,
         validations=[],
         cvss=_severity_to_cvss(record.severity),
+        scope_status=FINDING_SCOPE_STATUS_UNKNOWN,
     )
 
 
@@ -6014,9 +6082,7 @@ def serialize_binary_fuzzing_finding(
         or metadata_payload.get("crash_type")
     )
     template_id = (
-        str(template_id_source)
-        if template_id_source
-        else f"{record.tool}:crash"
+        str(template_id_source) if template_id_source else f"{record.tool}:crash"
     )
 
     if "validation" not in metadata_payload:
@@ -6052,6 +6118,7 @@ def serialize_binary_fuzzing_finding(
         validated_at=None,
         validations=[],
         cvss=_severity_to_cvss(record.severity),
+        scope_status=FINDING_SCOPE_STATUS_UNKNOWN,
     )
 
 

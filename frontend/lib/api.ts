@@ -29,6 +29,7 @@ export interface FindingsQuery {
   assignedTo?: string;
   from?: string;
   to?: string;
+  scope?: string;
 }
 
 function buildPath(
@@ -255,7 +256,8 @@ export async function fetchFindings(query?: FindingsQuery): Promise<Finding[]> {
     tag: query?.tag,
     assigned_to: query?.assignedTo,
     from: query?.from,
-    to: query?.to
+    to: query?.to,
+    scope: query?.scope
   });
   const payload = await request<ApiCollectionResponse<Finding[]>>(path);
   return payload.data;
