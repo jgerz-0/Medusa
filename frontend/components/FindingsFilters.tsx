@@ -5,6 +5,17 @@ const statusOptions = ['open', 'acknowledged', 'resolved'];
 // Controller scope enforcement yields these discrete values; avoid sending arbitrary strings.
 const scopeOptions = ['unknown', 'in_scope', 'out_of_scope', 'mixed'];
 
+// Controller timestamps arrive as ISO strings; trim to the `datetime-local` HTML format (YYYY-MM-DDTHH:MM).
+function toDatetimeLocalValue(value?: string) {
+  if (!value) {
+    return '';
+  }
+
+  const match = value.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+
+  return match?.[0] ?? '';
+}
+
 type FindingsFiltersProps = {
   searchParams?: {
     scan?: string;
@@ -92,7 +103,7 @@ export function FindingsFilters({ searchParams }: FindingsFiltersProps) {
               <input
                 type="datetime-local"
                 name="from"
-                defaultValue={searchParams?.from ?? ''}
+                defaultValue={toDatetimeLocalValue(searchParams?.from)}
                 className="input"
               />
             </label>
@@ -101,7 +112,7 @@ export function FindingsFilters({ searchParams }: FindingsFiltersProps) {
               <input
                 type="datetime-local"
                 name="to"
-                defaultValue={searchParams?.to ?? ''}
+                defaultValue={toDatetimeLocalValue(searchParams?.to)}
                 className="input"
               />
             </label>
