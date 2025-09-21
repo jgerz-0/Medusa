@@ -51,4 +51,21 @@ describe('FindingsFilters scope control', () => {
 
     form.removeEventListener('submit', submitHandler as EventListener);
   });
+
+  it('formats controller timestamps for datetime-local inputs', () => {
+    render(
+      <FindingsFilters
+        searchParams={{
+          from: '2024-04-01T12:30:45.000Z',
+          to: '2024-04-02T08:09:10+02:00',
+        }}
+      />,
+    );
+
+    const fromInput = screen.getByLabelText(/from/i) as HTMLInputElement;
+    const toInput = screen.getByLabelText(/^to$/i) as HTMLInputElement;
+
+    expect(fromInput.value).toBe('2024-04-01T12:30');
+    expect(toInput.value).toBe('2024-04-02T08:09');
+  });
 });
