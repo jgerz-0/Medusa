@@ -21,3 +21,22 @@ a {
 .card {
   @apply rounded-xl border border-gray-200 bg-white/60 backdrop-blur shadow-md;
 }
+
+.skeleton-base {
+  @apply relative overflow-hidden rounded-md bg-surface-muted/40;
+}
+
+.skeleton-base::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
