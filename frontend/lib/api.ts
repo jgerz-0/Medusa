@@ -4,6 +4,9 @@ import type {
   FindingComment,
   FindingTimelineEvent,
   FindingsTimelineBucket,
+  ReconDiscovery,
+  ReconObservation,
+  ReconRun,
   ReportExportResponse,
   Scan,
   Target,
@@ -19,6 +22,14 @@ type ApiItemResponse<T> = {
 };
 
 interface FindingItemResponse extends ApiItemResponse<Finding> {}
+
+interface ReconDiscoveryCollectionResponse
+  extends ApiCollectionResponse<ReconDiscovery[]> {}
+
+interface ReconRunCollectionResponse extends ApiCollectionResponse<ReconRun[]> {}
+
+interface ReconObservationCollectionResponse
+  extends ApiCollectionResponse<ReconObservation[]> {}
 
 export interface FindingsQuery {
   targetId?: string;
@@ -403,6 +414,47 @@ export async function createGitHubTicket(payload: {
       title: payload.title,
       body: payload.body
     })
+  });
+}
+
+export async function fetchReconDiscoveries(status?: string): Promise<ReconDiscovery[]> {
+  const path = buildPath('/recon/discoveries', { status });
+  const payload = await request<ReconDiscoveryCollectionResponse>(path);
+  return payload.data;
+}
+
+export async function fetchReconRuns(limit?: number): Promise<ReconRun[]> {
+  const path = buildPath('/recon/runs', {
+    limit: typeof limit === 'number' ? `${limit}` : undefined
+  });
+  const payload = await request<ReconRunCollectionResponse>(path);
+  return payload.data;
+}
+
+export async function fetchReconRunObservations(runId: string): Promise<ReconObservation[]> {
+  const payload = await request<ReconObservationCollectionResponse>(
+    `/recon/runs/${runId}/observations`
+  );
+  return payload.data;
+}
+
+export async function promoteDiscovery(payload: {
+  discoveryId: string;
+  targetName: string;
+  scope?: string | null;
+}): Promise<Target> {
+  const body: Record<string, unknown> = {
+    target_name: payload.targetName
+  };
+  const scopeValue = payload.scope?.trim();
+  if (scopeValue) {
+    body.scope = scopeValue;
+  }
+
+  return request<Target>(`/recon/discoveries/${payload.discoveryId}/approve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
   });
 }
 

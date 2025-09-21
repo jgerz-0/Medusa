@@ -61,6 +61,8 @@ from controller.db.models import (
     Scan,
     Target,
     ReconDiscovery,
+    ReconObservation,
+    ReconRun,
 )
 from controller.db.session import SessionLocal
 from controller.notifications import (
@@ -1021,9 +1023,80 @@ class ReconFeedConfig(BaseModel):
         return self
 
 
+class ReconToolingConfig(BaseModel):
+    subfinder: bool = True
+    amass: bool = True
+    httpx: bool = True
+    httpx_ports: List[int] = Field(default_factory=lambda: [80, 443, 8080])
+    httpx_rate_limit: Optional[int] = Field(default=None, ge=1, le=10000)
+    httpx_probe_tls: bool = True
+    httpx_follow_redirects: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_httpx_payload(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        payload = dict(data)
+        httpx_payload = payload.get("httpx")
+        if isinstance(httpx_payload, dict):
+            payload["httpx"] = bool(httpx_payload.get("enabled", True))
+
+            def set_if_present(key: str, *aliases: str) -> None:
+                for alias in (key, *aliases):
+                    if alias in httpx_payload:
+                        payload[key] = httpx_payload[alias]
+                        return
+
+            set_if_present("httpx_ports", "ports")
+            set_if_present("httpx_rate_limit", "rate_limit")
+            set_if_present("httpx_probe_tls", "probe_tls")
+            set_if_present("httpx_follow_redirects", "follow_redirects")
+
+        return payload
+
+    @field_validator("httpx_ports", mode="before")
+    @classmethod
+    def _normalize_ports(cls, value: Optional[Iterable[Any]]) -> List[int]:
+        ports: List[int] = []
+        if not value:
+            return [80, 443, 8080]
+        for item in value:
+            try:
+                port = int(item)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535 and port not in ports:
+                ports.append(port)
+        return ports or [80, 443, 8080]
+
+
+class ReconTargetConfig(BaseModel):
+    target_id: str = Field(..., min_length=1, max_length=36)
+    scope: str = Field(..., min_length=1, max_length=255)
+    asset_type: Literal["domain", "ipv4", "ipv6"] = Field(default="domain")
+    seed_assets: List[str] = Field(default_factory=list)
+
+    @field_validator("seed_assets", mode="before")
+    @classmethod
+    def _normalize_seed_assets(cls, value: Optional[Iterable[str]]) -> List[str]:
+        seeds: List[str] = []
+        for item in value or []:
+            if not isinstance(item, str):
+                continue
+            candidate = item.strip()
+            if candidate and candidate not in seeds:
+                seeds.append(candidate)
+        return seeds
+
+
 class ReconJobRequest(BaseModel):
     source: str = Field(..., min_length=1, max_length=128)
-    feed: ReconFeedConfig
+    mode: Literal["feed", "active"] = Field(default="feed")
+    feed: Optional[ReconFeedConfig] = None
+    targets: List[ReconTargetConfig] = Field(default_factory=list)
+    tools: ReconToolingConfig = Field(default_factory=ReconToolingConfig)
     authorized_scopes: List[str] = Field(
         default_factory=list,
         description="List of domains or CIDR blocks that bound authorized assets",
@@ -1043,8 +1116,6 @@ class ReconJobRequest(BaseModel):
             candidate = item.strip()
             if candidate:
                 scopes.append(candidate)
-        if not scopes:
-            raise ValueError("At least one authorized scope must be provided")
         return scopes
 
     @field_validator("labels", mode="before")
@@ -1059,12 +1130,26 @@ class ReconJobRequest(BaseModel):
                 normalized.append(candidate)
         return normalized
 
+    @model_validator(mode="after")
+    def _validate_mode_requirements(self) -> "ReconJobRequest":
+        if self.mode == "feed":
+            if self.feed is None:
+                raise ValueError("feed configuration is required when mode is 'feed'")
+            if not self.authorized_scopes:
+                raise ValueError("authorized_scopes must contain at least one entry")
+        else:
+            if not self.targets:
+                raise ValueError("At least one target must be supplied for active recon jobs")
+        return self
+
 
 class ReconJobResponse(BaseModel):
     job_id: str
     queued_at: datetime
     source: str
     authorized_scopes: List[str]
+    mode: Literal["feed", "active"]
+    targets: List[ReconTargetConfig] = Field(default_factory=list)
 
 
 class ReconAssetPayload(BaseModel):
@@ -1078,10 +1163,26 @@ class ReconAssetPayload(BaseModel):
     occurrences: int = Field(default=1, ge=1)
 
 
+class ReconTargetExecutionPayload(BaseModel):
+    target_id: Optional[str] = Field(default=None, max_length=36)
+    name: Optional[str] = Field(default=None, max_length=255)
+    scope: str = Field(..., min_length=1, max_length=255)
+    asset_type: Literal["domain", "ipv4", "ipv6"] = Field(default="domain")
+    seed_assets: List[str] = Field(default_factory=list)
+
+
+class ReconExecutionPayload(BaseModel):
+    mode: Literal["feed", "active"] = Field(default="feed")
+    targets: List[ReconTargetExecutionPayload] = Field(default_factory=list)
+    tools: Dict[str, Any] = Field(default_factory=dict)
+
+
 class ReconCallbackRequest(BaseModel):
     job_id: str = Field(..., min_length=1, max_length=128)
     source: str = Field(..., min_length=1, max_length=128)
     retrieved_at: datetime
+    authorized_scopes: List[str] = Field(default_factory=list)
+    execution: Optional[ReconExecutionPayload] = None
     assets: List[ReconAssetPayload]
 
     @model_validator(mode="after")
@@ -1089,6 +1190,70 @@ class ReconCallbackRequest(BaseModel):
         if not self.assets:
             raise ValueError("At least one discovery must be submitted")
         return self
+
+
+class ReconDiscoveryResponse(BaseModel):
+    id: str
+    source: str
+    asset_type: str
+    value: str
+    raw_value: Optional[str]
+    matched_scope: Optional[str]
+    metadata: Dict[str, Any]
+    status: str
+    first_seen: datetime
+    last_seen: datetime
+    occurrences: int
+    approved_target_id: Optional[str]
+    diff_status: Literal["approved", "in_scope", "scope_extension", "unmatched"]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReconDiscoveryCollectionResponse(BaseModel):
+    data: List[ReconDiscoveryResponse]
+
+
+class ReconRunResponse(BaseModel):
+    id: str
+    job_id: str
+    source: str
+    mode: str
+    status: str
+    retrieved_at: datetime
+    authorized_scopes: List[str]
+    tooling: Dict[str, Any]
+    targets: List[Dict[str, Any]]
+    observation_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReconRunCollectionResponse(BaseModel):
+    data: List[ReconRunResponse]
+
+
+class ReconObservationResponse(BaseModel):
+    id: str
+    run_id: str
+    target_id: Optional[str]
+    asset_type: str
+    normalized_value: str
+    raw_value: Optional[str]
+    matched_scope: Optional[str]
+    port: Optional[int]
+    occurrences: int
+    metadata: Dict[str, Any]
+    first_seen: datetime
+    last_seen: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReconObservationCollectionResponse(BaseModel):
+    data: List[ReconObservationResponse]
 
 
 class ReconApproveRequest(BaseModel):
@@ -3143,6 +3308,85 @@ def _asset_in_scope(asset_type: str, asset_value: str, scope: str) -> bool:
     return normalized_asset.endswith(f".{normalized_scope}")
 
 
+def _classify_target_asset_type(scope: str) -> Literal["domain", "ipv4", "ipv6"]:
+    try:
+        network = ip_network(scope, strict=False)
+    except ValueError:
+        return "domain"
+    return "ipv6" if network.version == 6 else "ipv4"
+
+
+def _normalize_seed_for_scope(
+    seed: str, asset_type: str, scope: str
+) -> Optional[str]:
+    candidate = (seed or "").strip()
+    if not candidate:
+        return None
+    if asset_type == "domain":
+        normalized = candidate.lower().rstrip(".")
+        if not normalized:
+            return None
+    else:
+        try:
+            normalized = str(ip_address(candidate))
+        except ValueError:
+            return None
+    if not _asset_in_scope(asset_type, normalized, scope):
+        return None
+    return normalized
+
+
+def _prepare_active_recon_targets(
+    configs: List[ReconTargetConfig], db: Session
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    prepared: List[Dict[str, Any]] = []
+    scopes: List[str] = []
+    for config in configs:
+        target = db.get(Target, config.target_id)
+        if target is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Target {config.target_id} not found",
+            )
+        if not target.is_authorized:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Target is currently outside the authorized scope",
+            )
+        asset_type = _classify_target_asset_type(target.scope)
+        sanitized_seeds: List[str] = []
+        for seed in config.seed_assets:
+            normalized = _normalize_seed_for_scope(seed, asset_type, target.scope)
+            if normalized and normalized not in sanitized_seeds:
+                sanitized_seeds.append(normalized)
+        payload: Dict[str, Any] = {
+            "target_id": target.id,
+            "name": target.name,
+            "scope": target.scope,
+            "asset_type": asset_type,
+        }
+        if sanitized_seeds:
+            payload["seed_assets"] = sanitized_seeds
+        prepared.append(payload)
+        if target.scope not in scopes:
+            scopes.append(target.scope)
+    return prepared, scopes
+
+
+def _discovery_diff_status(discovery: ReconDiscovery) -> Literal[
+    "approved", "in_scope", "scope_extension", "unmatched"
+]:
+    if discovery.status == RECON_STATUS_APPROVED:
+        return "approved"
+    if discovery.matched_scope:
+        normalized_scope = discovery.matched_scope.strip().lower()
+        normalized_value = discovery.value.strip().lower()
+        if normalized_scope == normalized_value:
+            return "in_scope"
+        return "scope_extension"
+    return "unmatched"
+
+
 def _scope_within(candidate: str, reference: str) -> bool:
     candidate_value = candidate.strip()
     reference_value = reference.strip()
@@ -3197,7 +3441,7 @@ def _upsert_recon_discovery(
     first_seen: datetime,
     last_seen: datetime,
     occurrences: int,
-) -> Tuple[ReconDiscovery, bool]:
+) -> Tuple[ReconDiscovery, bool, bool]:
     record = (
         db.query(ReconDiscovery)
         .filter(
@@ -3219,24 +3463,29 @@ def _upsert_recon_discovery(
             occurrences=max(1, occurrences),
         )
         db.add(record)
-        return record, True
+        return record, True, bool(matched_scope)
 
     existing_last_seen = _coerce_recon_timestamp(record.last_seen, last_seen)
     existing_first_seen = _coerce_recon_timestamp(record.first_seen, first_seen)
     incoming_last_seen = _coerce_recon_timestamp(last_seen, existing_last_seen)
     incoming_first_seen = _coerce_recon_timestamp(first_seen, existing_first_seen)
 
+    scope_changed = False
     record.last_seen = max(existing_last_seen, incoming_last_seen)
     record.first_seen = min(existing_first_seen, incoming_first_seen)
     record.occurrences = max(1, record.occurrences + max(1, occurrences))
     if raw_value and not record.raw_value:
         record.raw_value = raw_value
-    if matched_scope and not record.matched_scope:
-        record.matched_scope = matched_scope
+    if matched_scope and matched_scope != (record.matched_scope or ""):
+        if not record.matched_scope:
+            record.matched_scope = matched_scope
+        else:
+            record.matched_scope = matched_scope
+            scope_changed = True
     record.metadata_json = _merge_recon_metadata(
         record.metadata_json, metadata, source=source, existing_source=record.source
     )
-    return record, False
+    return record, False, scope_changed
 
 
 @app.post(
@@ -3265,16 +3514,34 @@ def schedule_recon_job(
     job_id = str(uuid.uuid4())
     queued_at = datetime.now(tz=timezone.utc)
     callback_url = str(http_request.url_for("recon_callback"))
-    job_payload = {
+
+    execution_payload: Dict[str, Any] = {"mode": request.mode}
+    authorized_scopes: List[str]
+    job_targets: List[Dict[str, Any]] = []
+
+    if request.mode == "active":
+        job_targets, active_scopes = _prepare_active_recon_targets(
+            request.targets, db
+        )
+        execution_payload["targets"] = job_targets
+        execution_payload["tools"] = request.tools.model_dump(exclude_none=True)
+        authorized_scopes = active_scopes
+    else:
+        execution_payload["tools"] = {}
+        authorized_scopes = list(request.authorized_scopes)
+
+    job_payload: Dict[str, Any] = {
         "job_id": job_id,
         "source": request.source,
-        "feed": request.feed.model_dump(exclude_none=True),
-        "authorized_scopes": list(request.authorized_scopes),
+        "authorized_scopes": authorized_scopes,
         "labels": list(request.labels),
         "queued_at": queued_at.isoformat(),
         "requested_by": principal.subject,
         "callback_url": callback_url,
+        "execution": execution_payload,
     }
+    if request.mode == "feed" and request.feed is not None:
+        job_payload["feed"] = request.feed.model_dump(exclude_none=True)
 
     queue.enqueue(settings.recon_queue_channel, job_payload)
     metrics.record_job_enqueued("recon")
@@ -3287,8 +3554,10 @@ def schedule_recon_job(
         resource_id=job_id,
         metadata={
             "source": request.source,
-            "authorized_scopes": list(request.authorized_scopes),
+            "authorized_scopes": authorized_scopes,
             "labels": list(request.labels),
+            "mode": request.mode,
+            "target_count": len(job_targets),
         },
     )
 
@@ -3296,8 +3565,163 @@ def schedule_recon_job(
         job_id=job_id,
         queued_at=queued_at,
         source=request.source,
-        authorized_scopes=list(request.authorized_scopes),
+        mode=request.mode,
+        authorized_scopes=authorized_scopes,
+        targets=[ReconTargetConfig.model_validate(target) for target in job_targets]
+        if job_targets
+        else [],
     )
+
+
+@app.get(
+    "/recon/discoveries",
+    response_model=ReconDiscoveryCollectionResponse,
+    status_code=status.HTTP_200_OK,
+)
+def list_recon_discoveries(
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> ReconDiscoveryCollectionResponse:
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/recon/discoveries",
+    )
+
+    query = db.query(ReconDiscovery)
+    if status_filter:
+        normalized_status = status_filter.strip().lower()
+        query = query.filter(ReconDiscovery.status == normalized_status)
+
+    discoveries = (
+        query.order_by(ReconDiscovery.last_seen.desc()).limit(200).all()
+    )
+    data = [
+        ReconDiscoveryResponse(
+            id=discovery.id,
+            source=discovery.source,
+            asset_type=discovery.asset_type,
+            value=discovery.value,
+            raw_value=discovery.raw_value,
+            matched_scope=discovery.matched_scope,
+            metadata=dict(discovery.metadata_json),
+            status=discovery.status,
+            first_seen=_coerce_recon_timestamp(discovery.first_seen, discovery.first_seen),
+            last_seen=_coerce_recon_timestamp(discovery.last_seen, discovery.last_seen),
+            occurrences=discovery.occurrences,
+            approved_target_id=discovery.approved_target_id,
+            diff_status=_discovery_diff_status(discovery),
+        )
+        for discovery in discoveries
+    ]
+    return ReconDiscoveryCollectionResponse(data=data)
+
+
+@app.get(
+    "/recon/runs",
+    response_model=ReconRunCollectionResponse,
+    status_code=status.HTTP_200_OK,
+)
+def list_recon_runs(
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    limit: int = Query(default=25, ge=1, le=200),
+) -> ReconRunCollectionResponse:
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/recon/runs",
+    )
+
+    runs = (
+        db.query(ReconRun)
+        .options(selectinload(ReconRun.observations))
+        .order_by(ReconRun.retrieved_at.desc())
+        .limit(limit)
+        .all()
+    )
+    data = [
+        ReconRunResponse(
+            id=run.id,
+            job_id=run.job_id,
+            source=run.source,
+            mode=run.mode,
+            status=run.status,
+            retrieved_at=_coerce_recon_timestamp(run.retrieved_at, run.retrieved_at),
+            authorized_scopes=list(run.authorized_scopes or []),
+            tooling=dict(run.tooling or {}),
+            targets=list(run.targets or []),
+            observation_count=len(run.observations or []),
+            created_at=run.created_at,
+            updated_at=run.updated_at,
+        )
+        for run in runs
+    ]
+    return ReconRunCollectionResponse(data=data)
+
+
+@app.get(
+    "/recon/runs/{run_id}/observations",
+    response_model=ReconObservationCollectionResponse,
+    status_code=status.HTTP_200_OK,
+)
+def list_recon_run_observations(
+    run_id: str,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> ReconObservationCollectionResponse:
+    enforce_roles(
+        principal,
+        [ROLE_TARGETS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/recon/runs/{run_id}/observations",
+    )
+
+    run = (
+        db.query(ReconRun)
+        .options(selectinload(ReconRun.observations))
+        .filter(ReconRun.id == run_id)
+        .one_or_none()
+    )
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recon run not found",
+        )
+
+    observations = sorted(
+        run.observations,
+        key=lambda item: _coerce_recon_timestamp(item.last_seen, item.last_seen),
+        reverse=True,
+    )
+    data = [
+        ReconObservationResponse(
+            id=observation.id,
+            run_id=observation.run_id,
+            target_id=observation.target_id,
+            asset_type=observation.asset_type,
+            normalized_value=observation.normalized_value,
+            raw_value=observation.raw_value,
+            matched_scope=observation.matched_scope,
+            port=observation.port,
+            occurrences=observation.occurrences,
+            metadata=dict(observation.metadata_json),
+            first_seen=_coerce_recon_timestamp(
+                observation.first_seen, observation.first_seen
+            ),
+            last_seen=_coerce_recon_timestamp(
+                observation.last_seen, observation.last_seen
+            ),
+        )
+        for observation in observations
+    ]
+    return ReconObservationCollectionResponse(data=data)
 
 
 @app.post(
@@ -4876,16 +5300,97 @@ def recon_callback(
 
     processed = 0
     created_count = 0
+    scope_changes = 0
+    execution_mode = payload.execution.mode if payload.execution else "feed"
+    execution_context = (
+        payload.execution.model_dump(exclude_none=True)
+        if payload.execution
+        else {"mode": execution_mode, "targets": [], "tools": {}}
+    )
+    run = (
+        db.query(ReconRun)
+        .filter(ReconRun.job_id == payload.job_id)
+        .one_or_none()
+    )
+    if run is None:
+        run = ReconRun(
+            job_id=payload.job_id,
+            source=payload.source,
+            mode=execution_mode,
+            status="completed",
+            retrieved_at=_coerce_recon_timestamp(payload.retrieved_at, payload.retrieved_at),
+            authorized_scopes=list(dict.fromkeys(payload.authorized_scopes or [])),
+            tooling=execution_context.get("tools", {}),
+            targets=execution_context.get("targets", []),
+            metadata_json={},
+        )
+    else:
+        run.source = payload.source
+        run.mode = execution_mode
+        run.status = "completed"
+        run.retrieved_at = _coerce_recon_timestamp(
+            payload.retrieved_at, run.retrieved_at
+        )
+        run.authorized_scopes = list(dict.fromkeys(payload.authorized_scopes or []))
+        run.tooling = execution_context.get("tools", {})
+        run.targets = execution_context.get("targets", [])
+
+    run.metadata_json = {
+        "asset_count": len(aggregated),
+        "authorized_scopes": list(run.authorized_scopes),
+    }
+    run.observations.clear()
+    db.add(run)
+
+    scope_cache: Dict[str, Optional[str]] = {}
     try:
         for asset in aggregated:
-            _, created = _upsert_recon_discovery(
+            metadata = dict(asset.get("metadata", {}))
+            target_id: Optional[str] = None
+            if isinstance(metadata.get("target_id"), str):
+                target_id = metadata.get("target_id")
+            matched_scope = asset.get("matched_scope")
+            if target_id is None and isinstance(matched_scope, str) and matched_scope:
+                if matched_scope not in scope_cache:
+                    target_obj = (
+                        db.query(Target)
+                        .filter(Target.scope == matched_scope)
+                        .one_or_none()
+                    )
+                    scope_cache[matched_scope] = target_obj.id if target_obj else None
+                cached_id = scope_cache.get(matched_scope)
+                if cached_id:
+                    target_id = cached_id
+
+            port_value = metadata.get("port")
+            try:
+                port = int(port_value) if port_value is not None else None
+            except (TypeError, ValueError):
+                port = None
+
+            observation = ReconObservation(
+                run=run,
+                target_id=target_id,
+                asset_type=asset["asset_type"],
+                normalized_value=asset["value"],
+                raw_value=asset.get("raw_value"),
+                matched_scope=matched_scope,
+                port=port,
+                occurrences=asset["occurrences"],
+                metadata_json=metadata,
+                first_seen=asset["first_seen"],
+                last_seen=asset["last_seen"],
+            )
+            run.observations.append(observation)
+
+            _, created, scope_changed = _upsert_recon_discovery(
                 db,
                 source=payload.source,
                 asset_type=asset["asset_type"],
                 value=asset["value"],
                 raw_value=asset.get("raw_value"),
                 matched_scope=asset.get("matched_scope"),
-                metadata=asset.get("metadata", {}),
+                metadata=metadata,
                 first_seen=asset["first_seen"],
                 last_seen=asset["last_seen"],
                 occurrences=asset["occurrences"],
@@ -4893,6 +5398,8 @@ def recon_callback(
             processed += 1
             if created:
                 created_count += 1
+            if scope_changed:
+                scope_changes += 1
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
@@ -4919,6 +5426,9 @@ def recon_callback(
             "assets_received": len(payload.assets),
             "assets_persisted": processed,
             "assets_created": created_count,
+            "scope_changes": scope_changes,
+            "run_id": run.id,
+            "mode": execution_mode,
         },
     )
 
@@ -4929,6 +5439,8 @@ def recon_callback(
             "source": payload.source,
             "processed": processed,
             "created": created_count,
+            "scope_changes": scope_changes,
+            "run_id": run.id,
             "worker_subject": principal.subject,
         },
     )

@@ -6,7 +6,7 @@ import datetime
 import hashlib
 import json
 import uuid
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import (
     JSON,
@@ -233,6 +233,79 @@ class ReconDiscovery(TimestampMixin, Base):
     )
 
     approved_target: Mapped[Optional[Target]] = relationship(back_populates=None)
+
+
+class ReconRun(TimestampMixin, Base):
+    """Single recon worker execution and the tooling profile used."""
+
+    __tablename__ = "recon_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    job_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), default="feed", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="completed", nullable=False)
+    retrieved_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    authorized_scopes: Mapped[List[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    tooling: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    targets: Mapped[List[Dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+
+    observations: Mapped[List["ReconObservation"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class ReconObservation(TimestampMixin, Base):
+    """Per-run assets emitted by recon tooling before analyst review."""
+
+    __tablename__ = "recon_observations"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "asset_type",
+            "normalized_value",
+            "port",
+            name="ux_recon_observation_asset",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("recon_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    target_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("targets.id", ondelete="SET NULL"), nullable=True
+    )
+    asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    normalized_value: Mapped[str] = mapped_column(String(1024), nullable=False)
+    raw_value: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    matched_scope: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    port: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    occurrences: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+    first_seen: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_seen: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    run: Mapped[ReconRun] = relationship(back_populates="observations")
+    target: Mapped[Optional[Target]] = relationship(back_populates=None)
 
 
 class Finding(TimestampMixin, Base):

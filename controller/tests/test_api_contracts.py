@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import uuid
 import uuid
+from datetime import datetime, timezone
 from typing import Generator, Tuple
 
 from fastapi.testclient import TestClient
@@ -26,6 +27,7 @@ from controller.db.models import (
     Target,
 )
 from controller.main import (
+    CALLBACK_TOKEN_HEADER,
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
     NUCLEI_TEMPLATE_PROFILES,
@@ -2263,3 +2265,119 @@ def test_finding_workflow_and_reporting(
     assert timeline.status_code == 200
     timeline_payload = timeline.json()["data"]
     assert isinstance(timeline_payload, list)
+
+
+def test_recon_active_job_flow(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, queue, session_factory, settings = api_client
+
+    with session_factory() as session:
+        target = Target(name="Example", scope="example.com", is_authorized=True)
+        session.add(target)
+        session.commit()
+        target_id = target.id
+
+    enqueue_response = client.post(
+        "/recon/jobs",
+        json={
+            "source": "operations:test",
+            "mode": "active",
+            "targets": [
+                {
+                    "target_id": target_id,
+                    "scope": "example.com",
+                    "asset_type": "domain",
+                    "seed_assets": ["Portal.Example.com"],
+                }
+            ],
+            "tools": {"subfinder": True, "amass": True, "httpx": {"enabled": True, "httpx_ports": [80]}},
+            "labels": ["attack-surface"],
+        },
+        headers=auth_headers(),
+    )
+    assert enqueue_response.status_code == 202, enqueue_response.text
+    job_response = enqueue_response.json()
+    assert job_response["mode"] == "active"
+    assert job_response["targets"][0]["target_id"] == target_id
+
+    assert queue.messages, "Recon job should be enqueued"
+    channel, job_payload = queue.messages.pop()
+    assert channel == settings.recon_queue_channel
+    assert job_payload["execution"]["mode"] == "active"
+    assert job_payload["execution"]["targets"][0]["seed_assets"] == [
+        "portal.example.com"
+    ]
+
+    now = datetime.now(tz=timezone.utc).isoformat()
+    callback_payload = {
+        "job_id": job_payload["job_id"],
+        "source": "operations:test",
+        "retrieved_at": now,
+        "authorized_scopes": job_payload["authorized_scopes"],
+        "execution": {
+            "mode": "active",
+            "targets": job_payload["execution"]["targets"],
+            "tools": job_payload["execution"]["tools"],
+        },
+        "assets": [
+            {
+                "asset_type": "domain",
+                "normalized_value": "api.example.com",
+                "raw_value": "API.example.com",
+                "matched_scope": "example.com",
+                "metadata": {"sources": ["subfinder"], "target_id": target_id},
+                "first_seen": now,
+                "last_seen": now,
+                "occurrences": 1,
+            },
+            {
+                "asset_type": "url",
+                "normalized_value": "https://api.example.com",
+                "raw_value": "https://api.example.com",
+                "matched_scope": "example.com",
+                "metadata": {
+                    "sources": ["httpx"],
+                    "target_id": target_id,
+                    "port": 443,
+                    "service": {"status_code": 200, "technologies": ["Go"]},
+                },
+                "first_seen": now,
+                "last_seen": now,
+                "occurrences": 1,
+            },
+        ],
+    }
+
+    callback_response = client.post(
+        "/internal/recon",
+        json=callback_payload,
+        headers={CALLBACK_TOKEN_HEADER: settings.recon_callback_token},
+    )
+    assert callback_response.status_code == 204, callback_response.text
+
+    discoveries_response = client.get("/recon/discoveries", headers=auth_headers())
+    assert discoveries_response.status_code == 200
+    discoveries = discoveries_response.json()["data"]
+    assert len(discoveries) >= 1
+    assert discoveries[0]["diff_status"] in {
+        "in_scope",
+        "scope_extension",
+        "approved",
+        "unmatched",
+    }
+
+    runs_response = client.get("/recon/runs", headers=auth_headers())
+    assert runs_response.status_code == 200
+    runs = runs_response.json()["data"]
+    assert runs, "Recon run should be recorded"
+    run_id = runs[0]["id"]
+    assert runs[0]["observation_count"] == 2
+
+    observations_response = client.get(
+        f"/recon/runs/{run_id}/observations", headers=auth_headers()
+    )
+    assert observations_response.status_code == 200
+    observations = observations_response.json()["data"]
+    assert len(observations) == 2
+    assert any(item["asset_type"] == "url" for item in observations)
