@@ -66,7 +66,6 @@ export default function FindingsLoading() {
           ]}
         />
         <FiltersSkeleton label="Loading findings filters" />
-        <FiltersSkeleton label="Loading secondary findings filters" />
       </header>
       <TableSkeleton
         caption="Findings"
