@@ -11,6 +11,54 @@ export interface Target {
   updated_at: string;
 }
 
+export type DiscoveryDiffStatus = 'approved' | 'in_scope' | 'scope_extension' | 'unmatched';
+
+export interface ReconDiscovery {
+  id: string;
+  source: string;
+  asset_type: string;
+  value: string;
+  raw_value?: string | null;
+  matched_scope?: string | null;
+  metadata: Record<string, unknown>;
+  status: string;
+  diff_status: DiscoveryDiffStatus;
+  first_seen: string;
+  last_seen: string;
+  occurrences: number;
+  approved_target_id?: string | null;
+}
+
+export interface ReconRun {
+  id: string;
+  job_id: string;
+  source: string;
+  mode: string;
+  status: string;
+  retrieved_at: string;
+  authorized_scopes: string[];
+  tooling: Record<string, unknown>;
+  targets: Record<string, unknown>[];
+  observation_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReconObservation {
+  id: string;
+  run_id: string;
+  target_id?: string | null;
+  asset_type: string;
+  normalized_value: string;
+  raw_value?: string | null;
+  matched_scope?: string | null;
+  port?: number | null;
+  occurrences: number;
+  metadata: Record<string, unknown>;
+  first_seen: string;
+  last_seen: string;
+}
+
 export interface Scan {
   id: string;
   target_id: string;
