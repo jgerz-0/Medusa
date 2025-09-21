@@ -6,7 +6,7 @@ Phase 6 extends the Medusa controller and dashboard with analyst workflows, expo
 
 * Findings now track `status`, `assigned_to`, `tags`, and comment counts. Assignment automatically acknowledges open findings.
 * `/findings/{id}/assign`, `/findings/{id}/status`, and `/findings/{id}/tags` endpoints enforce RBAC (analyst or admin) and record audit events.
-* `/findings/{id}/comments` provides immutable analyst commentary with hashes persisted in the database.
+* `/findings/{id}/comments` provides immutable analyst commentary with canonical SHA-256 hashes persisted in the database for audit reconciliation.
 * `/findings/{id}/timeline` aggregates audit events for a per-finding history.
 
 ## Filtering & Timeline Views
@@ -28,6 +28,7 @@ Phase 6 extends the Medusa controller and dashboard with analyst workflows, expo
 ## Security & Auditability
 
 * All new endpoints reuse `record_audit_event`, ensure immutable hashes for comments/tickets, and sanitize inputs (tags, statuses, references).
+* Hash fields on persisted records (`metadata_hash`, `evidence_hash`, `advisories_hash`, `errors_hash`, `provenance_hash`, `payload_hash`) are guaranteed to be populated using canonical JSON serialization so downstream systems can detect tampering.
 * Role constants now include `report:export` and `ticket:create`; admin credentials receive both by default.
 
 Consult the updated API tests (`controller/tests/test_api_contracts.py`) for example payloads and regression coverage.

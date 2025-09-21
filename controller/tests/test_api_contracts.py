@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import uuid
 import uuid
 from datetime import datetime, timezone
-from typing import Generator, Tuple
+from typing import Any, Generator, Tuple
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -21,6 +21,8 @@ from controller.db.models import (
     BinarySymbolicExecutionFinding,
     Finding,
     FindingEnrichment,
+    FindingComment,
+    FindingTicket,
     FindingValidation,
     PrincipalCredential,
     Scan,
@@ -32,6 +34,7 @@ from controller.main import (
     DEFAULT_ANALYST_ROLES,
     NUCLEI_TEMPLATE_PROFILES,
     Settings,
+    _hash_json_payload,
     _hash_secret,
     app,
     get_db_session,
@@ -195,6 +198,7 @@ def _create_finding_record(session_factory: sessionmaker) -> str:
         session.add(scan)
         session.flush()
 
+        evidence_payload = {"proof": "error-based"}
         finding = Finding(
             scan_id=scan.id,
             title="Synthetic SQL Injection",
@@ -202,8 +206,8 @@ def _create_finding_record(session_factory: sessionmaker) -> str:
             cve_id="CVE-2099-0001",
             description="Regression finding for RBAC coverage.",
             metadata_json={"vector": "GET /?id=1"},
-            evidence={"proof": "error-based"},
-            evidence_hash="",
+            evidence=evidence_payload,
+            evidence_hash=_hash_json_payload(evidence_payload),
         )
         session.add(finding)
         session.commit()
@@ -388,6 +392,7 @@ def test_static_analysis_enqueue_flow(
         session.add(preprocess_scan)
         session.flush()
 
+        sample_metadata = {"sha256": "ab" * 32}
         sample = BinarySample(
             scan_id=preprocess_scan.id,
             target_id=target_payload["id"],
@@ -400,8 +405,8 @@ def test_static_analysis_enqueue_flow(
             policy_reasons=[],
             storage_bucket="binary-uploads",
             storage_key="uploads/sample.bin",
-            metadata_json={"sha256": "ab" * 32},
-            metadata_hash="",
+            metadata_json=sample_metadata,
+            metadata_hash=_hash_json_payload(sample_metadata),
             processed_at=datetime.now(tz=timezone.utc),
         )
         session.add(sample)
@@ -453,6 +458,7 @@ def test_symbolic_execution_enqueue_flow(
         session.add(preprocess_scan)
         session.flush()
 
+        sample_metadata = {"sha256": "ef" * 32}
         sample = BinarySample(
             scan_id=preprocess_scan.id,
             target_id=target_payload["id"],
@@ -465,8 +471,8 @@ def test_symbolic_execution_enqueue_flow(
             policy_reasons=[],
             storage_bucket="binary-uploads",
             storage_key="uploads/sample.bin",
-            metadata_json={"sha256": "ef" * 32},
-            metadata_hash="",
+            metadata_json=sample_metadata,
+            metadata_hash=_hash_json_payload(sample_metadata),
             processed_at=datetime.now(tz=timezone.utc),
         )
         session.add(sample)
@@ -521,6 +527,7 @@ def test_binary_static_analysis_callback_persists_findings(
         session.add(preprocess_scan)
         session.flush()
 
+        sample_metadata: dict[str, Any] = {}
         sample = BinarySample(
             scan_id=preprocess_scan.id,
             target_id=target.id,
@@ -533,8 +540,8 @@ def test_binary_static_analysis_callback_persists_findings(
             policy_reasons=[],
             storage_bucket="binary-uploads",
             storage_key="uploads/sample.bin",
-            metadata_json={},
-            metadata_hash="",
+            metadata_json=sample_metadata,
+            metadata_hash=_hash_json_payload(sample_metadata),
             processed_at=datetime.now(tz=timezone.utc),
         )
         session.add(sample)
@@ -630,6 +637,7 @@ def test_binary_symbolic_execution_callback_persists_findings(
         session.add(preprocess_scan)
         session.flush()
 
+        sample_metadata: dict[str, Any] = {}
         sample = BinarySample(
             scan_id=preprocess_scan.id,
             target_id=target.id,
@@ -642,8 +650,8 @@ def test_binary_symbolic_execution_callback_persists_findings(
             policy_reasons=[],
             storage_bucket="binary-uploads",
             storage_key="uploads/sample.bin",
-            metadata_json={},
-            metadata_hash="",
+            metadata_json=sample_metadata,
+            metadata_hash=_hash_json_payload(sample_metadata),
             processed_at=datetime.now(tz=timezone.utc),
         )
         session.add(sample)
@@ -744,6 +752,7 @@ def test_binary_fuzzing_enqueue(
         session.add(preprocess_scan)
         session.flush()
 
+        sample_metadata: dict[str, Any] = {}
         sample = BinarySample(
             scan_id=preprocess_scan.id,
             target_id=target.id,
@@ -756,8 +765,8 @@ def test_binary_fuzzing_enqueue(
             policy_reasons=[],
             storage_bucket="binary-uploads",
             storage_key="uploads/sample.bin",
-            metadata_json={},
-            metadata_hash="",
+            metadata_json=sample_metadata,
+            metadata_hash=_hash_json_payload(sample_metadata),
             processed_at=datetime.now(tz=timezone.utc),
         )
         session.add(sample)
@@ -811,6 +820,7 @@ def test_binary_fuzzing_callback_persists_findings(
         session.add(preprocess_scan)
         session.flush()
 
+        sample_metadata: dict[str, Any] = {}
         sample = BinarySample(
             scan_id=preprocess_scan.id,
             target_id=target.id,
@@ -823,8 +833,8 @@ def test_binary_fuzzing_callback_persists_findings(
             policy_reasons=[],
             storage_bucket="binary-uploads",
             storage_key="uploads/sample.bin",
-            metadata_json={},
-            metadata_hash="",
+            metadata_json=sample_metadata,
+            metadata_hash=_hash_json_payload(sample_metadata),
             processed_at=datetime.now(tz=timezone.utc),
         )
         session.add(sample)
@@ -1211,14 +1221,15 @@ def test_finding_contracts(
         session.add(scan)
         session.flush()
 
+        evidence_payload = {"request": "GET /?id='"}
         finding = Finding(
             scan_id=scan.id,
             title="SQL injection",
             severity="high",
             cve_id="CVE-2024-0001",
             description="Unsanitised input",
-            evidence={"request": "GET /?id='"},
-            evidence_hash="",
+            evidence=evidence_payload,
+            evidence_hash=_hash_json_payload(evidence_payload),
         )
         session.add(finding)
         session.commit()
@@ -1280,13 +1291,14 @@ def test_validation_enqueue_flow(
         session.add(scan)
         session.flush()
 
+        evidence_payload = {"url": "https://val.example/login"}
         finding = Finding(
             scan_id=scan.id,
             title="Critical Exposure",
             severity="critical",
             description="demo",
-            evidence={"url": "https://val.example/login"},
-            evidence_hash="",
+            evidence=evidence_payload,
+            evidence_hash=_hash_json_payload(evidence_payload),
         )
         session.add(finding)
         session.commit()
@@ -1333,13 +1345,14 @@ def test_validation_force_allows_requeue(
         session.add(scan)
         session.flush()
 
+        evidence_payload = {"vector": "id=1"}
         finding = Finding(
             scan_id=scan.id,
             title="SQLi",
             severity="high",
             description="demo",
-            evidence={"vector": "id=1"},
-            evidence_hash="",
+            evidence=evidence_payload,
+            evidence_hash=_hash_json_payload(evidence_payload),
             validation_status="passed",
             validated_at=datetime.now(timezone.utc),
         )
@@ -1400,13 +1413,14 @@ def test_validator_callback_records_validation(
         session.add(scan)
         session.flush()
 
+        evidence_payload = {"endpoint": "/admin"}
         finding = Finding(
             scan_id=scan.id,
             title="Critical Exposure",
             severity="critical",
             description="demo",
-            evidence={"endpoint": "/admin"},
-            evidence_hash="",
+            evidence=evidence_payload,
+            evidence_hash=_hash_json_payload(evidence_payload),
         )
         session.add(finding)
         session.commit()
@@ -1447,6 +1461,8 @@ def test_validator_callback_records_validation(
         validations = session.query(FindingValidation).filter_by(finding_id=finding_id).all()
         assert len(validations) == 1
         assert validations[0].validator == "retest-agent"
+        assert len(validations[0].evidence_hash) == 64
+        assert len(validations[0].metadata_hash) == 64
 
     assert slack_calls, "Slack notification should be dispatched for critical findings"
     assert email_calls, "Email notification should be dispatched for critical findings"
@@ -1521,25 +1537,27 @@ def test_findings_scope_filter(api_client: Tuple[TestClient, InMemoryQueue, sess
         session.add_all([in_scope_scan, out_scope_scan])
         session.flush()
 
+        in_scope_evidence = {"url": "https://app.corp.example/login"}
         in_scope_finding = Finding(
             scan_id=in_scope_scan.id,
             title="Compliant",
             severity="medium",
             description="Within authorized scope",
             metadata_json={"host": "app.corp.example"},
-            evidence={"url": "https://app.corp.example/login"},
-            evidence_hash="",
+            evidence=in_scope_evidence,
+            evidence_hash=_hash_json_payload(in_scope_evidence),
             scope_status="in_scope",
             status="open",
         )
+        out_scope_evidence = {"url": "http://attacker.example"}
         out_scope_finding = Finding(
             scan_id=out_scope_scan.id,
             title="Drift",
             severity="medium",
             description="Out-of-scope artifact",
             metadata_json={"host": "attacker.example"},
-            evidence={"url": "http://attacker.example"},
-            evidence_hash="",
+            evidence=out_scope_evidence,
+            evidence_hash=_hash_json_payload(out_scope_evidence),
             scope_status="out_of_scope",
             status="open",
         )
@@ -1609,6 +1627,7 @@ def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:
         session.add(scan)
         session.flush()
 
+        evidence_payload = {"request": "GET /?id='"}
         finding = Finding(
             scan_id=scan.id,
             title="SQL injection",
@@ -1616,8 +1635,8 @@ def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:
             cve_id="CVE-2024-9999",
             description="Unsanitised input",
             metadata_json={"template": "cve"},
-            evidence={"request": "GET /?id='"},
-            evidence_hash="",
+            evidence=evidence_payload,
+            evidence_hash=_hash_json_payload(evidence_payload),
         )
         session.add(finding)
         session.commit()
@@ -1663,7 +1682,10 @@ def test_enrichment_callback_persists_results(
             .filter(FindingEnrichment.job_id == payload["job_id"])
             .one()
         )
-        assert enrichment.payload_hash
+        assert len(enrichment.advisories_hash) == 64
+        assert len(enrichment.errors_hash) == 64
+        assert len(enrichment.provenance_hash) == 64
+        assert len(enrichment.payload_hash) == 64
         assert enrichment.provenance["worker_subject"] == "worker:enrichment"
 
         audit = (
@@ -1973,13 +1995,20 @@ def test_audit_log_listing_filters_and_audits(
         session.add(scan)
         session.flush()
 
+        seed_snapshot = {"resource_type": "target", "resource_id": target.id}
+        finding_snapshot = {
+            "resource_type": "finding",
+            "scan_id": scan.id,
+            "note": "seed",
+        }
+        cleanup_snapshot = {"resource_type": "target", "resource_id": "old-id"}
         entries = [
             AuditLog(
                 actor="bootstrap-admin",
                 action="create_target",
                 message="seed entry",
-                evidence_snapshot={"resource_type": "target", "resource_id": target.id},
-                evidence_hash="",
+                evidence_snapshot=seed_snapshot,
+                evidence_hash=_hash_json_payload(seed_snapshot),
                 created_at=now - timedelta(minutes=5),
             ),
             AuditLog(
@@ -1987,20 +2016,16 @@ def test_audit_log_listing_filters_and_audits(
                 action="list_findings",
                 message="read findings",
                 scan_id=scan.id,
-                evidence_snapshot={
-                    "resource_type": "finding",
-                    "scan_id": scan.id,
-                    "note": "seed",
-                },
-                evidence_hash="",
+                evidence_snapshot=finding_snapshot,
+                evidence_hash=_hash_json_payload(finding_snapshot),
                 created_at=now - timedelta(minutes=3),
             ),
             AuditLog(
                 actor="bootstrap-admin",
                 action="delete_target",
                 message="cleanup",
-                evidence_snapshot={"resource_type": "target", "resource_id": "old-id"},
-                evidence_hash="",
+                evidence_snapshot=cleanup_snapshot,
+                evidence_hash=_hash_json_payload(cleanup_snapshot),
                 created_at=now - timedelta(minutes=1),
             ),
         ]
@@ -2233,6 +2258,16 @@ def test_finding_workflow_and_reporting(
     )
     assert comment_response.status_code == 201, comment_response.text
 
+    with session_factory() as session:
+        stored_comment = (
+            session.query(FindingComment)
+            .filter(FindingComment.finding_id == finding_id)
+            .order_by(FindingComment.created_at.desc())
+            .first()
+        )
+        assert stored_comment is not None
+        assert len(stored_comment.metadata_hash) == 64
+
     comments_list = client.get(
         f"/findings/{finding_id}/comments", headers=auth_headers()
     )
@@ -2260,6 +2295,14 @@ def test_finding_workflow_and_reporting(
     assert jira_response.status_code == 201, jira_response.text
     jira_payload = jira_response.json()
     assert jira_payload["integration"] == "jira"
+
+    with session_factory() as session:
+        jira_ticket = (
+            session.query(FindingTicket)
+            .filter(FindingTicket.reference == jira_payload["reference"])
+            .one()
+        )
+        assert len(jira_ticket.payload_hash) == 64
 
     export_response = client.post(
         "/reports/export",
@@ -2403,3 +2446,37 @@ def test_recon_active_job_flow(
     observations = observations_response.json()["data"]
     assert len(observations) == 2
     assert any(item["asset_type"] == "url" for item in observations)
+
+
+def test_hash_json_payload_handles_empty_structures() -> None:
+    empty_dict_hash = _hash_json_payload({})
+    empty_list_hash = _hash_json_payload([])
+    assert len(empty_dict_hash) == 64
+    assert len(empty_list_hash) == 64
+    assert empty_dict_hash != empty_list_hash
+
+
+def test_hash_json_payload_ignores_dict_key_order() -> None:
+    payload_a = {
+        "alpha": 1,
+        "nested": {"beta": 2, "gamma": 3},
+        "items": [
+            {"name": "first", "value": 1},
+            {"name": "second", "value": 2},
+        ],
+    }
+    payload_b = {
+        "items": [
+            {"value": 1, "name": "first"},
+            {"value": 2, "name": "second"},
+        ],
+        "nested": {"gamma": 3, "beta": 2},
+        "alpha": 1,
+    }
+    assert _hash_json_payload(payload_a) == _hash_json_payload(payload_b)
+
+
+def test_hash_json_payload_respects_list_order() -> None:
+    ascending = [1, 2, 3]
+    descending = list(reversed(ascending))
+    assert _hash_json_payload(ascending) != _hash_json_payload(descending)
