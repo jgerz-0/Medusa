@@ -15,10 +15,20 @@ following attributes:
 - **key_hash** – SHA-256 hash of the API key secret. Empty for JWT/OIDC subjects.
 - **roles** – JSON array describing the permissions the subject holds.
 - **revoked_at** – null when active, timestamp when the credential is revoked.
+- **expires_at** – optional timestamp establishing when auto-provisioned material
+  should be considered stale.
+- **source** – provenance for the credential (`manual` for seeded/API records,
+  `oidc:auto` when synchronized from the identity provider).
 
 API keys are compared using the stored hash; JWT and OIDC subjects must also be
 present in this table to be accepted. The controller rejects any credential that
 is not registered or that lacks roles.
+
+When `expires_at` is populated the controller will refuse to authenticate the
+credential once the timestamp passes—unless the record is managed by the OIDC
+auto-provisioner described below. The `source` column keeps a forensic trail of
+how the credential was issued so analysts can differentiate manual secrets from
+IdP-driven automation.
 
 ## Authentication Flow
 
@@ -138,6 +148,34 @@ Each response returns deterministic pagination metadata:
 
 Every successful listing writes an additional `list_audit_log` entry so the
 system can attest to who inspected the logs and when.
+
+## OIDC Auto-Provisioning
+
+Medusa can now bootstrap and maintain OIDC principals directly from identity
+provider claims. The feature is gated behind the following settings (expressed
+as environment variables using the `MEDUSA_` prefix):
+
+- `OIDC_AUTO_PROVISION_ENABLED` – opt-in flag that enables the workflow.
+- `OIDC_AUTO_PROVISION_ALLOWED_ISSUERS` – list of trusted `iss` values that may
+  trigger provisioning. Defaults to the configured validator issuer when empty.
+- `OIDC_AUTO_PROVISION_ALLOWED_ROLES` – explicit allow-list of Medusa roles that
+  can be synchronized. Any role outside this list results in a `403` to prevent
+  privilege escalation. Defaults to the global role set when empty.
+- `OIDC_AUTO_PROVISION_CLAIM` – claim containing IdP groups (default `groups`).
+- `OIDC_AUTO_PROVISION_ROLE_MAP` – JSON object mapping IdP group names to Medusa
+  roles. Example: `{"redteam": ["targets:read"], "ops": ["scan:enqueue"]}`.
+- `OIDC_AUTO_PROVISION_TTL_SECONDS` – optional lifetime for provisioned
+  credentials. When set, logins refresh the expiration timestamp so dormant
+  accounts naturally age out.
+
+On successful validation the controller creates or updates
+`principal_credentials` rows with `source = 'oidc:auto'`. Provisioning and every
+subsequent role synchronization emit explicit audit log events that capture the
+issuer, assigned roles, and expiry changes. If the IdP ever removes a role, the
+next login updates Medusa to match and records a `sync_oidc_principal` audit
+trail. Conversely, if a subject is manually revoked the auto-provisioner will
+deny the login and note the revocation in the audit log—ensuring downstream
+automation cannot silently re-enable access.
 
 ## Operational Workflow
 

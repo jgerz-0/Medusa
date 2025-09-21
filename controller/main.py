@@ -13,7 +13,7 @@ import textwrap
 import time
 import uuid
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from io import BytesIO
 from functools import lru_cache
@@ -119,6 +119,9 @@ ALLOWED_ROLES = {
     ROLE_TICKETING_CREATE,
     ROLE_RECON_ENQUEUE,
 }
+
+CREDENTIAL_SOURCE_MANUAL = "manual"
+CREDENTIAL_SOURCE_OIDC_AUTO = "oidc:auto"
 
 FINDING_STATUS_PENDING_VALIDATION = "pending_validation"
 FINDING_STATUS_OPEN = "open"
@@ -781,6 +784,40 @@ class Settings(BaseSettings):
         default=5,
         ge=1,
         description="Timeout in seconds for JWKS retrieval requests.",
+    )
+    oidc_auto_provision_enabled: bool = Field(
+        default=False,
+        description=(
+            "Automatically create or synchronize OIDC principals when a trusted "
+            "token is presented."
+        ),
+    )
+    oidc_auto_provision_claim: str = Field(
+        default="groups",
+        description="Token claim containing IdP groups used for role mappings.",
+    )
+    oidc_auto_provision_role_map: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Mapping of IdP group names to Medusa roles for auto-provisioning.",
+    )
+    oidc_auto_provision_allowed_roles: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Restrict auto-provisioned subjects to this subset of Medusa roles. "
+            "Defaults to the global allowed role set when empty."
+        ),
+    )
+    oidc_auto_provision_allowed_issuers: List[str] = Field(
+        default_factory=list,
+        description="OIDC issuers permitted to trigger auto-provisioning workflows.",
+    )
+    oidc_auto_provision_ttl_seconds: Optional[int] = Field(
+        default=None,
+        ge=60,
+        description=(
+            "Optional lifetime, in seconds, before an auto-provisioned credential "
+            "is considered expired."
+        ),
     )
     rate_limit_max_requests: int = Field(
         default=300,
@@ -1856,6 +1893,8 @@ class PrincipalCredentialResponse(BaseModel):
     description: Optional[str]
     created_at: datetime
     revoked_at: Optional[datetime]
+    expires_at: Optional[datetime] = None
+    source: str = Field(default=CREDENTIAL_SOURCE_MANUAL)
     key_fingerprint: Optional[str] = Field(
         default=None,
         description=(
@@ -2209,6 +2248,108 @@ def _authenticate_oidc(
     ]
     filtered_roles = [role for role in normalized_roles if role in ALLOWED_ROLES]
 
+    def _normalize_claim_values(value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            candidate = value.strip()
+            return [candidate] if candidate else []
+        if isinstance(value, Iterable) and not isinstance(
+            value, (dict, bytes, bytearray)
+        ):
+            normalized: List[str] = []
+            for item in value:
+                candidate = str(item).strip()
+                if candidate:
+                    normalized.append(candidate)
+            return normalized
+        return []
+
+    mapping_claim = settings.oidc_auto_provision_claim or token_roles_claim
+    mapping_values = _normalize_claim_values(payload.get(mapping_claim))
+    role_map = settings.oidc_auto_provision_role_map or {}
+    mapped_roles: set[str] = set()
+    for claim_value in mapping_values:
+        for mapped_role in role_map.get(claim_value, []):
+            candidate = str(mapped_role).strip()
+            if candidate:
+                mapped_roles.add(candidate)
+
+    def _coerce_aware(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    allowed_role_set = (
+        set(settings.oidc_auto_provision_allowed_roles)
+        if settings.oidc_auto_provision_allowed_roles
+        else set(ALLOWED_ROLES)
+    )
+
+    disallowed_token_roles = [
+        role for role in filtered_roles if role not in allowed_role_set
+    ]
+    disallowed_mapped_roles = [
+        role
+        for role in mapped_roles
+        if role not in allowed_role_set or role not in ALLOWED_ROLES
+    ]
+    if disallowed_token_roles or disallowed_mapped_roles:
+        unauthorized_principal = Principal(
+            subject=str(subject_value),
+            auth_method="oidc",
+            roles=[],
+        )
+        extra_metadata = {
+            "issuer": validator.issuer,
+            "token_roles": filtered_roles,
+            "mapped_roles": sorted(mapped_roles),
+            "kid": header.get("kid"),
+            "disallowed_roles": sorted(
+                set(disallowed_token_roles) | set(disallowed_mapped_roles)
+            ),
+        }
+        log_access_denied(
+            db,
+            principal=unauthorized_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=None,
+            reason="roles_not_permitted",
+            detail="OIDC token requested roles outside the allow list",
+            status_code=status.HTTP_403_FORBIDDEN,
+            extra_metadata=extra_metadata,
+        )
+
+    candidate_roles: set[str] = {
+        role for role in filtered_roles if role in allowed_role_set
+    }
+    candidate_roles.update(
+        role
+        for role in mapped_roles
+        if role in allowed_role_set and role in ALLOWED_ROLES
+    )
+    desired_roles = sorted(candidate_roles)
+
+    issuer_claim = payload.get("iss")
+    issuer = issuer_claim if isinstance(issuer_claim, str) else None
+    allowed_issuers = set(settings.oidc_auto_provision_allowed_issuers)
+    if not allowed_issuers and settings.oidc_issuer:
+        allowed_issuers.add(settings.oidc_issuer)
+    auto_enabled = (
+        settings.oidc_auto_provision_enabled
+        and issuer is not None
+        and issuer in allowed_issuers
+    )
+
+    now = datetime.now(tz=timezone.utc)
+    ttl_seconds = settings.oidc_auto_provision_ttl_seconds
+    expiration_candidate = (
+        now + timedelta(seconds=ttl_seconds) if ttl_seconds is not None else None
+    )
+
     record = (
         db.query(PrincipalCredential)
         .filter(
@@ -2218,11 +2359,98 @@ def _authenticate_oidc(
         )
         .first()
     )
+
     if record is None:
+        if auto_enabled:
+            revoked_record = (
+                db.query(PrincipalCredential)
+                .filter(
+                    PrincipalCredential.auth_method == "oidc",
+                    PrincipalCredential.subject == subject_value,
+                    PrincipalCredential.revoked_at.isnot(None),
+                )
+                .order_by(PrincipalCredential.revoked_at.desc())
+                .first()
+            )
+            if revoked_record is not None:
+                revoked_principal = Principal(
+                    subject=str(subject_value), auth_method="oidc", roles=[]
+                )
+                log_access_denied(
+                    db,
+                    principal=revoked_principal,
+                    required_roles=[],
+                    resource_type="principal_credential",
+                    resource_id=str(revoked_record.id),
+                    reason="subject_revoked",
+                    detail="OIDC subject previously revoked",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    extra_metadata={
+                        "issuer": issuer,
+                        "revoked_at": revoked_record.revoked_at.isoformat()
+                        if revoked_record.revoked_at
+                        else None,
+                        "kid": header.get("kid"),
+                    },
+                )
+
+            description = (
+                f"Auto-provisioned from {issuer}" if issuer else "Auto-provisioned via OIDC"
+            )
+            credential = PrincipalCredential(
+                subject=str(subject_value),
+                auth_method="oidc",
+                roles=desired_roles,
+                description=description,
+                expires_at=expiration_candidate,
+                source=CREDENTIAL_SOURCE_OIDC_AUTO,
+            )
+            try:
+                db.add(credential)
+                db.commit()
+                db.refresh(credential)
+            except SQLAlchemyError:
+                db.rollback()
+                LOGGER.exception(
+                    "Failed to auto-provision OIDC principal",
+                    extra={"subject": subject_value, "issuer": issuer},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Unable to synchronize OIDC credential store",
+                )
+
+            provisioned_roles = list(credential.roles or [])
+            metadata: Dict[str, Any] = {
+                "issuer": issuer,
+                "roles": provisioned_roles,
+                "credential_id": str(credential.id),
+            }
+            if credential.expires_at:
+                metadata["expires_at"] = credential.expires_at.isoformat()
+            record_audit_event(
+                db,
+                actor=Principal(
+                    subject=credential.subject,
+                    auth_method="oidc",
+                    roles=provisioned_roles,
+                ),
+                action="provision_oidc_principal",
+                resource_type="principal_credential",
+                resource_id=str(credential.id),
+                metadata=metadata,
+            )
+
+            return Principal(
+                subject=credential.subject,
+                auth_method="oidc",
+                roles=provisioned_roles,
+            )
+
         unauthorized_principal = Principal(
             subject=str(subject_value),
             auth_method="oidc",
-            roles=filtered_roles,
+            roles=desired_roles,
         )
         log_access_denied(
             db,
@@ -2236,22 +2464,135 @@ def _authenticate_oidc(
             extra_metadata={
                 "issuer": validator.issuer,
                 "token_roles": filtered_roles,
+                "mapped_roles": sorted(mapped_roles),
                 "kid": header.get("kid"),
             },
         )
 
-    roles = list(record.roles or [])
-    if filtered_roles and not set(filtered_roles).issubset(set(roles)):
-        LOGGER.info(
-            "OIDC token roles exceed stored principal permissions",
-            extra={
-                "subject": subject_value,
-                "token_roles": filtered_roles,
-                "stored_roles": roles,
+    managed_by_oidc = record.source == CREDENTIAL_SOURCE_OIDC_AUTO
+    stored_roles = list(record.roles or [])
+    stored_roles_sorted = sorted(stored_roles)
+    desired_role_set = set(desired_roles)
+    stored_role_set = set(stored_roles_sorted)
+    record_expires_at = _coerce_aware(record.expires_at)
+
+    if (
+        record_expires_at
+        and record_expires_at <= now
+        and not (managed_by_oidc and auto_enabled)
+    ):
+        expired_principal = Principal(
+            subject=record.subject,
+            auth_method="oidc",
+            roles=stored_roles,
+        )
+        log_access_denied(
+            db,
+            principal=expired_principal,
+            required_roles=[],
+            resource_type="principal_credential",
+            resource_id=str(record.id),
+            reason="credential_expired",
+            detail="OIDC credential expired",
+            status_code=status.HTTP_403_FORBIDDEN,
+            extra_metadata={
+                "issuer": issuer,
+                "expires_at": record_expires_at.isoformat()
+                if record_expires_at
+                else None,
             },
         )
 
-    return Principal(subject=record.subject, auth_method="oidc", roles=roles)
+    previous_roles = stored_roles_sorted
+    previous_expires_at = record_expires_at
+    roles_changed = False
+    expiration_changed = False
+
+    if managed_by_oidc and auto_enabled:
+        if desired_roles != stored_roles_sorted:
+            record.roles = desired_roles
+            roles_changed = True
+
+        if expiration_candidate is not None:
+            if record_expires_at is None or record_expires_at <= now:
+                record.expires_at = expiration_candidate
+                expiration_changed = True
+                record_expires_at = expiration_candidate
+        elif record.expires_at is not None:
+            record.expires_at = None
+            expiration_changed = True
+            record_expires_at = None
+    elif desired_role_set and not desired_role_set.issubset(stored_role_set):
+        drift_metadata = {
+            "issuer": issuer,
+            "token_roles": desired_roles,
+            "stored_roles": stored_roles_sorted,
+            "credential_id": str(record.id),
+        }
+        record_audit_event(
+            db,
+            actor=Principal(
+                subject=record.subject,
+                auth_method="oidc",
+                roles=stored_roles,
+            ),
+            action="oidc_role_drift_detected",
+            resource_type="principal_credential",
+            resource_id=str(record.id),
+            metadata=drift_metadata,
+        )
+
+    if roles_changed or expiration_changed:
+        try:
+            db.add(record)
+            db.commit()
+            db.refresh(record)
+        except SQLAlchemyError:
+            db.rollback()
+            LOGGER.exception(
+                "Failed to synchronize OIDC principal",
+                extra={"subject": record.subject, "issuer": issuer},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Unable to synchronize OIDC credential store",
+            )
+
+        sync_metadata: Dict[str, Any] = {
+            "issuer": issuer,
+            "credential_id": str(record.id),
+        }
+        if roles_changed:
+            sync_metadata["previous_roles"] = previous_roles
+            sync_metadata["updated_roles"] = list(record.roles or [])
+        else:
+            sync_metadata["roles"] = list(record.roles or [])
+        if expiration_changed:
+            sync_metadata["previous_expires_at"] = (
+                previous_expires_at.isoformat() if previous_expires_at else None
+            )
+            sync_metadata["expires_at"] = (
+                record.expires_at.isoformat() if record.expires_at else None
+            )
+
+        record_audit_event(
+            db,
+            actor=Principal(
+                subject=record.subject,
+                auth_method="oidc",
+                roles=list(record.roles or []),
+            ),
+            action="sync_oidc_principal",
+            resource_type="principal_credential",
+            resource_id=str(record.id),
+            metadata=sync_metadata,
+        )
+
+    return Principal(
+        subject=record.subject,
+        auth_method="oidc",
+        roles=list(record.roles or []),
+    )
 
 
 def enforce_request_rate_limit(
@@ -2846,6 +3187,7 @@ def create_principal_credential(
         key_hash=key_hash,
         roles=assigned_roles,
         description=request.description,
+        source=CREDENTIAL_SOURCE_MANUAL,
     )
     db.add(credential)
     db.commit()

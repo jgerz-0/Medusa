@@ -26,6 +26,7 @@ from controller.db.models import (
     Target,
 )
 from controller.main import (
+    CREDENTIAL_SOURCE_MANUAL,
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
     NUCLEI_TEMPLATE_PROFILES,
@@ -117,6 +118,7 @@ def api_client() -> (
             auth_method="api_key",
             key_hash=_hash_secret("test-key"),
             roles=list(DEFAULT_ADMIN_ROLES),
+            source=CREDENTIAL_SOURCE_MANUAL,
         )
         session.add(bootstrap_credential)
         session.commit()
@@ -228,6 +230,8 @@ def _provision_principal(
     payload = response.json()
     secret = payload["secret"]
     fingerprint = payload["key_fingerprint"]
+    assert payload["source"] == CREDENTIAL_SOURCE_MANUAL
+    assert payload["expires_at"] is None
     assert isinstance(fingerprint, str) and fingerprint
     return secret, {"X-API-Key": secret}
 
@@ -1004,6 +1008,8 @@ def test_principal_rotation_flow(
     assert isinstance(first_secret, str) and first_secret
     first_id = first_payload["id"]
     assert first_payload["revoked_at"] is None
+    assert first_payload["source"] == CREDENTIAL_SOURCE_MANUAL
+    assert first_payload["expires_at"] is None
     first_fingerprint = first_payload["key_fingerprint"]
     assert first_fingerprint == _hash_secret(first_secret)[:12]
 
@@ -1014,6 +1020,7 @@ def test_principal_rotation_flow(
     revoked_payload = revoke_response.json()
     assert revoked_payload["revoked_at"] is not None
     assert revoked_payload["key_fingerprint"] == first_fingerprint
+    assert revoked_payload["source"] == CREDENTIAL_SOURCE_MANUAL
 
     rotate_response = client.post(
         "/principals",
@@ -1032,6 +1039,8 @@ def test_principal_rotation_flow(
     assert second_secret != first_secret
     assert second_payload["id"] != first_id
     assert second_payload["revoked_at"] is None
+    assert second_payload["source"] == CREDENTIAL_SOURCE_MANUAL
+    assert second_payload["expires_at"] is None
     second_fingerprint = second_payload["key_fingerprint"]
     assert second_fingerprint == _hash_secret(second_secret)[:12]
 
@@ -1149,6 +1158,8 @@ def test_revoked_api_key_denied_with_audit_trail(
     payload = create_response.json()
     secret = payload["secret"]
     fingerprint = payload["key_fingerprint"]
+    assert payload["source"] == CREDENTIAL_SOURCE_MANUAL
+    assert payload["expires_at"] is None
     revoked_headers = {"X-API-Key": secret}
 
     baseline = client.get("/targets", headers=revoked_headers)
@@ -1762,6 +1773,7 @@ def test_rbac_denial_is_audited(
                 auth_method="api_key",
                 key_hash=_hash_secret(analyst_key),
                 roles=list(DEFAULT_ANALYST_ROLES),
+                source=CREDENTIAL_SOURCE_MANUAL,
             )
         )
         session.commit()
@@ -1806,6 +1818,7 @@ def test_revoked_api_key_denial_is_audited(
             key_hash=_hash_secret(revoked_key),
             roles=list(DEFAULT_ANALYST_ROLES),
             revoked_at=now,
+            source=CREDENTIAL_SOURCE_MANUAL,
         )
         session.add(credential)
         session.commit()
@@ -1858,6 +1871,7 @@ def test_targets_listing_requires_read_role(
             subject="limited@example.com",
             auth_method="jwt",
             roles=["findings:read"],
+            source=CREDENTIAL_SOURCE_MANUAL,
         )
         session.add(credential)
         session.commit()
@@ -1896,6 +1910,7 @@ def test_scans_listing_enforces_role_requirements(
             subject="restricted@example.com",
             auth_method="jwt",
             roles=["findings:read"],
+            source=CREDENTIAL_SOURCE_MANUAL,
         )
         session.add(credential)
         session.commit()
@@ -2157,6 +2172,7 @@ def test_api_key_revocation_enforced_and_audited(
             key_hash=_hash_secret("revoked-key"),
             roles=list(DEFAULT_ANALYST_ROLES),
             revoked_at=datetime.now(tz=timezone.utc),
+            source=CREDENTIAL_SOURCE_MANUAL,
         )
         session.add(revoked_credential)
         session.commit()

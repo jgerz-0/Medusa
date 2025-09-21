@@ -14,7 +14,12 @@ from sqlalchemy.orm import Session
 
 from controller.db.models import PrincipalCredential
 from controller.db.session import session_scope
-from controller.main import DEFAULT_ADMIN_ROLES, DEFAULT_ANALYST_ROLES, _hash_secret
+from controller.main import (
+    CREDENTIAL_SOURCE_MANUAL,
+    DEFAULT_ADMIN_ROLES,
+    DEFAULT_ANALYST_ROLES,
+    _hash_secret,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -105,6 +110,7 @@ def _ensure_principal(
             key_hash=_hash_secret(secret),
             roles=list(dict.fromkeys(seed.roles)),
             description=seed.description,
+            source=CREDENTIAL_SOURCE_MANUAL,
         )
         session.add(credential)
         generated_secret = secret if secret != known_secret else None
@@ -116,6 +122,9 @@ def _ensure_principal(
         raise RuntimeError(
             f"Principal {seed.subject} exists with auth_method={credential.auth_method}"
         )
+
+    if credential.source != CREDENTIAL_SOURCE_MANUAL:
+        credential.source = CREDENTIAL_SOURCE_MANUAL
 
     # Ensure the principal retains baseline roles for local workflows.
     desired_roles = list(dict.fromkeys(seed.roles))

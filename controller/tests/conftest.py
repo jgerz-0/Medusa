@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from controller.db.models import Base, PrincipalCredential
 from controller.main import (
+    CREDENTIAL_SOURCE_MANUAL,
     DEFAULT_ADMIN_ROLES,
     QueueClient,
     Settings,
@@ -75,6 +76,7 @@ def api_client() -> (
             auth_method="api_key",
             key_hash=_hash_secret("test-key"),
             roles=list(DEFAULT_ADMIN_ROLES),
+            source=CREDENTIAL_SOURCE_MANUAL,
         )
         session.add(bootstrap_credential)
         session.commit()

@@ -6,6 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from controller.db.models import Base, PrincipalCredential
 from controller.main import (
+    CREDENTIAL_SOURCE_MANUAL,
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
     QueueClient,
@@ -104,6 +105,7 @@ def client():
                     key_hash=_hash_secret("test-key"),
                     roles=list(DEFAULT_ADMIN_ROLES),
                     description="Controller admin",
+                    source=CREDENTIAL_SOURCE_MANUAL,
                 ),
                 PrincipalCredential(
                     subject="svc-analyst",
@@ -111,18 +113,21 @@ def client():
                     key_hash=_hash_secret("analyst-key"),
                     roles=list(DEFAULT_ANALYST_ROLES),
                     description="Read-only analyst",
+                    source=CREDENTIAL_SOURCE_MANUAL,
                 ),
                 PrincipalCredential(
                     subject="jwt-admin",
                     auth_method="jwt",
                     roles=["admin"],
                     description="JWT admin",
+                    source=CREDENTIAL_SOURCE_MANUAL,
                 ),
                 PrincipalCredential(
                     subject="jwt-analyst",
                     auth_method="jwt",
                     roles=["analyst"],
                     description="JWT analyst",
+                    source=CREDENTIAL_SOURCE_MANUAL,
                 ),
             ]
         )
