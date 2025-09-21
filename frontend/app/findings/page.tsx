@@ -1,62 +1,88 @@
 import type { Metadata } from 'next';
 import { fetchFindings, fetchFindingsTimeline } from '@/lib/api';
-import type { Finding, FindingsTimelineBucket } from '@/lib/types';
+import type { FindingsTimelineBucket } from '@/lib/types';
 import { FindingsTable } from '@/components/FindingsTable';
 import { FindingsFilters } from '@/components/FindingsFilters';
 import { FindingsTimeline } from '@/components/FindingsTimeline';
+import type { SearchParamsInput } from '@/lib/searchParams';
 
 export const metadata: Metadata = {
   title: 'Findings | Medusa Operations Console'
 };
 
 interface FindingsPageProps {
-  searchParams?: {
-    scan?: string;
-    severity?: string;
-    status?: string;
-    tag?: string;
-    assigned?: string;
-    from?: string;
-    to?: string;
-  };
+  searchParams?: SearchParamsInput;
+}
+
+function parsePositiveInteger(value: string | string[] | undefined, fallback: number): number {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== 'string') {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 export default async function FindingsPage({ searchParams }: FindingsPageProps) {
   let error: string | null = null;
-  let findings: Finding[] = [];
+  let findingsResponse: Awaited<ReturnType<typeof fetchFindings>> | null = null;
   let timeline: FindingsTimelineBucket[] = [];
   let timelineError: string | null = null;
 
+  const page = parsePositiveInteger(searchParams?.page, 1);
+  const pageSize = parsePositiveInteger(searchParams?.page_size, 50);
+
+  const filterParams = {
+    scan: typeof searchParams?.scan === 'string' ? searchParams?.scan : undefined,
+    severity: typeof searchParams?.severity === 'string' ? searchParams?.severity : undefined,
+    status: typeof searchParams?.status === 'string' ? searchParams?.status : undefined,
+    tag: typeof searchParams?.tag === 'string' ? searchParams?.tag : undefined,
+    assigned: typeof searchParams?.assigned === 'string' ? searchParams?.assigned : undefined,
+    from: typeof searchParams?.from === 'string' ? searchParams?.from : undefined,
+    to: typeof searchParams?.to === 'string' ? searchParams?.to : undefined
+  };
+
   const query = {
-    scanId: searchParams?.scan,
-    severity: searchParams?.severity,
-    status: searchParams?.status,
-    tag: searchParams?.tag,
-    assignedTo: searchParams?.assigned,
-    from: searchParams?.from,
-    to: searchParams?.to
+    scanId: filterParams.scan,
+    severity: filterParams.severity,
+    status: filterParams.status,
+    tag: filterParams.tag,
+    assignedTo: filterParams.assigned,
+    from: filterParams.from,
+    to: filterParams.to,
+    page,
+    pageSize
   };
 
   try {
-    findings = await fetchFindings(query);
+    findingsResponse = await fetchFindings(query);
   } catch (err) {
     error = err instanceof Error ? err.message : 'Failed to load findings.';
   }
 
   try {
-    timeline = await fetchFindingsTimeline(query);
+    timeline = await fetchFindingsTimeline({
+      scanId: query.scanId,
+      severity: query.severity,
+      status: query.status,
+      tag: query.tag,
+      assignedTo: query.assignedTo,
+      from: query.from,
+      to: query.to
+    });
   } catch (err) {
     timelineError = err instanceof Error ? err.message : 'Failed to load timeline.';
   }
 
   const hasFilters = Boolean(
-    searchParams?.scan ||
-      searchParams?.severity ||
-      searchParams?.status ||
-      searchParams?.tag ||
-      searchParams?.assigned ||
-      searchParams?.from ||
-      searchParams?.to
+    filterParams.scan ||
+      filterParams.severity ||
+      filterParams.status ||
+      filterParams.tag ||
+      filterParams.assigned ||
+      filterParams.from ||
+      filterParams.to
   );
 
   return (
@@ -68,18 +94,18 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
             Normalized findings aggregated from controller scans with severity and workflow state metadata.
           </p>
         </div>
-        <FindingsFilters searchParams={searchParams} />
+        <FindingsFilters searchParams={filterParams} />
         {hasFilters ? (
           <div className="card border-surface-muted/60 bg-surface-muted/20 px-4 py-3 text-xs text-gray-300">
             <p className="font-semibold uppercase tracking-wide text-gray-400">Active Filters</p>
             <ul className="mt-1 flex flex-wrap gap-2 font-mono">
-              {searchParams?.scan && <li>scan_id={searchParams.scan}</li>}
-              {searchParams?.severity && <li>severity={searchParams.severity}</li>}
-              {searchParams?.status && <li>status={searchParams.status}</li>}
-              {searchParams?.tag && <li>tag={searchParams.tag}</li>}
-              {searchParams?.assigned && <li>assigned={searchParams.assigned}</li>}
-              {searchParams?.from && <li>from={searchParams.from}</li>}
-              {searchParams?.to && <li>to={searchParams.to}</li>}
+              {filterParams.scan && <li>scan_id={filterParams.scan}</li>}
+              {filterParams.severity && <li>severity={filterParams.severity}</li>}
+              {filterParams.status && <li>status={filterParams.status}</li>}
+              {filterParams.tag && <li>tag={filterParams.tag}</li>}
+              {filterParams.assigned && <li>assigned={filterParams.assigned}</li>}
+              {filterParams.from && <li>from={filterParams.from}</li>}
+              {filterParams.to && <li>to={filterParams.to}</li>}
             </ul>
           </div>
         ) : null}
@@ -89,7 +115,11 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
           {error}
         </div>
       ) : (
-        <FindingsTable findings={findings} />
+        <FindingsTable
+          findings={findingsResponse?.data ?? []}
+          pagination={findingsResponse?.pagination ?? undefined}
+          searchParams={searchParams}
+        />
       )}
       {timelineError ? (
         <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200">

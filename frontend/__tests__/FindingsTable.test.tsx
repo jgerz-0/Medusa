@@ -57,7 +57,8 @@ describe('FindingsTable', () => {
         metadata: { scanner: 'nuclei', rule_id: 'nuclei-tls-expired' },
         tags: ['tls', 'expired'],
         comment_count: 1,
-        tickets: []
+        tickets: [],
+        scope_status: 'unknown'
       },
       {
         id: 'finding-002',
@@ -78,7 +79,8 @@ describe('FindingsTable', () => {
         metadata: { scanner: 'nuclei', rule_id: 'nuclei-dir-listing' },
         tags: [],
         comment_count: 0,
-        tickets: []
+        tickets: [],
+        scope_status: 'unknown'
       }
     ];
 
@@ -124,7 +126,8 @@ describe('FindingsTable', () => {
             created_at: '2024-02-01T08:05:00Z',
             metadata: {}
           }
-        ]
+        ],
+        scope_status: 'in_scope'
       },
       {
         id: 'finding-sqlmap',
@@ -146,7 +149,8 @@ describe('FindingsTable', () => {
         metadata: { scanner: 'sqlmap', rule_id: 'sqlmap:id' },
         tags: ['injection'],
         comment_count: 0,
-        tickets: []
+        tickets: [],
+        scope_status: 'unknown'
       }
     ];
 

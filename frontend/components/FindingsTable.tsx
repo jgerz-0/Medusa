@@ -1,8 +1,9 @@
 import Link from 'next/link';
 import { formatDistanceToNow } from 'date-fns';
-import { DataTable } from './DataTable';
+import { DataTable, type DataTablePaginationConfig } from './DataTable';
 import { StatusBadge } from './StatusBadge';
 import type { Finding } from '@/lib/types';
+import { buildSearchParamsHref, type SearchParamsInput } from '@/lib/searchParams';
 
 function relativeTime(value: string) {
   return formatDistanceToNow(new Date(value), { addSuffix: true });
@@ -13,12 +14,66 @@ function scannerLabel(finding: Finding) {
   return typeof rawScanner === 'string' && rawScanner.trim() ? rawScanner : 'unknown';
 }
 
-export function FindingsTable({ findings }: { findings: Finding[] }) {
+interface FindingsTableProps {
+  findings: Finding[];
+  pagination?: Pick<DataTablePaginationConfig, 'page' | 'pageSize' | 'total'>;
+  searchParams?: SearchParamsInput;
+  basePath?: string;
+}
+
+function buildPaginationConfig(
+  pagination: Pick<DataTablePaginationConfig, 'page' | 'pageSize' | 'total'>,
+  searchParams: SearchParamsInput,
+  basePath: string
+): DataTablePaginationConfig {
+  const safePageSize = pagination.pageSize > 0 ? Math.trunc(pagination.pageSize) : 1;
+
+  // Maintain filter scoping across pagination operations.
+  return {
+    ...pagination,
+    pageSize: safePageSize,
+    pageSizeOptions: [25, 50, 100, 200],
+    onPageChange: (page) => {
+      if (!Number.isFinite(page) || page < 1) {
+        return undefined;
+      }
+
+      return buildSearchParamsHref({
+        basePath,
+        params: searchParams,
+        updates: {
+          page: `${Math.trunc(page)}`,
+          page_size: `${safePageSize}`
+        }
+      });
+    },
+    onPageSizeChange: (pageSize) => {
+      if (!Number.isFinite(pageSize) || pageSize < 1) {
+        return undefined;
+      }
+
+      const normalized = Math.trunc(pageSize);
+      return buildSearchParamsHref({
+        basePath,
+        params: searchParams,
+        updates: {
+          page: '1',
+          page_size: `${normalized}`
+        }
+      });
+    }
+  } satisfies DataTablePaginationConfig;
+}
+
+export function FindingsTable({ findings, pagination, searchParams, basePath = '/findings' }: FindingsTableProps) {
+  const tablePagination = pagination ? buildPaginationConfig(pagination, searchParams, basePath) : undefined;
+
   return (
     <DataTable<Finding>
       itemKey={(finding) => finding.id}
       data={findings}
       emptyState={<p>No findings were produced for this selection.</p>}
+      pagination={tablePagination}
       columns={[
         {
           key: 'title',
