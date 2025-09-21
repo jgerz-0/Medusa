@@ -39,6 +39,7 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
     scan: typeof searchParams?.scan === 'string' ? searchParams?.scan : undefined,
     severity: typeof searchParams?.severity === 'string' ? searchParams?.severity : undefined,
     status: typeof searchParams?.status === 'string' ? searchParams?.status : undefined,
+    scope: typeof searchParams?.scope === 'string' ? searchParams?.scope : undefined,
     tag: typeof searchParams?.tag === 'string' ? searchParams?.tag : undefined,
     assigned: typeof searchParams?.assigned === 'string' ? searchParams?.assigned : undefined,
     from: typeof searchParams?.from === 'string' ? searchParams?.from : undefined,
@@ -49,6 +50,7 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
     scanId: filterParams.scan,
     severity: filterParams.severity,
     status: filterParams.status,
+    scope: filterParams.scope,
     tag: filterParams.tag,
     assignedTo: filterParams.assigned,
     from: filterParams.from,
@@ -68,6 +70,7 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
       scanId: query.scanId,
       severity: query.severity,
       status: query.status,
+      scope: query.scope,
       tag: query.tag,
       assignedTo: query.assignedTo,
       from: query.from,
@@ -81,6 +84,7 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
     filterParams.scan ||
       filterParams.severity ||
       filterParams.status ||
+      filterParams.scope ||
       filterParams.tag ||
       filterParams.assigned ||
       filterParams.from ||
@@ -119,6 +123,7 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
               {filterParams.scan && <li>scan_id={filterParams.scan}</li>}
               {filterParams.severity && <li>severity={filterParams.severity}</li>}
               {filterParams.status && <li>status={filterParams.status}</li>}
+              {filterParams.scope && <li>scope={filterParams.scope}</li>}
               {filterParams.tag && <li>tag={filterParams.tag}</li>}
               {filterParams.assigned && <li>assigned={filterParams.assigned}</li>}
               {filterParams.from && <li>from={filterParams.from}</li>}
