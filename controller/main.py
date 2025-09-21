@@ -993,6 +993,39 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return payload
 
 
+def _canonicalize_for_hash(value: Any) -> Any:
+    """Return a canonical JSON-compatible structure for hashing."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        canonical: Dict[str, Any] = {}
+        for key in sorted(value.keys(), key=lambda item: str(item)):
+            canonical[str(key)] = _canonicalize_for_hash(value[key])
+        return canonical
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize_for_hash(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        canonical_items = [_canonicalize_for_hash(item) for item in value]
+        return sorted(
+            canonical_items,
+            key=lambda item: json.dumps(
+                item, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ),
+        )
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    return str(value)
+
+
+def _hash_json_payload(payload: Any) -> str:
+    """Canonicalize arbitrary payloads and return a SHA-256 hex digest."""
+
+    canonical = _canonicalize_for_hash(payload)
+    serialized = json.dumps(canonical, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 Network = Union[IPv4Network, IPv6Network]
 
 
@@ -6293,6 +6326,8 @@ def _handle_legacy_validator_callback(
 
     executed_at = payload.executed_at.astimezone(timezone.utc)
     normalized_status = payload.status.lower()
+    metadata_payload = deepcopy(_normalize_payload(payload.metadata))
+    evidence_payload = deepcopy(_normalize_payload(payload.evidence))
     validation = FindingValidation(
         finding_id=finding.id,
         job_id=payload.job_id,
@@ -6302,10 +6337,10 @@ def _handle_legacy_validator_callback(
         requested_by=payload.requested_by,
         requested_at=payload.requested_at,
         notes=payload.notes,
-        metadata_json=deepcopy(_normalize_payload(payload.metadata)),
-        evidence=deepcopy(_normalize_payload(payload.evidence)),
-        evidence_hash="",
-        metadata_hash="",
+        metadata_json=metadata_payload,
+        evidence=evidence_payload,
+        evidence_hash=_hash_json_payload(evidence_payload),
+        metadata_hash=_hash_json_payload(metadata_payload),
     )
     db.add(validation)
 
@@ -6529,17 +6564,18 @@ def enrichment_callback(
     if errors:
         provenance["error_sources"] = sorted(errors.keys())
 
+    payload_material = payload.model_dump(mode="json")
     enrichment = FindingEnrichment(
         finding_id=finding.id,
         job_id=payload.job_id,
         generated_at=generated_at,
         advisories=advisories,
-        advisories_hash="",
+        advisories_hash=_hash_json_payload(advisories),
         errors=errors,
-        errors_hash="",
+        errors_hash=_hash_json_payload(errors),
         provenance=provenance,
-        provenance_hash="",
-        payload_hash="",
+        provenance_hash=_hash_json_payload(provenance),
+        payload_hash=_hash_json_payload(payload_material),
     )
     db.add(enrichment)
 
@@ -7374,12 +7410,13 @@ def create_finding_comment(
             detail="Comment body cannot be empty",
         )
 
+    metadata_payload = {"source": "analyst"}
     comment = FindingComment(
         finding_id=finding_id,
         author=principal.subject,
         message=message,
-        metadata_json={"source": "analyst"},
-        metadata_hash="",
+        metadata_json=metadata_payload,
+        metadata_hash=_hash_json_payload(metadata_payload),
     )
     db.add(comment)
     db.commit()
@@ -7670,6 +7707,7 @@ def create_jira_ticket(
         "finding_id": finding.id,
     }
 
+    payload_hash = _hash_json_payload(payload)
     ticket = FindingTicket(
         finding_id=finding.id,
         integration="jira",
@@ -7677,7 +7715,7 @@ def create_jira_ticket(
         url=None,
         status="queued",
         payload=payload,
-        payload_hash="",
+        payload_hash=payload_hash,
         created_by=principal.subject,
     )
     db.add(ticket)
@@ -7748,6 +7786,7 @@ def create_github_ticket(
         "finding_id": finding.id,
     }
 
+    payload_hash = _hash_json_payload(payload)
     ticket = FindingTicket(
         finding_id=finding.id,
         integration="github",
@@ -7755,7 +7794,7 @@ def create_github_ticket(
         url=None,
         status="queued",
         payload=payload,
-        payload_hash="",
+        payload_hash=payload_hash,
         created_by=principal.subject,
     )
     db.add(ticket)
