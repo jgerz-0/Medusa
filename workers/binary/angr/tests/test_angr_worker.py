@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional
 
 import pytest
 
