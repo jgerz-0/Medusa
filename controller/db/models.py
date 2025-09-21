@@ -103,6 +103,17 @@ def _normalize_validation_status(value: Optional[str]) -> str:
     return "pending"
 
 
+def _normalize_scope_status(value: Optional[str]) -> str:
+    """Normalize scope compliance annotations for findings."""
+
+    allowed = {"unknown", "in_scope", "out_of_scope", "mixed"}
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in allowed:
+            return lowered
+    return "unknown"
+
+
 class TimestampMixin:
     """Reusable timestamp columns."""
 
@@ -190,7 +201,9 @@ class Finding(TimestampMixin, Base):
     )
     evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), default="pending_validation", nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), default="pending_validation", nullable=False
+    )
     validated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -202,6 +215,9 @@ class Finding(TimestampMixin, Base):
     )
     assigned_to: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    scope_status: Mapped[str] = mapped_column(
+        String(32), default="unknown", nullable=False
+    )
 
     scan: Mapped["Scan"] = relationship(back_populates="findings")
     audit_entries: Mapped[list["AuditLog"]] = relationship(
@@ -566,9 +582,8 @@ def _finding_set_hash(mapper, connection, target: Finding) -> None:
     target.validation_metadata = _coerce_evidence(target.validation_metadata)
     target.tags = _normalize_tags(target.tags)
     target.status = _normalize_status(target.status)
-    target.validation_status = _normalize_validation_status(
-        target.validation_status
-    )
+    target.validation_status = _normalize_validation_status(target.validation_status)
+    target.scope_status = _normalize_scope_status(target.scope_status)
     if target.assigned_to:
         target.assigned_to = target.assigned_to.strip()
     if not target.evidence_hash:
@@ -587,9 +602,8 @@ def _finding_prevent_evidence_mutation(mapper, connection, target: Finding) -> N
     hash_attr = state.attrs.evidence_hash
     target.tags = _normalize_tags(target.tags)
     target.status = _normalize_status(target.status)
-    target.validation_status = _normalize_validation_status(
-        target.validation_status
-    )
+    target.validation_status = _normalize_validation_status(target.validation_status)
+    target.scope_status = _normalize_scope_status(target.scope_status)
     if target.assigned_to:
         target.assigned_to = target.assigned_to.strip()
     if (
@@ -610,7 +624,10 @@ def _finding_comment_set_hash(mapper, connection, target: FindingComment) -> Non
 @event.listens_for(FindingComment, "before_update", propagate=True)
 def _finding_comment_immutable(mapper, connection, target: FindingComment) -> None:
     state = inspect(target)
-    if state.attrs.message.history.has_changes() or state.attrs.metadata_json.history.has_changes():
+    if (
+        state.attrs.message.history.has_changes()
+        or state.attrs.metadata_json.history.has_changes()
+    ):
         raise ValueError("Finding comments are immutable once persisted.")
 
 
@@ -644,9 +661,7 @@ def _finding_ticket_prevent_payload_mutation(
 
 
 @event.listens_for(FindingValidation, "before_insert", propagate=True)
-def _finding_validation_set_hash(
-    mapper, connection, target: FindingValidation
-) -> None:
+def _finding_validation_set_hash(mapper, connection, target: FindingValidation) -> None:
     target.metadata_json = _coerce_evidence(target.metadata_json)
     target.evidence = _coerce_evidence(target.evidence)
     target.status = _normalize_validation_status(target.status)

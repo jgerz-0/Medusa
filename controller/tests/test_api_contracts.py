@@ -1051,6 +1051,7 @@ def test_finding_contracts(
     assert finding_item["validated_at"] is None
     assert finding_item["validations"] == []
     assert isinstance(finding_item["cvss"], float)
+    assert finding_item["scope_status"] == "unknown"
     datetime.fromisoformat(finding_item["detected_at"])  # raises on invalid format
 
     detail_response = client.get(f"/findings/{finding_id}", headers=auth_headers())
@@ -1061,6 +1062,7 @@ def test_finding_contracts(
     assert detail_payload["data"]["category"] == "web"
     assert detail_payload["data"]["validation_status"] == "pending"
     assert detail_payload["data"]["validations"] == []
+    assert detail_payload["data"]["scope_status"] == "unknown"
 
 
 def test_validation_enqueue_flow(
@@ -1309,6 +1311,69 @@ def test_findings_detail_rbac_regression(
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["data"]["id"] == finding_id
+
+
+def test_findings_scope_filter(api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(name="Scope Filter", scope="corp.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        in_scope_scan = Scan(target_id=target.id, scanner="nuclei", status="completed")
+        out_scope_scan = Scan(target_id=target.id, scanner="nuclei", status="completed")
+        session.add_all([in_scope_scan, out_scope_scan])
+        session.flush()
+
+        in_scope_finding = Finding(
+            scan_id=in_scope_scan.id,
+            title="Compliant",
+            severity="medium",
+            description="Within authorized scope",
+            metadata_json={"host": "app.corp.example"},
+            evidence={"url": "https://app.corp.example/login"},
+            evidence_hash="",
+            scope_status="in_scope",
+        )
+        out_scope_finding = Finding(
+            scan_id=out_scope_scan.id,
+            title="Drift",
+            severity="medium",
+            description="Out-of-scope artifact",
+            metadata_json={"host": "attacker.example"},
+            evidence={"url": "http://attacker.example"},
+            evidence_hash="",
+            scope_status="out_of_scope",
+        )
+        session.add_all([in_scope_finding, out_scope_finding])
+        session.commit()
+
+        in_scope_id = str(in_scope_finding.id)
+        out_scope_id = str(out_scope_finding.id)
+
+    out_response = client.get(
+        "/findings", params={"scope": "out_of_scope"}, headers=auth_headers()
+    )
+    assert out_response.status_code == 200, out_response.text
+    out_payload = out_response.json()["data"]
+    assert all(item["scope_status"] == "out_of_scope" for item in out_payload)
+    assert {item["id"] for item in out_payload} == {out_scope_id}
+
+    in_response = client.get(
+        "/findings", params={"scope": "in_scope"}, headers=auth_headers()
+    )
+    assert in_response.status_code == 200, in_response.text
+    in_payload = in_response.json()["data"]
+    assert all(item["scope_status"] == "in_scope" for item in in_payload)
+    assert {item["id"] for item in in_payload} == {in_scope_id}
+
+    scope_endpoint = client.get(
+        "/findings/scope", params={"scope": "out_of_scope"}, headers=auth_headers()
+    )
+    assert scope_endpoint.status_code == 200, scope_endpoint.text
+    scope_payload = scope_endpoint.json()["data"]
+    assert {item["id"] for item in scope_payload} == {out_scope_id}
 
 
 def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:
