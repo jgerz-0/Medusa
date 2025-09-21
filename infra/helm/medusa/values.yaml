@@ -84,6 +84,11 @@ secrets:
     CVE_ENRICHMENT_QDRANT_URL: "{{ printf \"http://%s-qdrant:%d\" (include \"medusa.fullname\" .) .Values.qdrant.service.httpPort }}"
     CVE_ENRICHMENT_QDRANT_COLLECTION: "medusa-advisories"
     CVE_ENRICHMENT_QDRANT_API_KEY: ""
+    TICKETING_JIRA_BASE_URL: "https://jira.example.com"
+    TICKETING_JIRA_USER: ""
+    TICKETING_JIRA_API_TOKEN: ""
+    TICKETING_GITHUB_BASE_URL: "https://api.github.com"
+    TICKETING_GITHUB_TOKEN: ""
   externalSecret:
     secretStoreKind: ClusterSecretStore
     secretStoreName: medusa-cluster-secrets
@@ -486,6 +491,67 @@ workers:
       limits:
         cpu: 500m
         memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
+  ticketing:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-ticketing
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: ticketing-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        DATABASE_URL: MEDUSA_DATABASE_URL
+        TICKETING_JIRA_BASE_URL: TICKETING_JIRA_BASE_URL
+        TICKETING_JIRA_USER: TICKETING_JIRA_USER
+        TICKETING_JIRA_API_TOKEN: TICKETING_JIRA_API_TOKEN
+        TICKETING_GITHUB_BASE_URL: TICKETING_GITHUB_BASE_URL
+        TICKETING_GITHUB_TOKEN: TICKETING_GITHUB_TOKEN
+      values:
+        TICKETING_POLL_INTERVAL: "5"
+        TICKETING_BATCH_SIZE: "10"
+        TICKETING_MAX_ATTEMPTS: "3"
+        TICKETING_HTTP_TIMEOUT: "10"
+      extra: []
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
     securityContext:
       runAsNonRoot: true
       runAsUser: 1000
@@ -986,6 +1052,7 @@ networkPolicies:
       - zap-worker
       - sqlmap-worker
       - validator-worker
+      - ticketing-worker
   ingress:
     enabled: true
   egress:
