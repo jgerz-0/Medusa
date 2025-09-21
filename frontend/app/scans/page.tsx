@@ -2,6 +2,12 @@ import type { Metadata } from 'next';
 import { fetchScans, fetchTargets } from '@/lib/api';
 import { ScansTable } from '@/components/ScansTable';
 import { ScanLaunchForm } from '@/components/ScanLaunchForm';
+import { RequiredRolesNotice } from '@/components/RequiredRolesNotice';
+import {
+  ROLE_SCAN_ENQUEUE,
+  ROLE_SCANS_READ,
+  ROLE_TARGETS_READ
+} from '@/lib/rbac';
 import type { Target } from '@/lib/types';
 
 export const metadata: Metadata = {
@@ -38,6 +44,25 @@ export default async function ScansPage() {
             Launch new jobs with enforced presets to maintain deterministic, auditable coverage.
           </p>
         </div>
+        <RequiredRolesNotice
+          sections={[
+            {
+              title: 'View scan inventory',
+              description: 'Lists queued, running, and completed jobs for authorized scopes.',
+              roles: [ROLE_SCANS_READ]
+            },
+            {
+              title: 'Load target catalog',
+              description: 'Populates the launch form with registered, in-scope assets.',
+              roles: [ROLE_TARGETS_READ]
+            },
+            {
+              title: 'Launch scans',
+              description: 'Allows dispatching nuclei, ZAP, or SQLMap jobs to workers.',
+              roles: [ROLE_SCAN_ENQUEUE]
+            }
+          ]}
+        />
       </header>
       {targetError ? (
         <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200">

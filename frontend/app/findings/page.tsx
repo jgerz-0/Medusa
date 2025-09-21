@@ -4,6 +4,8 @@ import type { Finding, FindingsTimelineBucket } from '@/lib/types';
 import { FindingsTable } from '@/components/FindingsTable';
 import { FindingsFilters } from '@/components/FindingsFilters';
 import { FindingsTimeline } from '@/components/FindingsTimeline';
+import { RequiredRolesNotice } from '@/components/RequiredRolesNotice';
+import { ROLE_ANALYST, ROLE_FINDINGS_READ } from '@/lib/rbac';
 
 export const metadata: Metadata = {
   title: 'Findings | Medusa Operations Console'
@@ -68,6 +70,20 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
             Normalized findings aggregated from controller scans with severity and workflow state metadata.
           </p>
         </div>
+        <RequiredRolesNotice
+          sections={[
+            {
+              title: 'View findings and timelines',
+              description: 'Required to list normalized findings and trend data from the controller.',
+              roles: [ROLE_FINDINGS_READ]
+            },
+            {
+              title: 'Triage and edit findings',
+              description: 'Allows acknowledging, reassigning, or tagging findings during incident response.',
+              roles: [ROLE_ANALYST]
+            }
+          ]}
+        />
         <FindingsFilters searchParams={searchParams} />
         {hasFilters ? (
           <div className="card border-surface-muted/60 bg-surface-muted/20 px-4 py-3 text-xs text-gray-300">
