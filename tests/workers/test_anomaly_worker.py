@@ -9,7 +9,7 @@ from workers.anomaly.worker import AnomalyWorker, WorkerConfig
 pytest_plugins = ["controller.tests.conftest"]
 
 
-def test_anomaly_worker_dispatches_with_callback_token(api_client) -> None:
+def test_anomaly_worker_posts_authenticated_payload(api_client) -> None:
     """Ensure the worker posts authenticated callbacks to the controller."""
 
     client, _queue, session_factory, settings = api_client
