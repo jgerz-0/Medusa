@@ -2332,6 +2332,49 @@ def test_finding_workflow_and_reporting(
     assert isinstance(timeline_payload, list)
 
 
+def test_finding_detail_includes_ticket_sync_state(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    finding_id = _create_finding_record(session_factory)
+    synced_at = datetime.now(timezone.utc)
+
+    with session_factory() as session:
+        payload = {"project_key": "SEC"}
+        ticket = FindingTicket(
+            finding_id=finding_id,
+            integration="jira",
+            reference="SEC-4242",
+            url="https://jira.example.com/browse/SEC-4242",
+            status="In Progress",
+            payload=payload,
+            payload_hash=_hash_json_payload(payload),
+            created_by="sync-tester",
+            synced_at=synced_at,
+            remote_metadata={
+                "status_category": "In Progress",
+                "assignee": "analyst.one",
+            },
+        )
+        session.add(ticket)
+        session.commit()
+
+    response = client.get(f"/findings/{finding_id}", headers=auth_headers())
+    assert response.status_code == 200, response.text
+
+    response_payload = response.json()["data"]
+    assert response_payload["id"] == finding_id
+    assert len(response_payload["tickets"]) == 1
+
+    ticket_payload = response_payload["tickets"][0]
+    assert ticket_payload["status"].lower() == "in progress"
+    assert ticket_payload["url"] == "https://jira.example.com/browse/SEC-4242"
+    assert ticket_payload["synced_at"] is not None
+    assert ticket_payload["metadata"]["status_category"] == "In Progress"
+    assert ticket_payload["metadata"]["assignee"] == "analyst.one"
+
+
 def test_recon_active_job_flow(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
 ) -> None:

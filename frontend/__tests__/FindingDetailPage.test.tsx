@@ -81,6 +81,11 @@ describe('FindingDetailPage RBAC notice', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.useRealTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   it('renders RequiredRolesNotice with workflow, ticket, and export scopes', async () => {
@@ -104,6 +109,9 @@ describe('FindingDetailPage RBAC notice', () => {
   });
 
   it('renders ticket status badges and hyperlinks when available', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2024-01-01T05:00:00.000Z'));
+
     const findingWithTickets: Finding = {
       ...baseFinding,
       tickets: [
@@ -114,7 +122,13 @@ describe('FindingDetailPage RBAC notice', () => {
           status: 'queued',
           url: 'https://jira.example.com/browse/JIRA-123',
           created_at: '2024-01-01T02:00:00.000Z',
-          metadata: {}
+          updated_at: '2024-01-01T02:10:00.000Z',
+          synced_at: '2024-01-01T02:30:00.000Z',
+          sync_error: null,
+          metadata: {
+            status_category: 'In Progress',
+            assignee: 'analyst.one',
+          }
         },
         {
           id: 'ticket-2',
@@ -123,8 +137,11 @@ describe('FindingDetailPage RBAC notice', () => {
           status: 'acknowledged',
           url: null,
           created_at: '2024-01-01T03:00:00.000Z',
+          updated_at: '2024-01-01T03:05:00.000Z',
+          synced_at: null,
+          sync_error: 'rate limited',
           metadata: {}
-        }
+        },
       ]
     };
 
@@ -139,9 +156,19 @@ describe('FindingDetailPage RBAC notice', () => {
     const jiraLink = screen.getByRole('link', { name: 'jira:JIRA-123' });
     expect(jiraLink).toHaveAttribute('href', 'https://jira.example.com/browse/JIRA-123');
     expect(screen.getByTestId('status-queued')).toBeInTheDocument();
+    expect(
+      screen.getByText((content) => content.startsWith('Synced') && content.includes('ago'))
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('Stale')).toHaveLength(2);
+    expect(screen.getByText('Status Category')).toBeInTheDocument();
+    expect(screen.getByText('In Progress')).toBeInTheDocument();
 
     expect(screen.getByText('github:GH-1')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'github:GH-1' })).not.toBeInTheDocument();
     expect(screen.getByTestId('status-acknowledged')).toBeInTheDocument();
+    expect(screen.getByText('Awaiting first sync')).toBeInTheDocument();
+    expect(screen.getByText('Sync Error')).toHaveAttribute('title', 'rate limited');
+
+    jest.useRealTimers();
   });
 });

@@ -65,6 +65,38 @@ function isSyncStale(syncedAt: string | null | undefined): boolean {
   return Date.now() - parsed > staleWindowMs;
 }
 
+function formatTicketMetadataKey(key: string): string {
+  if (!key) {
+    return key;
+  }
+
+  return key
+    .split(/[_\s]+/)
+    .filter((segment) => segment)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(' ');
+}
+
+function formatTicketMetadataValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return `${value}`;
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    return String(value);
+  }
+}
+
 function isNotFoundError(value: unknown): value is string {
   return typeof value === 'string' && value.includes('404');
 }
@@ -332,6 +364,17 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
                 const syncedAtLabel = formatOptionalTimestamp(ticket.synced_at ?? null);
                 const syncStale = isSyncStale(ticket.synced_at ?? null);
                 const syncError = ticket.sync_error ?? null;
+                const metadataEntries = Object.entries(ticket.metadata ?? {}).filter(([, value]) => {
+                  if (value === null || value === undefined) {
+                    return false;
+                  }
+
+                  if (typeof value === 'string') {
+                    return value.trim() !== '';
+                  }
+
+                  return true;
+                });
 
                 return (
                   <li
@@ -379,6 +422,20 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
                           </span>
                         ) : null}
                       </div>
+                      {metadataEntries.length > 0 ? (
+                        <dl className="grid gap-x-3 gap-y-1 text-[11px] text-gray-400 sm:grid-cols-[auto,1fr]">
+                          {metadataEntries.map(([key, value]) => (
+                            <div key={key} className="contents">
+                              <dt className="font-semibold uppercase tracking-wide text-gray-500">
+                                {formatTicketMetadataKey(key)}
+                              </dt>
+                              <dd className="text-gray-300">
+                                {formatTicketMetadataValue(value)}
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      ) : null}
                     </div>
                   </li>
                 );

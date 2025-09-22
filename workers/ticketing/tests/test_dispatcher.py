@@ -432,6 +432,14 @@ def test_ticket_syncer_updates_ticket_from_remote_state(
 
         audit_entries = session.execute(select(AuditLog)).scalars().all()
         assert any(entry.action == "ticket_sync_success" for entry in audit_entries)
+        attempt_entries = [
+            entry for entry in audit_entries if entry.action == "ticket_sync_attempt"
+        ]
+        assert attempt_entries
+        assert any(
+            entry.evidence_snapshot.get("ticket_id") == ticket_id
+            for entry in attempt_entries
+        )
 
 
 def test_ticket_syncer_records_failures(
@@ -476,3 +484,11 @@ def test_ticket_syncer_records_failures(
 
         audit_entries = session.execute(select(AuditLog)).scalars().all()
         assert any(entry.action == "ticket_sync_failed" for entry in audit_entries)
+        attempt_entries = [
+            entry for entry in audit_entries if entry.action == "ticket_sync_attempt"
+        ]
+        assert attempt_entries
+        assert any(
+            entry.evidence_snapshot.get("ticket_id") == ticket_id
+            for entry in attempt_entries
+        )
