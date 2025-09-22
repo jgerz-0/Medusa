@@ -211,6 +211,21 @@ class TicketSyncer:
             return 0
 
         try:
+            record_audit_event(
+                session,
+                actor=self._principal,
+                action="ticket_sync_attempt",
+                resource_type="finding_ticket",
+                resource_id=ticket.id,
+                finding_id=ticket.finding_id,
+                metadata={
+                    "ticket_id": ticket.id,
+                    "integration": ticket.integration,
+                    "reference": ticket.reference,
+                    "status": ticket.status,
+                    "url": ticket.url,
+                },
+            )
             result = client.sync(ticket)
         except TicketSyncError as error:
             self._handle_failure(session, ticket, error)
