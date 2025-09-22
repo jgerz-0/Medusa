@@ -33,6 +33,24 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
   - Normalize output into the shared JSON Finding schema.
   - Upload heavy artifacts (pcaps, binaries, logs) to MinIO.
   - **CVE Enrichment Worker** – fetches deterministic advisories from NVD and CIRCL, emits structured metadata for findings, and writes normalized advisory embeddings to Qdrant for semantic enrichment without blocking Redis callbacks.
+
+### Anomaly Detection Worker
+
+- Polls the controller's immutable `audit_log` table for suspicious sequences (excessive access denials, sustained rate limits, repeated scope mismatches) and posts them to `POST /internal/anomalies`.
+- Authenticates with the controller via the `X-Callback-Token` header. The shared secret is configured through `ANOMALY_CALLBACK_TOKEN` (and mirrored as `MEDUSA_ANOMALY_CALLBACK_TOKEN` for the controller).
+- Runtime tunables are exposed through environment variables so operators can harden detections without editing code:
+  - `ANOMALY_POLL_INTERVAL` (seconds) – cadence for scanning the audit log.
+  - `ANOMALY_BATCH_SIZE` – maximum number of audit rows read per poll.
+  - `ANOMALY_STATE_KEY` – Redis key used to persist the last processed timestamp for crash-safe recovery.
+  - `ANOMALY_CALLBACK_URL` – defaults to the controller's internal service DNS entry.
+  - `ANOMALY_HTTP_TIMEOUT` – fail-fast bound for callback delivery.
+  - `ANOMALY_SOURCE` – identifier persisted with anomaly events for attribution.
+  - Threshold knobs for each heuristic:
+    - `ANOMALY_ACCESS_DENIED_THRESHOLD` and `ANOMALY_ACCESS_DENIED_WINDOW_SECONDS`.
+    - `ANOMALY_RATE_LIMIT_THRESHOLD` and `ANOMALY_RATE_LIMIT_WINDOW_SECONDS`.
+    - `ANOMALY_SCOPE_MISMATCH_THRESHOLD` and `ANOMALY_SCOPE_MISMATCH_WINDOW_SECONDS`.
+    - `ANOMALY_DETECTOR_COOLDOWN_SECONDS` – suppresses duplicate alerts across poll cycles.
+- Requires the same `DATABASE_URL` and `REDIS_URL` secrets as the controller so heuristics observe the canonical audit stream and share state atomically.
 - **Agents**
   - **Recon Agent** – Discovers assets from authorized inventory feeds.
   - **Preprocess Agent** – Classifies binaries, extracts metadata, enforces triage rules.

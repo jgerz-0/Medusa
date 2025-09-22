@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional
 
 from sqlalchemy import select
@@ -57,6 +57,27 @@ class WorkerConfig:
     batch_size: int = field(default_factory=lambda: int(os.getenv("ANOMALY_BATCH_SIZE", "200")))
     http_timeout: int = field(default_factory=lambda: int(os.getenv("ANOMALY_HTTP_TIMEOUT", "10")))
     source: str = field(default_factory=lambda: os.getenv("ANOMALY_SOURCE", "worker:anomaly"))
+    access_denied_threshold: int = field(
+        default_factory=lambda: max(1, int(os.getenv("ANOMALY_ACCESS_DENIED_THRESHOLD", "5")))
+    )
+    access_denied_window_seconds: int = field(
+        default_factory=lambda: max(1, int(os.getenv("ANOMALY_ACCESS_DENIED_WINDOW_SECONDS", "600")))
+    )
+    rate_limit_threshold: int = field(
+        default_factory=lambda: max(1, int(os.getenv("ANOMALY_RATE_LIMIT_THRESHOLD", "3")))
+    )
+    rate_limit_window_seconds: int = field(
+        default_factory=lambda: max(1, int(os.getenv("ANOMALY_RATE_LIMIT_WINDOW_SECONDS", "300")))
+    )
+    scope_mismatch_threshold: int = field(
+        default_factory=lambda: max(1, int(os.getenv("ANOMALY_SCOPE_MISMATCH_THRESHOLD", "2")))
+    )
+    scope_mismatch_window_seconds: int = field(
+        default_factory=lambda: max(1, int(os.getenv("ANOMALY_SCOPE_MISMATCH_WINDOW_SECONDS", "900")))
+    )
+    cooldown_seconds: int = field(
+        default_factory=lambda: max(1, int(os.getenv("ANOMALY_DETECTOR_COOLDOWN_SECONDS", "600")))
+    )
 
     @classmethod
     def load(cls) -> "WorkerConfig":
@@ -73,7 +94,15 @@ class AnomalyWorker:
             raise RuntimeError("requests package is required to run the anomaly worker")
 
         self._config = config
-        self._detector = detector or AnomalyDetector()
+        self._detector = detector or AnomalyDetector(
+            access_denied_threshold=config.access_denied_threshold,
+            access_denied_window=timedelta(seconds=config.access_denied_window_seconds),
+            rate_limit_threshold=config.rate_limit_threshold,
+            rate_limit_window=timedelta(seconds=config.rate_limit_window_seconds),
+            scope_mismatch_threshold=config.scope_mismatch_threshold,
+            scope_mismatch_window=timedelta(seconds=config.scope_mismatch_window_seconds),
+            cooldown=timedelta(seconds=config.cooldown_seconds),
+        )
         self._engine: Engine = create_db_engine(config.database_url)
         self._session_factory = sessionmaker(bind=self._engine, expire_on_commit=False, class_=Session)
         self._http = requests.Session()
@@ -183,4 +212,17 @@ class AnomalyWorker:
             )
 
 
-__all__ = ["AnomalyWorker", "WorkerConfig"]
+def main() -> None:
+    """Bootstrap the anomaly worker using environment configuration."""
+
+    logging.basicConfig(level=logging.INFO)
+    config = WorkerConfig.load()
+    worker = AnomalyWorker(config)
+    worker.run_forever()
+
+
+__all__ = ["AnomalyWorker", "WorkerConfig", "main"]
+
+
+if __name__ == "__main__":
+    main()

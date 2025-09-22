@@ -40,6 +40,7 @@ secrets:
     MEDUSA_SQLMAP_CALLBACK_TOKEN: "change-me"
     SQLMAP_CALLBACK_TOKEN: "change-me"
     MEDUSA_ENRICHMENT_CALLBACK_TOKEN: "change-me"
+    MEDUSA_ANOMALY_CALLBACK_TOKEN: "change-me"
     MEDUSA_VALIDATOR_CALLBACK_TOKEN: "change-me"
     MEDUSA_RECON_QUEUE_CHANNEL: "queues:recon:jobs"
     RECON_QUEUE_KEY: "queues:recon:jobs"
@@ -52,6 +53,7 @@ secrets:
     MINIO_SITE_REGION: "us-east-1"
     MEDUSA_ANALYST_API_KEY: ""
     NUCLEI_CALLBACK_TOKEN: "change-me"
+    ANOMALY_CALLBACK_TOKEN: "change-me"
     NUCLEI_ARTIFACT_BUCKET: ""
     S3_ACCESS_KEY: "medusaadmin"
     S3_SECRET_KEY: "medusaadmin123"
@@ -578,6 +580,73 @@ workers:
       additionalSubjects: []
       rules: []
 
+  anomaly:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-anomaly
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: anomaly-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        DATABASE_URL: MEDUSA_DATABASE_URL
+        REDIS_URL: MEDUSA_REDIS_URL
+        ANOMALY_CALLBACK_TOKEN: MEDUSA_ANOMALY_CALLBACK_TOKEN
+      values:
+        ANOMALY_CALLBACK_URL: "{{ printf \"http://%s-controller:%d/internal/anomalies\" (include \"medusa.fullname\" $) $.Values.controller.service.port }}"
+        ANOMALY_POLL_INTERVAL: "10"
+        ANOMALY_BATCH_SIZE: "200"
+        ANOMALY_HTTP_TIMEOUT: "10"
+        ANOMALY_STATE_KEY: "workers:anomaly:last_seen"
+        ANOMALY_SOURCE: "worker:anomaly"
+        ANOMALY_ACCESS_DENIED_THRESHOLD: "5"
+        ANOMALY_ACCESS_DENIED_WINDOW_SECONDS: "600"
+        ANOMALY_RATE_LIMIT_THRESHOLD: "3"
+        ANOMALY_RATE_LIMIT_WINDOW_SECONDS: "300"
+        ANOMALY_SCOPE_MISMATCH_THRESHOLD: "2"
+        ANOMALY_SCOPE_MISMATCH_WINDOW_SECONDS: "900"
+        ANOMALY_DETECTOR_COOLDOWN_SECONDS: "600"
+      extra: []
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: false
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: false
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules: []
+
   recon:
     enabled: true
     type: job
@@ -1053,6 +1122,7 @@ networkPolicies:
       - sqlmap-worker
       - validator-worker
       - ticketing-worker
+      - anomaly-worker
   ingress:
     enabled: true
   egress:
