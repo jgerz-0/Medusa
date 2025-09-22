@@ -444,3 +444,4 @@ secrets:
     MEDUSA_ZAP_DEAD_LETTER_KEY: queues:zap:dead
     MEDUSA_ZAP_CALLBACK_TOKEN: local-dev-zap-callback
     MEDUSA_VALIDATOR_DEAD_LETTER_KEY: queues:validator:dead
+    MEDUSA_ANOMALY_CALLBACK_TOKEN: local-dev-anomaly-callback

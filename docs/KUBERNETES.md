@@ -152,6 +152,37 @@ socket by setting `workers.binaryFuzzing.extraVolumeMounts` and
 should instead point `BINARY_FUZZING_RUNTIME` at a remote runner or leverage a
 dedicated fuzzing node pool with strict RBAC.
 
+## Scope drift monitoring and anomaly routing
+
+The Helm chart now deploys a `scope-monitor` worker that inspects recent
+findings for targets that fall outside the authorized scope and posts
+`scope_drift_detected` anomalies back to the controller. Tune its sensitivity and
+dispatch cadence with the `workers.scopeMonitor.env.values` block:
+
+```yaml
+workers:
+  scopeMonitor:
+    env:
+      values:
+        SCOPE_MONITOR_POLL_INTERVAL: "15"            # seconds between queries
+        SCOPE_MONITOR_BATCH_SIZE: "100"              # findings processed per cycle
+        SCOPE_MONITOR_LOOKBACK_SECONDS: "604800"     # one-week window for regressions
+        SCOPE_MONITOR_SOURCE: "worker:scope-monitor" # label applied to anomaly events
+        SCOPE_MONITOR_ACTOR: "worker:scope-monitor"  # audit actor written to Postgres
+```
+
+Worker pods authenticate to the anomaly callback using the
+`MEDUSA_ANOMALY_CALLBACK_TOKEN` secret. When running with External Secrets or
+AWS IRSA bindings, ensure the backing IAM role can read the secret material and
+that the Helm release maps it to the `medusa-secrets` entry. The chart ships a
+dedicated service account and namespace-scoped Role that grants `get` access to
+the secret so the kubelet can project the token into the pod environment.
+
+NetworkPolicies already allow the `scope-monitor-worker` component to connect to
+Postgres, Redis, and the controller service. If you tighten the allowed component
+list under `networkPolicies.workers.allowedComponents`, keep
+`scope-monitor-worker` in the set so anomaly reports remain routable.
+
 ## Verify the deployment
 
 ```bash

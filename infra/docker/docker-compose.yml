@@ -327,6 +327,43 @@ services:
       - ../../workers/anomaly:/app/workers/anomaly:delegated
       - ../../controller:/app/controller:delegated
 
+  scope-monitor-worker:
+    build:
+      context: ../..
+      dockerfile: workers/scope/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_scope_monitor_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    entrypoint:
+      - poetry
+      - run
+      - python
+      - -m
+      - workers.scope.worker
+    environment:
+      DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      ANOMALY_CALLBACK_URL: ${ANOMALY_CALLBACK_URL:-http://controller:8000/internal/anomalies}
+      ANOMALY_CALLBACK_TOKEN: ${ANOMALY_CALLBACK_TOKEN:-local-dev-anomaly-callback}
+      SCOPE_MONITOR_STATE_KEY: ${SCOPE_MONITOR_STATE_KEY:-workers:scope:last_seen}
+      SCOPE_MONITOR_POLL_INTERVAL: ${SCOPE_MONITOR_POLL_INTERVAL:-30}
+      SCOPE_MONITOR_BATCH_SIZE: ${SCOPE_MONITOR_BATCH_SIZE:-200}
+      SCOPE_MONITOR_LOOKBACK_SECONDS: ${SCOPE_MONITOR_LOOKBACK_SECONDS:-86400}
+      SCOPE_MONITOR_HTTP_TIMEOUT: ${SCOPE_MONITOR_HTTP_TIMEOUT:-10}
+      SCOPE_MONITOR_SOURCE: ${SCOPE_MONITOR_SOURCE:-worker:scope-monitor}
+      SCOPE_MONITOR_ACTOR: ${SCOPE_MONITOR_ACTOR:-worker:scope-monitor}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/scope:/app/workers/scope:delegated
+      - ../../controller:/app/controller:delegated
+
   recon-worker:
     build:
       context: ../..

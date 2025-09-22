@@ -470,4 +470,17 @@ def _normalize_candidate(value: str) -> Optional[str]:
     return None
 
 
-__all__ = ["ScopeMonitorWorker", "WorkerConfig"]
+def main() -> None:
+    """Bootstrap the scope monitor worker from environment configuration."""
+
+    logging.basicConfig(level=logging.INFO)
+    config = WorkerConfig.load()
+    worker = ScopeMonitorWorker(config)
+    worker.run_forever()
+
+
+__all__ = ["ScopeMonitorWorker", "WorkerConfig", "ScopeDriftEvent", "main"]
+
+
+if __name__ == "__main__":
+    main()
