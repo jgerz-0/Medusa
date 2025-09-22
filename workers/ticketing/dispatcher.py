@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol
+from urllib.parse import urlparse
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import Engine
@@ -116,10 +117,33 @@ class TicketDispatchError(Exception):
         self.retryable = retryable
 
 
+@dataclass
+class TicketSyncResult:
+    """Remote status snapshot captured during synchronization."""
+
+    status: str
+    url: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class TicketSyncError(Exception):
+    """Raised when synchronization polling fails."""
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
 class TicketClient(Protocol):
     """Integration client contract used by the dispatcher."""
 
     def dispatch(self, ticket: FindingTicket) -> TicketDispatchResult: ...
+
+
+class TicketSyncClient(Protocol):
+    """Integration client contract for ticket synchronization."""
+
+    def sync(self, ticket: FindingTicket) -> TicketSyncResult: ...
 
 
 class JiraClient:
@@ -219,6 +243,78 @@ class JiraClient:
         payload_hash = _hash_json_payload(request_body)
         return TicketDispatchResult(url=browse_url, payload_hash=payload_hash)
 
+    def sync(self, ticket: FindingTicket) -> TicketSyncResult:
+        issue_key = self._extract_issue_key(ticket)
+        if not issue_key:
+            raise TicketSyncError("Ticket missing Jira issue locator", retryable=False)
+
+        fields = "status,updated,assignee,summary,project"
+        api_url = f"{self._base_url}/rest/api/3/issue/{issue_key}"
+
+        try:
+            response = self._http.get(
+                api_url,
+                params={"fields": fields},
+                timeout=self._timeout,
+                auth=self._auth,
+                headers={"Accept": "application/json"},
+            )
+        except RequestException as exc:  # pragma: no cover - network dependent
+            raise TicketSyncError(f"Jira sync request failed: {exc}") from exc
+
+        if response.status_code == 404:
+            raise TicketSyncError("Jira issue not found", retryable=False)
+        if response.status_code >= 500:
+            raise TicketSyncError(
+                f"Jira API unavailable (status {response.status_code})",
+                retryable=True,
+            )
+        if response.status_code >= 400:
+            raise TicketSyncError(
+                f"Jira API rejected lookup (status {response.status_code})",
+                retryable=False,
+            )
+
+        try:
+            payload_json = response.json()
+        except json.JSONDecodeError as exc:
+            raise TicketSyncError("Invalid Jira sync payload", retryable=True) from exc
+
+        fields_payload = payload_json.get("fields") or {}
+        status_block = fields_payload.get("status") or {}
+        status_name = str(status_block.get("name") or "").strip() or "unknown"
+
+        metadata: Dict[str, Any] = {}
+        status_category = status_block.get("statusCategory") or {}
+        if status_category.get("name"):
+            metadata["status_category"] = status_category["name"]
+        if fields_payload.get("updated"):
+            metadata["updated"] = fields_payload["updated"]
+        assignee = fields_payload.get("assignee") or {}
+        if assignee.get("displayName"):
+            metadata["assignee"] = assignee["displayName"]
+        if fields_payload.get("summary"):
+            metadata["summary"] = fields_payload["summary"]
+        project = fields_payload.get("project") or {}
+        if project.get("key"):
+            metadata["project"] = project["key"]
+
+        browse_url = f"{self._base_url}/browse/{issue_key}"
+
+        return TicketSyncResult(status=status_name, url=browse_url, metadata=metadata)
+
+    @staticmethod
+    def _extract_issue_key(ticket: FindingTicket) -> Optional[str]:
+        if ticket.url:
+            parsed = urlparse(ticket.url)
+            path = (parsed.path or "").strip("/")
+            if path:
+                segments = [segment for segment in path.split("/") if segment]
+                if segments:
+                    return segments[-1]
+        reference = (ticket.reference or "").strip()
+        return reference or None
+
 
 class GitHubClient:
     """Create GitHub issues for queued findings."""
@@ -312,6 +408,88 @@ class GitHubClient:
 
         payload_hash = _hash_json_payload(request_body)
         return TicketDispatchResult(url=issue_url, payload_hash=payload_hash)
+
+    def sync(self, ticket: FindingTicket) -> TicketSyncResult:
+        repository, issue_number = self._extract_issue_coordinates(ticket)
+        api_url = f"{self._base_url}/repos/{repository}/issues/{issue_number}"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self._token}",
+            "User-Agent": "medusa-ticketing-worker",
+        }
+
+        try:
+            response = self._http.get(api_url, headers=headers, timeout=self._timeout)
+        except RequestException as exc:  # pragma: no cover - network dependent
+            raise TicketSyncError(f"GitHub sync request failed: {exc}") from exc
+
+        if response.status_code == 404:
+            raise TicketSyncError("GitHub issue not found", retryable=False)
+        if response.status_code >= 500:
+            raise TicketSyncError(
+                f"GitHub API unavailable (status {response.status_code})",
+                retryable=True,
+            )
+        if response.status_code >= 400:
+            raise TicketSyncError(
+                f"GitHub API rejected lookup (status {response.status_code})",
+                retryable=False,
+            )
+
+        try:
+            payload_json = response.json()
+        except json.JSONDecodeError as exc:
+            raise TicketSyncError(
+                "Invalid GitHub sync payload", retryable=True
+            ) from exc
+
+        status = str(payload_json.get("state") or "").strip() or "unknown"
+        url = (
+            payload_json.get("html_url")
+            or payload_json.get("url")
+            or ticket.url
+            or f"https://github.com/{repository}/issues/{issue_number}"
+        )
+
+        metadata: Dict[str, Any] = {}
+        if payload_json.get("title"):
+            metadata["title"] = payload_json["title"]
+        if payload_json.get("state_reason"):
+            metadata["state_reason"] = payload_json["state_reason"]
+        assignee = payload_json.get("assignee") or {}
+        if isinstance(assignee, dict) and assignee.get("login"):
+            metadata["assignee"] = assignee["login"]
+        if payload_json.get("updated_at"):
+            metadata["updated_at"] = payload_json["updated_at"]
+
+        return TicketSyncResult(status=status, url=url, metadata=metadata)
+
+    def _extract_issue_coordinates(self, ticket: FindingTicket) -> tuple[str, str]:
+        repository = str(ticket.payload.get("repository") or "").strip()
+        issue_number: Optional[str] = None
+
+        if ticket.url:
+            parsed = urlparse(ticket.url)
+            path = (parsed.path or "").strip("/")
+            segments = [segment for segment in path.split("/") if segment]
+            if len(segments) >= 4 and segments[-2] == "issues":
+                issue_number = segments[-1]
+                if not repository:
+                    repository = f"{segments[0]}/{segments[1]}"
+
+        if not issue_number:
+            reference = (ticket.reference or "").strip()
+            if reference.startswith("GH-") and "-" in reference[3:]:
+                # Reference contains repository slug, but without the issue number
+                # there is no deterministic lookup path.
+                issue_number = None
+
+        if not repository or not issue_number:
+            raise TicketSyncError(
+                "GitHub ticket missing repository or issue number", retryable=False
+            )
+
+        return repository, issue_number
 
 
 class TicketDispatcher:
