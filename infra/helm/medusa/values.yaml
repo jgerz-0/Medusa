@@ -1104,6 +1104,74 @@ workers:
       additionalSubjects: []
       rules: []
 
+  scopeMonitor:
+    enabled: true
+    type: job
+    parallelism: 1
+    completions: 1
+    backoffLimit: 6
+    ttlSecondsAfterFinished: null
+    image:
+      repository: ghcr.io/medusa/worker-scope-monitor
+      tag: ""
+      pullPolicy: IfNotPresent
+    component: scope-monitor-worker
+    command: []
+    args: []
+    env:
+      secretRefs:
+        DATABASE_URL: MEDUSA_DATABASE_URL
+        REDIS_URL: MEDUSA_REDIS_URL
+        ANOMALY_CALLBACK_TOKEN: MEDUSA_ANOMALY_CALLBACK_TOKEN
+      values:
+        ANOMALY_CALLBACK_URL: "{{ printf \"http://%s-controller:%d/internal/anomalies\" (include \"medusa.fullname\" $) $.Values.controller.service.port }}"
+        SCOPE_MONITOR_STATE_KEY: "workers:scope:last_seen"
+        SCOPE_MONITOR_POLL_INTERVAL: "30"
+        SCOPE_MONITOR_BATCH_SIZE: "200"
+        SCOPE_MONITOR_LOOKBACK_SECONDS: "86400"
+        SCOPE_MONITOR_HTTP_TIMEOUT: "10"
+        SCOPE_MONITOR_SOURCE: "worker:scope-monitor"
+        SCOPE_MONITOR_ACTOR: "worker:scope-monitor"
+      extra: []
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    podAnnotations: {}
+    podLabels: {}
+    serviceAccount:
+      create: true
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: true
+    rbac:
+      create: true
+      roleName: ""
+      roleBindingName: ""
+      roleAnnotations: {}
+      roleBindingAnnotations: {}
+      additionalSubjects: []
+      rules:
+        - apiGroups:
+            - ""
+          resources:
+            - secrets
+          verbs:
+            - get
+
 networkPolicies:
   enabled: true
   controller:
@@ -1123,6 +1191,7 @@ networkPolicies:
       - validator-worker
       - ticketing-worker
       - anomaly-worker
+      - scope-monitor-worker
   ingress:
     enabled: true
   egress:
