@@ -291,6 +291,14 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # Run the anomaly detector loop directly so local developers can tweak
+    # configuration without rebuilding the image.
+    entrypoint:
+      - poetry
+      - run
+      - python
+      - -m
+      - workers.anomaly.worker
     environment:
       DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
       REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}

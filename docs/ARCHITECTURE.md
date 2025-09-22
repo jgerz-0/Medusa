@@ -50,6 +50,7 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
     - `ANOMALY_RATE_LIMIT_THRESHOLD` and `ANOMALY_RATE_LIMIT_WINDOW_SECONDS`.
     - `ANOMALY_SCOPE_MISMATCH_THRESHOLD` and `ANOMALY_SCOPE_MISMATCH_WINDOW_SECONDS`.
     - `ANOMALY_DETECTOR_COOLDOWN_SECONDS` – suppresses duplicate alerts across poll cycles.
+- See [`workers/anomaly/README.md`](../workers/anomaly/README.md) for operator-focused configuration guidance.
 - Requires the same `DATABASE_URL` and `REDIS_URL` secrets as the controller so heuristics observe the canonical audit stream and share state atomically.
 - **Agents**
   - **Recon Agent** – Discovers assets from authorized inventory feeds.
