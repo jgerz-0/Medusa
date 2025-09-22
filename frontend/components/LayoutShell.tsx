@@ -9,7 +9,8 @@ const navigation = [
   { name: 'Targets', href: '/targets' },
   { name: 'Discovery', href: '/discovery' },
   { name: 'Scans', href: '/scans' },
-  { name: 'Findings', href: '/findings' }
+  { name: 'Findings', href: '/findings' },
+  { name: 'Anomalies', href: '/anomalies' }
 ];
 
 export function LayoutShell({ children }: { children: ReactNode }) {

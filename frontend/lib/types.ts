@@ -169,3 +169,16 @@ export interface ReportExportResponse {
   content: string;
   metadata: Record<string, unknown>;
 }
+
+export interface AnomalyEvent {
+  id: string;
+  anomaly_type: string;
+  actor: string;
+  source: string;
+  detected_at: string;
+  first_seen: string;
+  last_seen: string;
+  count: number;
+  window_seconds: number;
+  metadata: Record<string, unknown>;
+}

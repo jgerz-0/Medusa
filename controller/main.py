@@ -993,6 +993,50 @@ def _normalize_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return payload
 
 
+ANOMALY_METADATA_MAX_DEPTH = 5
+ANOMALY_METADATA_MAX_ITEMS = 50
+ANOMALY_METADATA_MAX_STRING_LENGTH = 2048
+
+
+def _sanitize_anomaly_metadata(value: Any, *, depth: int = 0) -> Any:
+    """Return analyst-safe metadata derived from anomaly event payloads."""
+
+    if depth >= ANOMALY_METADATA_MAX_DEPTH:
+        return "[truncated]"
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        sanitized: Dict[str, Any] = {}
+        for key, nested in value.items():
+            sanitized[str(key)] = _sanitize_anomaly_metadata(nested, depth=depth + 1)
+        return sanitized
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        sanitized_items: List[Any] = []
+        for index, item in enumerate(value):
+            if index >= ANOMALY_METADATA_MAX_ITEMS:
+                sanitized_items.append("[truncated]")
+                break
+            sanitized_items.append(
+                _sanitize_anomaly_metadata(item, depth=depth + 1)
+            )
+        return sanitized_items
+
+    if isinstance(value, bytes):
+        encoded = base64.b64encode(value).decode("ascii", errors="ignore")
+        return html.escape(encoded, quote=True)
+
+    normalized = str(value)
+    if len(normalized) > ANOMALY_METADATA_MAX_STRING_LENGTH:
+        normalized = f"{normalized[:ANOMALY_METADATA_MAX_STRING_LENGTH]}…"
+    return html.escape(normalized, quote=True)
+
+
 def _canonicalize_for_hash(value: Any) -> Any:
     """Return a canonical JSON-compatible structure for hashing."""
 
@@ -1573,6 +1617,30 @@ class PaginationMetadata(BaseModel):
 class AuditLogCollectionResponse(BaseModel):
     data: List[AuditLogResponse]
     meta: PaginationMetadata
+
+
+class AnomalyEventResponse(BaseModel):
+    id: str
+    anomaly_type: str
+    actor: str
+    source: str
+    detected_at: datetime
+    first_seen: datetime
+    last_seen: datetime
+    count: int
+    window_seconds: int
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AnomalyCollectionResponse(BaseModel):
+    data: List[AnomalyEventResponse]
+    meta: PaginationMetadata
+
+
+class AnomalyItemResponse(BaseModel):
+    data: AnomalyEventResponse
 
 
 class StaticAnalysisArtifactPayload(BaseModel):
@@ -5359,6 +5427,130 @@ def list_scans(
     return ScanCollectionResponse(data=[serialize_scan(scan) for scan in scans])
 
 
+@app.get("/anomalies", response_model=AnomalyCollectionResponse)
+def list_anomalies(
+    anomaly_type: Optional[str] = Query(
+        None, alias="type", description="Filter by anomaly type"
+    ),
+    actor: Optional[str] = Query(None, description="Filter by actor identifier"),
+    source: Optional[str] = Query(None, description="Filter by anomaly source"),
+    since: Optional[datetime] = Query(None, alias="from"),
+    until: Optional[datetime] = Query(None, alias="to"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> AnomalyCollectionResponse:
+    """Return sanitized anomaly events with RBAC and pagination."""
+
+    enforce_roles(
+        principal,
+        [ROLE_ANALYST, ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/anomalies",
+    )
+
+    query = db.query(AnomalyEvent)
+    applied_filters: Dict[str, Any] = {}
+
+    if anomaly_type:
+        sanitized_type = anomaly_type.strip()
+        if sanitized_type:
+            query = query.filter(AnomalyEvent.anomaly_type == sanitized_type)
+            applied_filters["anomaly_type"] = sanitized_type
+    if actor:
+        sanitized_actor = actor.strip()
+        if sanitized_actor:
+            query = query.filter(AnomalyEvent.actor == sanitized_actor)
+            applied_filters["actor"] = sanitized_actor
+    if source:
+        sanitized_source = source.strip()
+        if sanitized_source:
+            query = query.filter(AnomalyEvent.source == sanitized_source)
+            applied_filters["source"] = sanitized_source
+    if since:
+        query = query.filter(AnomalyEvent.detected_at >= since)
+        applied_filters["from"] = since.isoformat()
+    if until:
+        query = query.filter(AnomalyEvent.detected_at <= until)
+        applied_filters["to"] = until.isoformat()
+
+    total = query.count()
+    records = (
+        query.order_by(AnomalyEvent.detected_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    serialized = [serialize_anomaly_event(record) for record in records]
+
+    metadata: Dict[str, Any] = {
+        "limit": limit,
+        "offset": offset,
+        "returned": len(serialized),
+    }
+    if applied_filters:
+        metadata["filters"] = applied_filters
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="list_anomalies",
+        resource_type="anomaly_event",
+        resource_id=None,
+        metadata=metadata,
+    )
+
+    return AnomalyCollectionResponse(
+        data=serialized,
+        meta=PaginationMetadata(total=total, limit=limit, offset=offset),
+    )
+
+
+@app.get("/anomalies/{anomaly_id}", response_model=AnomalyItemResponse)
+def get_anomaly(
+    anomaly_id: str,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+) -> AnomalyItemResponse:
+    """Return a single anomaly event after RBAC enforcement."""
+
+    enforce_roles(
+        principal,
+        [ROLE_ANALYST, ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/anomalies/{anomaly_id}",
+    )
+
+    record = (
+        db.query(AnomalyEvent)
+        .filter(AnomalyEvent.id == anomaly_id)
+        .one_or_none()
+    )
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Anomaly not found")
+
+    response_payload = serialize_anomaly_event(record)
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="view_anomaly",
+        resource_type="anomaly_event",
+        resource_id=anomaly_id,
+        metadata={
+            "anomaly_type": record.anomaly_type,
+            "actor": record.actor,
+            "source": record.source,
+        },
+    )
+
+    return AnomalyItemResponse(data=response_payload)
+
+
 def _persist_scan_callback(
     *,
     db: Session,
@@ -7974,6 +8166,26 @@ def _dispatch_validation_notifications(
         _post_slack_notification(settings.slack_webhook_url, slack_payload)
 
     _send_email_notification(settings, subject, body)
+
+
+def serialize_anomaly_event(event: AnomalyEvent) -> AnomalyEventResponse:
+    """Project an anomaly ORM record into an analyst-safe schema."""
+
+    metadata_payload = deepcopy(_normalize_payload(event.metadata_json))
+    sanitized_metadata = _sanitize_anomaly_metadata(metadata_payload)
+
+    return AnomalyEventResponse(
+        id=str(event.id),
+        anomaly_type=event.anomaly_type,
+        actor=event.actor,
+        source=event.source,
+        detected_at=event.detected_at,
+        first_seen=event.first_seen,
+        last_seen=event.last_seen,
+        count=event.count,
+        window_seconds=event.window_seconds,
+        metadata=sanitized_metadata,
+    )
 
 
 def serialize_finding(finding: Finding) -> FindingResponse:
