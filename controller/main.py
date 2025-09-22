@@ -1831,6 +1831,9 @@ class FindingTicketSummary(BaseModel):
     url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    synced_at: Optional[datetime] = None
+    sync_error: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class FindingCommentSummary(BaseModel):
@@ -2015,6 +2018,9 @@ class TicketResponse(BaseModel):
     status: str
     url: Optional[str]
     created_at: datetime
+    updated_at: datetime
+    synced_at: Optional[datetime] = None
+    sync_error: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -7739,6 +7745,9 @@ def create_jira_ticket(
         status=ticket.status,
         url=ticket.url,
         created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
+        synced_at=ticket.synced_at,
+        sync_error=ticket.sync_error,
         metadata=payload,
     )
 
@@ -7818,6 +7827,9 @@ def create_github_ticket(
         status=ticket.status,
         url=ticket.url,
         created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
+        synced_at=ticket.synced_at,
+        sync_error=ticket.sync_error,
         metadata=payload,
     )
 
@@ -7859,6 +7871,9 @@ def serialize_ticket(ticket: FindingTicket) -> FindingTicketSummary:
         url=ticket.url,
         created_at=ticket.created_at,
         updated_at=ticket.updated_at,
+        synced_at=ticket.synced_at,
+        sync_error=ticket.sync_error,
+        metadata=ticket.remote_metadata if ticket.remote_metadata else {},
     )
 
 

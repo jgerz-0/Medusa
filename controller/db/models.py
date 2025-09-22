@@ -510,6 +510,13 @@ class FindingTicket(TimestampMixin, Base):
     payload: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    synced_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sync_error: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    remote_metadata: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
 
     finding: Mapped["Finding"] = relationship(back_populates="tickets")
 

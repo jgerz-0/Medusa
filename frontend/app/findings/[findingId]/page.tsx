@@ -36,6 +36,35 @@ function formatTimestamp(value: string) {
   return formatDistanceToNow(new Date(value), { addSuffix: true });
 }
 
+function formatOptionalTimestamp(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+
+  return formatDistanceToNow(new Date(parsed), { addSuffix: true });
+}
+
+const SYNC_STALE_MINUTES = 60;
+
+function isSyncStale(syncedAt: string | null | undefined): boolean {
+  if (!syncedAt) {
+    return true;
+  }
+
+  const parsed = Date.parse(syncedAt);
+  if (Number.isNaN(parsed)) {
+    return true;
+  }
+
+  const staleWindowMs = SYNC_STALE_MINUTES * 60 * 1000;
+  return Date.now() - parsed > staleWindowMs;
+}
+
 function isNotFoundError(value: unknown): value is string {
   return typeof value === 'string' && value.includes('404');
 }
@@ -299,35 +328,61 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
             <p className="text-sm text-gray-500">No external tickets recorded yet.</p>
           ) : (
             <ul className="space-y-2">
-              {finding.tickets.map((ticket) => (
-                <li
-                  key={ticket.id}
-                  className="rounded border border-surface-muted/50 bg-surface-muted/20 px-3 py-2 text-xs text-gray-300"
-                >
-                  <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-gray-200">
-                        {ticket.url ? (
-                          <a
-                            href={ticket.url}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="underline-offset-2 hover:text-sky-300 hover:underline focus-visible:text-sky-300 focus-visible:underline"
+              {finding.tickets.map((ticket) => {
+                const syncedAtLabel = formatOptionalTimestamp(ticket.synced_at ?? null);
+                const syncStale = isSyncStale(ticket.synced_at ?? null);
+                const syncError = ticket.sync_error ?? null;
+
+                return (
+                  <li
+                    key={ticket.id}
+                    className="rounded border border-surface-muted/50 bg-surface-muted/20 px-3 py-2 text-xs text-gray-300"
+                  >
+                    <div className="flex flex-col gap-2">
+                      <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-gray-200">
+                            {ticket.url ? (
+                              <a
+                                href={ticket.url}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                className="underline-offset-2 hover:text-sky-300 hover:underline focus-visible:text-sky-300 focus-visible:underline"
+                              >
+                                {ticket.integration}:{ticket.reference}
+                              </a>
+                            ) : (
+                              `${ticket.integration}:${ticket.reference}`
+                            )}
+                          </span>
+                          <TicketStatusBadge status={ticket.status} />
+                        </div>
+                        <span className="text-[11px] uppercase tracking-wide text-gray-500">
+                          {formatTimestamp(ticket.created_at)}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-wide text-gray-500">
+                        <span className="text-gray-400">
+                          {syncedAtLabel ? `Synced ${syncedAtLabel}` : 'Awaiting first sync'}
+                        </span>
+                        {syncStale ? (
+                          <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-semibold text-amber-300">
+                            Stale
+                          </span>
+                        ) : null}
+                        {syncError ? (
+                          <span
+                            className="rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 font-semibold text-red-300"
+                            title={syncError}
                           >
-                            {ticket.integration}:{ticket.reference}
-                          </a>
-                        ) : (
-                          `${ticket.integration}:${ticket.reference}`
-                        )}
-                      </span>
-                      <TicketStatusBadge status={ticket.status} />
+                            Sync Error
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
-                    <span className="text-[11px] uppercase tracking-wide text-gray-500">
-                      {formatTimestamp(ticket.created_at)}
-                    </span>
-                  </div>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

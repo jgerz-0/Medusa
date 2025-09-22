@@ -155,6 +155,9 @@ export interface FindingTicket {
   status: string;
   url?: string | null;
   created_at: string;
+  updated_at: string;
+  synced_at: string | null;
+  sync_error?: string | null;
   metadata: Record<string, unknown>;
 }
 
