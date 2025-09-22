@@ -92,6 +92,7 @@ services:
       MEDUSA_ZAP_CALLBACK_TOKEN: ${MEDUSA_ZAP_CALLBACK_TOKEN:-local-dev-zap-callback}
       MEDUSA_SQLMAP_CALLBACK_TOKEN: ${MEDUSA_SQLMAP_CALLBACK_TOKEN:-local-dev-sqlmap-callback}
       MEDUSA_ENRICHMENT_CALLBACK_TOKEN: ${MEDUSA_ENRICHMENT_CALLBACK_TOKEN:-local-dev-enrichment-callback}
+      MEDUSA_ANOMALY_CALLBACK_TOKEN: ${MEDUSA_ANOMALY_CALLBACK_TOKEN:-local-dev-anomaly-callback}
       MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN: ${MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN:-local-dev-binary-static-callback}
       MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN: ${MEDUSA_BINARY_FUZZING_CALLBACK_TOKEN:-local-dev-binary-fuzzing-callback}
       MEDUSA_RECON_CALLBACK_TOKEN: ${MEDUSA_RECON_CALLBACK_TOKEN:-local-dev-recon-callback}
@@ -280,6 +281,42 @@ services:
         condition: service_healthy
     volumes:
       - ../../workers/ticketing:/app/workers/ticketing:delegated
+      - ../../controller:/app/controller:delegated
+
+  anomaly-worker:
+    build:
+      context: ../..
+      dockerfile: workers/anomaly/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_anomaly_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${MEDUSA_DATABASE_URL:-postgresql+psycopg2://medusa:medusa@postgres:5432/medusa}
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      ANOMALY_CALLBACK_URL: ${ANOMALY_CALLBACK_URL:-http://controller:8000/internal/anomalies}
+      ANOMALY_CALLBACK_TOKEN: ${ANOMALY_CALLBACK_TOKEN:-local-dev-anomaly-callback}
+      ANOMALY_POLL_INTERVAL: ${ANOMALY_POLL_INTERVAL:-10}
+      ANOMALY_BATCH_SIZE: ${ANOMALY_BATCH_SIZE:-200}
+      ANOMALY_HTTP_TIMEOUT: ${ANOMALY_HTTP_TIMEOUT:-10}
+      ANOMALY_STATE_KEY: ${ANOMALY_STATE_KEY:-workers:anomaly:last_seen}
+      ANOMALY_SOURCE: ${ANOMALY_SOURCE:-worker:anomaly}
+      ANOMALY_ACCESS_DENIED_THRESHOLD: ${ANOMALY_ACCESS_DENIED_THRESHOLD:-5}
+      ANOMALY_ACCESS_DENIED_WINDOW_SECONDS: ${ANOMALY_ACCESS_DENIED_WINDOW_SECONDS:-600}
+      ANOMALY_RATE_LIMIT_THRESHOLD: ${ANOMALY_RATE_LIMIT_THRESHOLD:-3}
+      ANOMALY_RATE_LIMIT_WINDOW_SECONDS: ${ANOMALY_RATE_LIMIT_WINDOW_SECONDS:-300}
+      ANOMALY_SCOPE_MISMATCH_THRESHOLD: ${ANOMALY_SCOPE_MISMATCH_THRESHOLD:-2}
+      ANOMALY_SCOPE_MISMATCH_WINDOW_SECONDS: ${ANOMALY_SCOPE_MISMATCH_WINDOW_SECONDS:-900}
+      ANOMALY_DETECTOR_COOLDOWN_SECONDS: ${ANOMALY_DETECTOR_COOLDOWN_SECONDS:-600}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    volumes:
+      - ../../workers/anomaly:/app/workers/anomaly:delegated
       - ../../controller:/app/controller:delegated
 
   recon-worker:
