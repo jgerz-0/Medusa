@@ -9,8 +9,41 @@ metadata:
     app.kubernetes.io/component: controller
     app.kubernetes.io/managed-by: {{ .Release.Service }}
   annotations:
+    {{- $annotations := dict -}}
     {{- range $k, $v := .Values.controller.ingress.annotations }}
-    {{ $k }}: {{ $v | quote }}
+      {{- $_ := set $annotations $k $v -}}
+    {{- end }}
+    {{- $shieldEnabled := false -}}
+    {{- with .Values.controller.ingress.aws }}
+      {{- if hasKey . "shield" }}
+        {{- if hasKey .shield "enabled" }}
+          {{- $shieldEnabled = .shield.enabled -}}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- $_ := set $annotations "alb.ingress.kubernetes.io/shield-advanced-protection" (ternary "true" "false" $shieldEnabled) -}}
+    {{- $wafEnabled := false -}}
+    {{- $wafFailOpen := false -}}
+    {{- $wafArn := "" -}}
+    {{- with .Values.controller.ingress.aws }}
+      {{- if hasKey . "waf" }}
+        {{- if hasKey .waf "enabled" }}
+          {{- $wafEnabled = .waf.enabled -}}
+        {{- end }}
+        {{- if hasKey .waf "failOpen" }}
+          {{- $wafFailOpen = .waf.failOpen -}}
+        {{- end }}
+        {{- if hasKey .waf "webAclArn" }}
+          {{- $wafArn = trim (default "" .waf.webAclArn) -}}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- $_ := set $annotations "alb.ingress.kubernetes.io/waf-fail-open" (ternary "true" "false" $wafFailOpen) -}}
+    {{- if $wafEnabled }}
+      {{- $_ := set $annotations "alb.ingress.kubernetes.io/wafv2-acl-arn" (required "controller.ingress.aws.waf.webAclArn must be set when controller.ingress.aws.waf.enabled is true" $wafArn) -}}
+    {{- end }}
+    {{- range $key := sortAlpha (keys $annotations) }}
+    {{ $key }}: {{ index $annotations $key | quote }}
     {{- end }}
 spec:
   {{- if .Values.controller.ingress.className }}

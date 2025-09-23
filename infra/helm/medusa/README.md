@@ -40,23 +40,17 @@ Keep the `rbac` scope tight—workers should only receive the Kubernetes permiss
 
 ## Network Policies
 
-Stateful dependencies (PostgreSQL, Redis, MinIO, Qdrant) are isolated behind a namespace-local `NetworkPolicy`. Controllers and workers must be explicitly admitted to reach those services. Extend the `.Values.networkPolicies.workers.allowedComponents` list whenever you add a new worker Job so the data-plane policy keeps pace with the workloads you deploy.
+Stateful dependencies (PostgreSQL, Redis, MinIO, Qdrant) are isolated behind a namespace-local `NetworkPolicy`. Controllers and workers must be explicitly admitted to reach those services. The chart now autodiscovers enabled worker components from `.Values.workers` and whitelists them automatically while keeping the data plane scoped.
 
 ```yaml
 networkPolicies:
   workers:
+    # Append third-party components that are not described under `.Values.workers`.
     allowedComponents:
-      - nuclei-worker
-      - binary-preprocess-worker
-      - binary-fuzzing-worker
-      - binary-static-analysis-worker
-      - binary-symbolic-execution-worker
-      - cve-enrichment-worker
+      - legacy-reporter
 ```
 
-Each entry must match the `app.kubernetes.io/component` label set on the worker pod template. Keeping the list explicit preserves the zero-trust default while still letting operators onboard additional analysis agents without editing templates.
-
-The `binary-symbolic-execution-worker` entry ensures symbolic execution jobs can reach Redis, MinIO, and other stateful services without broadening the policy to unrelated workloads.
+Each entry must match the `app.kubernetes.io/component` label set on the worker pod template. Use this escape hatch for externally managed agents or one-off migration jobs; native workers stay synchronized without manually curating the list.
 
 ## Binary Static Analysis worker configuration
 

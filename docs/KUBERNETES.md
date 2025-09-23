@@ -130,6 +130,46 @@ the IAM role, IRSA wiring, and Helm deployment with hardened defaults
      resources.
    - `medusa_controller_ingress_additional_annotations` to append WAF, Shield,
      or access-log settings required by your security posture.
+   - `medusa_controller_shield_enabled`, `medusa_controller_waf_enabled`,
+     `medusa_controller_waf_acl_arn`, and
+     `medusa_controller_waf_fail_open` to manage AWS Shield Advanced and WAF
+     bindings without crafting raw annotation maps.
+
+### Harden the ingress with AWS Shield and WAF
+
+AWS Shield Advanced and AWS WAF should front any public Medusa deployment. The
+Helm chart now exposes explicit toggles so the associated ALB annotations are
+rendered deterministically:
+
+```hcl
+# terraform.tfvars
+medusa_controller_shield_enabled   = true
+medusa_controller_waf_enabled      = true
+medusa_controller_waf_acl_arn      = "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/medusa-prod/abcd1234-5678-90ab-cdef-EXAMPLE"
+medusa_controller_waf_fail_open    = false
+```
+
+The module maps these variables to the Helm values under
+`controller.ingress.aws`. If you manage Helm directly, mirror the same
+configuration in `values.yaml`:
+
+```yaml
+controller:
+  ingress:
+    aws:
+      shield:
+        enabled: true
+      waf:
+        enabled: true
+        webAclArn: arn:aws:wafv2:us-east-1:123456789012:regional/webacl/medusa-prod/abcd1234-5678-90ab-cdef-EXAMPLE
+        failOpen: false
+```
+
+Use AWS Firewall Manager or Terraform to provision the WebACL with managed rule
+groups that match your threat model (e.g., AWSManagedRulesCommonRuleSet and
+AWSManagedRulesKnownBadInputsRuleSet). Keep `failOpen` set to `false` so the ALB
+fails closed if WAF becomes unavailable, and ensure the Shield Advanced
+subscription is enabled on the target account before flipping the toggle.
 
 ## Install Medusa via Helm
 
@@ -180,10 +220,10 @@ that the Helm release maps it to the `medusa-secrets` entry. The chart ships a
 dedicated service account and namespace-scoped Role that grants `get` access to
 the secret so the kubelet can project the token into the pod environment.
 
-NetworkPolicies already allow the `scope-monitor-worker` component to connect to
-Postgres, Redis, and the controller service. If you tighten the allowed component
-list under `networkPolicies.workers.allowedComponents`, keep
-`scope-monitor-worker` in the set so anomaly reports remain routable.
+NetworkPolicies automatically whitelist every enabled worker component based on
+`values.yaml`. Use `networkPolicies.workers.allowedComponents` to append
+third-party agents (for example, externally managed scoring pipelines) without
+losing the hardened defaults.
 
 ## Verify the deployment
 

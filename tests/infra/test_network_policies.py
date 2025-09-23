@@ -22,6 +22,12 @@ def _render_chart(extra_args: list[str] | None = None) -> str:
     return rendered.stdout
 
 
+def _load_chart_values():
+    yaml = _load_yaml()
+    with (CHART_ROOT / "values.yaml").open(encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
 def _load_yaml():
     """Import PyYAML lazily so tests skip cleanly when the dependency is absent."""
     return pytest.importorskip("yaml")
@@ -29,16 +35,13 @@ def _load_yaml():
 
 def test_data_plane_network_policy_allows_enabled_workers():
     manifest = _render_chart()
-    yaml = _load_yaml()
-
-    with (CHART_ROOT / "values.yaml").open(encoding="utf-8") as handle:
-        values = yaml.safe_load(handle)
+    values = _load_chart_values()
 
     allowed_components = set(
         (values.get("networkPolicies", {}).get("workers", {}) or {}).get("allowedComponents", [])
     )
 
-    expected_worker_components: set[str] = set()
+    expected_worker_components: set[str] = set(allowed_components)
     for worker in (values.get("workers") or {}).values():
         if not isinstance(worker, dict):
             continue
@@ -76,3 +79,23 @@ def test_data_plane_network_policy_allows_enabled_workers():
     # Controller access stays mandatory, and every enabled worker component must be whitelisted.
     assert "controller" in actual_components
     assert expected_worker_components.issubset(actual_components)
+
+
+def _kubeconform_args() -> list[str]:
+    values = _load_chart_values()
+    kubeconform_cfg = (values.get("kubeconform") or {})
+    args: list[str] = []
+    if kubeconform_cfg.get("strict"):
+        args.append("-strict")
+    args.extend(kubeconform_cfg.get("additionalArgs") or [])
+    return args
+
+
+def test_chart_manifests_pass_kubeconform():
+    kubeconform_bin = shutil.which("kubeconform")
+    if kubeconform_bin is None:
+        pytest.skip("kubeconform binary is required to validate the Helm chart")
+
+    manifest = _render_chart()
+    cmd = [kubeconform_bin, *_kubeconform_args(), "-"]
+    subprocess.run(cmd, check=True, input=manifest, text=True)

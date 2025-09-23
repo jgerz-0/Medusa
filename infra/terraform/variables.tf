@@ -798,6 +798,30 @@ variable "medusa_controller_ingress_additional_annotations" {
   default     = {}
 }
 
+variable "medusa_controller_shield_enabled" {
+  description = "Enable AWS Shield Advanced protection on the controller ingress ALB."
+  type        = bool
+  default     = false
+}
+
+variable "medusa_controller_waf_enabled" {
+  description = "Associate an AWS WAFv2 web ACL with the controller ingress ALB."
+  type        = bool
+  default     = false
+}
+
+variable "medusa_controller_waf_acl_arn" {
+  description = "ARN of the AWS WAFv2 web ACL to bind when WAF protection is enabled."
+  type        = string
+  default     = null
+}
+
+variable "medusa_controller_waf_fail_open" {
+  description = "Allow the ALB to fail open when the WAF service is unavailable (defaults to fail closed)."
+  type        = bool
+  default     = false
+}
+
 variable "medusa_controller_ingress_hosts" {
   description = "Host and path configuration for the Medusa controller ingress."
   type = list(object({
