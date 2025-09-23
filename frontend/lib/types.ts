@@ -161,13 +161,25 @@ export interface FindingTicket {
   metadata: Record<string, unknown>;
 }
 
+export interface ReportStorageLocation {
+  bucket: string;
+  key: string;
+  content_type: string;
+}
+
 export interface ReportExportResponse {
   report_id: string;
   format: 'html' | 'pdf';
   generated_at: string;
   finding_count: number;
-  content: string;
+  checksum: string;
+  requested_by: string;
+  storage: ReportStorageLocation;
   metadata: Record<string, unknown>;
+}
+
+export interface ReportExportCollectionResponse {
+  data: ReportExportResponse[];
 }
 
 export interface AnomalyEvent {

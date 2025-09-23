@@ -57,6 +57,7 @@ from controller.db.models import (
     FindingValidation,
     FindingComment,
     FindingTicket,
+    ReportExport,
     PrincipalCredential,
     Scan,
     Target,
@@ -70,6 +71,13 @@ from controller.notifications import (
     CriticalFindingNotification,
     NotificationService,
     build_notification_service,
+)
+from controller.storage import (
+    EphemeralReportStorage,
+    ReportStorage,
+    ReportStorageReference,
+    ReportStorageError,
+    S3ReportStorage,
 )
 from controller.severity import normalize_severity, severity_score
 from controller.security.oidc import (
@@ -749,6 +757,38 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = Field(
         default=True,
         description="Whether to negotiate STARTTLS when delivering notification emails.",
+    )
+    s3_endpoint_url: Optional[str] = Field(
+        default=None,
+        description="Endpoint URL for the MinIO/S3-compatible object storage service.",
+    )
+    s3_region_name: Optional[str] = Field(
+        default=None,
+        description="Region identifier for the S3-compatible storage service.",
+    )
+    s3_access_key_id: Optional[str] = Field(
+        default=None,
+        description="Access key ID used for S3-compatible authentication.",
+    )
+    s3_secret_access_key: Optional[str] = Field(
+        default=None,
+        description="Secret access key used for S3-compatible authentication.",
+    )
+    s3_session_token: Optional[str] = Field(
+        default=None,
+        description="Optional session token for temporary MinIO/S3 credentials.",
+    )
+    s3_force_path_style: bool = Field(
+        default=True,
+        description="Force path-style bucket addressing for MinIO compatibility.",
+    )
+    report_export_bucket: str = Field(
+        default="medusa-reports",
+        description="Bucket used to persist rendered HTML/PDF report exports.",
+    )
+    report_export_prefix: str = Field(
+        default="reports",
+        description="Object prefix prepended to persisted report artifacts.",
     )
     oidc_issuer: Optional[str] = Field(
         default=None,
@@ -2055,13 +2095,25 @@ class ReportExportRequest(BaseModel):
         return self
 
 
+class ReportExportLocation(BaseModel):
+    bucket: str
+    key: str
+    content_type: str
+
+
 class ReportExportResponse(BaseModel):
     report_id: str
     format: Literal["html", "pdf"]
     generated_at: datetime
     finding_count: int
-    content: str = Field(description="Base64-encoded report content")
+    checksum: str
+    requested_by: str
+    storage: ReportExportLocation
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ReportExportCollectionResponse(BaseModel):
+    data: List[ReportExportResponse]
 
 
 class JiraTicketRequest(BaseModel):
@@ -2367,6 +2419,48 @@ def get_notification_service(
         smtp_username=settings.smtp_username,
         smtp_password=settings.smtp_password,
         smtp_use_tls=settings.smtp_use_tls,
+    )
+
+
+@lru_cache()
+def _build_report_storage(
+    endpoint_url: Optional[str],
+    region_name: Optional[str],
+    access_key_id: Optional[str],
+    secret_access_key: Optional[str],
+    session_token: Optional[str],
+    force_path_style: bool,
+    bucket: str,
+    prefix: str,
+) -> ReportStorage:
+    if not access_key_id or not secret_access_key:
+        LOGGER.warning(
+            "Report storage credentials missing; using ephemeral in-memory storage",
+            extra={"bucket": bucket},
+        )
+        return EphemeralReportStorage()
+    return S3ReportStorage(
+        bucket=bucket,
+        prefix=prefix,
+        endpoint_url=endpoint_url,
+        region_name=region_name,
+        access_key_id=access_key_id,
+        secret_access_key=secret_access_key,
+        session_token=session_token,
+        force_path_style=force_path_style,
+    )
+
+
+def get_report_storage(settings: Settings = Depends(get_settings)) -> ReportStorage:
+    return _build_report_storage(
+        settings.s3_endpoint_url,
+        settings.s3_region_name,
+        settings.s3_access_key_id,
+        settings.s3_secret_access_key,
+        settings.s3_session_token,
+        settings.s3_force_path_style,
+        settings.report_export_bucket,
+        settings.report_export_prefix,
     )
 
 
@@ -7760,6 +7854,7 @@ def export_findings_report(
     request: ReportExportRequest,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
+    storage: ReportStorage = Depends(get_report_storage),
 ) -> ReportExportResponse:
     enforce_roles(
         principal,
@@ -7817,12 +7912,30 @@ def export_findings_report(
 
     if request.format == "html":
         report_bytes = _render_report_html(ordered).encode("utf-8")
+        content_type = "text/html; charset=utf-8"
+        extension = "html"
     else:
         report_bytes = _render_report_pdf(ordered)
+        content_type = "application/pdf"
+        extension = "pdf"
 
-    encoded_content = base64.b64encode(report_bytes).decode("ascii")
     generated_at = datetime.now(tz=timezone.utc)
     report_id = str(uuid.uuid4())
+    checksum = hashlib.sha256(report_bytes).hexdigest()
+
+    try:
+        storage_reference = storage.store(
+            report_id=report_id,
+            data=report_bytes,
+            content_type=content_type,
+            extension=extension,
+        )
+    except ReportStorageError as exc:
+        LOGGER.exception("Failed to persist report export", extra={"report_id": report_id})
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to persist report export",
+        ) from exc
 
     severity_counts: Dict[str, int] = {}
     status_counts: Dict[str, int] = {}
@@ -7838,17 +7951,40 @@ def export_findings_report(
         "format": request.format,
     }
 
+    export_record = ReportExport(
+        id=report_id,
+        format=request.format,
+        content_type=content_type,
+        content_length=len(report_bytes),
+        content_sha256=checksum,
+        storage_bucket=storage_reference.bucket,
+        storage_key=storage_reference.key,
+        requested_by=principal.subject,
+        generated_at=generated_at,
+        finding_count=len(ordered),
+        scan_id=request.scan_id,
+        finding_ids=[record.id for record in ordered],
+        metadata_json=metadata,
+    )
+
+    db.add(export_record)
+    db.commit()
+    db.refresh(export_record)
+
     record_audit_event(
         db,
         actor=principal,
         action="export_report",
-        resource_type="finding",
-        resource_id=None,
+        resource_type="report_export",
+        resource_id=report_id,
         metadata={
             "report_id": report_id,
             "format": request.format,
             "finding_count": len(ordered),
             "severity_counts": severity_counts,
+            "storage_bucket": storage_reference.bucket,
+            "storage_key": storage_reference.key,
+            "checksum": checksum,
         },
     )
 
@@ -7857,9 +7993,132 @@ def export_findings_report(
         format=request.format,
         generated_at=generated_at,
         finding_count=len(ordered),
-        content=encoded_content,
+        checksum=checksum,
+        requested_by=principal.subject,
+        storage=ReportExportLocation(
+            bucket=storage_reference.bucket,
+            key=storage_reference.key,
+            content_type=content_type,
+        ),
         metadata=metadata,
     )
+
+
+@app.get("/reports/export", response_model=ReportExportCollectionResponse)
+def list_report_exports(
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    scan_id: Optional[str] = Query(None),
+    finding_id: Optional[str] = Query(None, alias="findingId"),
+    limit: int = Query(20, ge=1, le=100),
+) -> ReportExportCollectionResponse:
+    enforce_roles(
+        principal,
+        [ROLE_REPORT_EXPORT],
+        db,
+        resource_type="endpoint",
+        resource_id="/reports/export",
+    )
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id="/reports/export",
+    )
+
+    query = db.query(ReportExport).order_by(ReportExport.generated_at.desc())
+    if scan_id:
+        query = query.filter(ReportExport.scan_id == scan_id)
+    records = query.limit(limit).all()
+
+    filtered: List[ReportExport] = []
+    for record in records:
+        if finding_id and finding_id not in (record.finding_ids or []):
+            continue
+        filtered.append(record)
+
+    payload = [serialize_report_export(record) for record in filtered]
+    return ReportExportCollectionResponse(data=payload)
+
+
+@app.get("/reports/{report_id}")
+def download_report_export(
+    report_id: str,
+    principal: Principal = Depends(authenticate),
+    db: Session = Depends(get_db_session),
+    storage: ReportStorage = Depends(get_report_storage),
+) -> Response:
+    enforce_roles(
+        principal,
+        [ROLE_REPORT_EXPORT],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/reports/{report_id}",
+    )
+    enforce_roles(
+        principal,
+        [ROLE_FINDINGS_READ],
+        db,
+        resource_type="endpoint",
+        resource_id=f"/reports/{report_id}",
+    )
+
+    record = db.get(ReportExport, report_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report export not found",
+        )
+
+    reference = ReportStorageReference(
+        bucket=record.storage_bucket,
+        key=record.storage_key,
+        content_type=record.content_type,
+    )
+    try:
+        data = storage.fetch(reference)
+    except ReportStorageError as exc:
+        LOGGER.exception("Failed to download report export", extra={"report_id": report_id})
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to download report export",
+        ) from exc
+
+    checksum = hashlib.sha256(data).hexdigest()
+    if checksum != record.content_sha256:
+        LOGGER.error(
+            "Report export checksum mismatch",
+            extra={"report_id": report_id, "expected": record.content_sha256, "observed": checksum},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored report failed integrity verification",
+        )
+
+    filename = f"medusa-report-{record.id}.{record.format}"
+
+    record_audit_event(
+        db,
+        actor=principal,
+        action="download_report",
+        resource_type="report_export",
+        resource_id=str(record.id),
+        metadata={
+            "report_id": str(record.id),
+            "format": record.format,
+            "storage_bucket": record.storage_bucket,
+            "storage_key": record.storage_key,
+        },
+    )
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Report-Checksum": checksum,
+        "X-Report-Storage-Bucket": record.storage_bucket,
+        "X-Report-Storage-Key": record.storage_key,
+    }
+    return Response(content=data, media_type=record.content_type, headers=headers)
 
 
 @app.post(
@@ -8066,6 +8325,26 @@ def serialize_ticket(ticket: FindingTicket) -> FindingTicketSummary:
         synced_at=ticket.synced_at,
         sync_error=ticket.sync_error,
         metadata=ticket.remote_metadata if ticket.remote_metadata else {},
+    )
+
+
+def serialize_report_export(record: ReportExport) -> ReportExportResponse:
+    """Project a persisted report export into the API schema."""
+
+    metadata = deepcopy(record.metadata_json or {})
+    return ReportExportResponse(
+        report_id=str(record.id),
+        format=record.format,
+        generated_at=record.generated_at,
+        finding_count=record.finding_count,
+        checksum=record.content_sha256,
+        requested_by=record.requested_by,
+        storage=ReportExportLocation(
+            bucket=record.storage_bucket,
+            key=record.storage_key,
+            content_type=record.content_type,
+        ),
+        metadata=metadata,
     )
 
 

@@ -481,6 +481,36 @@ export async function exportFindingsReport(
   });
 }
 
+export interface ReportExportsQuery {
+  scanId?: string;
+  findingId?: string;
+  limit?: number;
+}
+
+export async function fetchReportExports(
+  query?: ReportExportsQuery
+): Promise<ReportExportResponse[]> {
+  const path = buildPath('/reports/export', {
+    scan_id: query?.scanId,
+    findingId: query?.findingId,
+    limit: query?.limit ? `${query.limit}` : undefined
+  });
+  const payload = await request<ReportExportCollectionResponse>(path);
+  return payload.data;
+}
+
+export async function downloadReportArtifact(reportId: string): Promise<Response> {
+  const url = `${controllerBaseUrl.replace(/\/$/, '')}/reports/${reportId}`;
+  const headers = normalizeHeaders(buildAuthHeaders());
+  const response = await fetch(url, { cache: 'no-store', headers });
+  if (!response.ok) {
+    const detail = await response.text();
+    const message = detail && detail.trim().length > 0 ? detail : `Controller returned ${response.status} for report download.`;
+    throw new ControllerError(message, response.status, detail);
+  }
+  return response;
+}
+
 export async function createJiraTicket(payload: {
   findingId: string;
   projectKey: string;

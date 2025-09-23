@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
-import { fetchFindings, fetchFindingsTimeline } from '@/lib/api';
-import type { FindingsTimelineBucket } from '@/lib/types';
+import { fetchFindings, fetchFindingsTimeline, fetchReportExports } from '@/lib/api';
+import type { FindingsTimelineBucket, ReportExportResponse } from '@/lib/types';
 import { FindingsTable } from '@/components/FindingsTable';
 import { FindingsFilters } from '@/components/FindingsFilters';
 import { FindingsTimeline } from '@/components/FindingsTimeline';
@@ -31,6 +31,7 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
   let findingsResponse: Awaited<ReturnType<typeof fetchFindings>> | null = null;
   let timeline: FindingsTimelineBucket[] = [];
   let timelineError: string | null = null;
+  let recentExports: ReportExportResponse[] = [];
 
   const page = parsePositiveInteger(searchParams?.page, 1);
   const pageSize = parsePositiveInteger(searchParams?.page_size, 50);
@@ -133,6 +134,17 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
     return `/api/reports/export?${queryString}`;
   }
 
+  if (exportEnabled) {
+    try {
+      recentExports = await fetchReportExports({
+        scanId: query.scanId,
+        limit: 5
+      });
+    } catch {
+      recentExports = [];
+    }
+  }
+
   return (
     <section className="space-y-4">
       <header className="space-y-2">
@@ -169,6 +181,26 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
                 ? 'Exports respect the active filters applied to this view.'
                 : 'Apply filters or a scan ID to enable exports.'}
             </p>
+            {exportEnabled && recentExports.length > 0 ? (
+              <div className="w-full max-w-sm rounded border border-surface-muted/40 bg-surface-muted/10 p-3">
+                <h4 className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Recent exports</h4>
+                <ul className="mt-2 space-y-1">
+                  {recentExports.map((record) => (
+                    <li key={record.report_id} className="flex items-center justify-between gap-2 text-[11px] text-gray-300">
+                      <span className="font-mono text-[10px] text-gray-500">
+                        {record.report_id.slice(0, 8)} • {record.format.toUpperCase()} • {new Date(record.generated_at).toLocaleString()}
+                      </span>
+                      <a
+                        href={`/api/reports/export?reportId=${record.report_id}&format=${record.format}`}
+                        className="text-[10px] font-semibold uppercase tracking-wide text-sky-400 hover:text-sky-300"
+                      >
+                        Download
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         </div>
         <RequiredRolesNotice
