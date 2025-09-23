@@ -50,6 +50,8 @@ external_secrets_secret_store_name = "medusa-prod-cluster-secrets"
 
 Terraform annotates the operator service account with the supplied IRSA role, points the secret store at AWS Secrets Manager, and configures the Medusa module to render an `ExternalSecret` that materialises the RDS credentials and callback tokens. Disable the flag in development environments to fall back to inline secrets.
 
+See the [External Secrets runbook](runbooks/EXTERNAL_SECRETS.md) for outage response steps, rotation playbooks, and validation checklists that must accompany any Terraform change touching the operator.
+
 ### Observability
 
 The `observability` module hardens how Prometheus and Grafana are deployed for Medusa. It supports two modes:
