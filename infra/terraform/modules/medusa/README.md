@@ -74,6 +74,15 @@ module "medusa" {
     validator     = random_password.medusa_callback["validator"].result
   }
 
+  controller_ingress_security = {
+    shield_enabled = var.medusa_controller_shield_enabled
+    waf = {
+      enabled     = var.medusa_controller_waf_enabled
+      web_acl_arn = var.medusa_controller_waf_acl_arn
+      fail_open   = var.medusa_controller_waf_fail_open
+    }
+  }
+
   sealed_secret_configuration = var.medusa_sealed_secret_configuration
 }
 ```

@@ -226,6 +226,29 @@ locals {
     }
   } : null
 
+  controller_ingress_waf_acl = trimspace(coalesce(
+    try(var.controller_ingress_security.waf.web_acl_arn, null),
+    "",
+  ))
+
+  controller_ingress_security = {
+    shield_enabled = coalesce(
+      try(var.controller_ingress_security.shield_enabled, null),
+      false,
+    )
+    waf = {
+      enabled = coalesce(
+        try(var.controller_ingress_security.waf.enabled, null),
+        false,
+      )
+      web_acl_arn = local.controller_ingress_waf_acl != "" ? local.controller_ingress_waf_acl : null
+      fail_open = coalesce(
+        try(var.controller_ingress_security.waf.fail_open, null),
+        false,
+      )
+    }
+  }
+
   base_helm_values = {
     secrets = {
       strategy       = var.secret_strategy
@@ -265,6 +288,22 @@ locals {
           ],
           var.controller_additional_env,
         )
+      }
+      ingress = {
+        aws = {
+          shield = {
+            enabled = local.controller_ingress_security.shield_enabled
+          }
+          waf = merge(
+            {
+              enabled = local.controller_ingress_security.waf.enabled
+              failOpen = local.controller_ingress_security.waf.fail_open
+            },
+            local.controller_ingress_security.waf.web_acl_arn != null ? {
+              webAclArn = local.controller_ingress_security.waf.web_acl_arn
+            } : {},
+          )
+        }
       }
     }
     minio = {

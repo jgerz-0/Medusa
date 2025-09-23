@@ -250,6 +250,17 @@ locals {
     var.medusa_controller_ingress_additional_annotations,
   )
 
+  medusa_controller_waf_acl = trimspace(coalesce(var.medusa_controller_waf_acl_arn, ""))
+
+  medusa_controller_ingress_security = {
+    shield_enabled = var.medusa_controller_shield_enabled
+    waf = {
+      enabled     = var.medusa_controller_waf_enabled
+      web_acl_arn = local.medusa_controller_waf_acl != "" ? local.medusa_controller_waf_acl : null
+      fail_open   = var.medusa_controller_waf_fail_open
+    }
+  }
+
   medusa_controller_ingress_hosts_rendered = [
     for host in var.medusa_controller_ingress_hosts : {
       host  = host.host
@@ -391,6 +402,7 @@ module "medusa" {
   external_secret_configuration = local.medusa_external_secret_configuration_effective
   sealed_secret_configuration   = local.medusa_sealed_secret_configuration_effective
   controller_additional_env     = var.medusa_controller_additional_env
+  controller_ingress_security   = local.medusa_controller_ingress_security
   extra_values = concat(
     var.medusa_extra_values,
     module.observability.medusa_extra_values,

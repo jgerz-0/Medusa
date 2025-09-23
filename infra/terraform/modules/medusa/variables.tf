@@ -176,6 +176,19 @@ variable "controller_additional_env" {
   default = []
 }
 
+variable "controller_ingress_security" {
+  description = "Controls AWS WAF and Shield integration for the controller ingress."
+  type = object({
+    shield_enabled = optional(bool)
+    waf = optional(object({
+      enabled     = optional(bool)
+      web_acl_arn = optional(string)
+      fail_open   = optional(bool)
+    }))
+  })
+  default = {}
+}
+
 variable "extra_values" {
   description = "Additional Helm value documents appended to the release."
   type        = list(any)

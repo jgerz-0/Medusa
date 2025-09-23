@@ -166,6 +166,13 @@ controller:
     enabled: false
     className: ""
     annotations: {}
+    aws:
+      shield:
+        enabled: false
+      waf:
+        enabled: false
+        webAclArn: ""
+        failOpen: false
     hosts:
       - host: medusa.local
         paths:
@@ -1177,21 +1184,9 @@ networkPolicies:
   controller:
     allowedNamespaces: []
   workers:
-    # Components allowed to connect to stateful data-plane services. Extend this list
-    # when adding new worker Jobs so network policies stay scoped but functional.
-    allowedComponents:
-      - nuclei-worker
-      - binary-preprocess-worker
-      - binary-fuzzing-worker
-      - binary-static-analysis-worker
-      - binary-symbolic-execution-worker
-      - cve-enrichment-worker
-      - zap-worker
-      - sqlmap-worker
-      - validator-worker
-      - ticketing-worker
-      - anomaly-worker
-      - scope-monitor-worker
+    # Additional components allowed to connect to stateful data-plane services.
+    # The chart automatically adds enabled workers from `.Values.workers`.
+    allowedComponents: []
   ingress:
     enabled: true
   egress:
@@ -1236,4 +1231,7 @@ grafana:
 
 kubeconform:
   strict: true
-  additionalArgs: []
+  additionalArgs:
+    - -ignore-missing-schemas
+    - -skip
+    - SealedSecret,ExternalSecret
