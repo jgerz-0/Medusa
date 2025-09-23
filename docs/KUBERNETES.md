@@ -67,6 +67,8 @@ When the operator is enabled, the Medusa release automatically switches `secrets
 
 Clusters without AWS access or IRSA bindings can continue to use inline secrets that mirror `infra/docker/docker-compose.yml`.
 
+For day-two operations—including diagnosing controller sync errors, resolving `SecretStore` permission issues, and validating rotation events—follow the [External Secrets runbook](runbooks/EXTERNAL_SECRETS.md).
+
 ## Provision the AWS Load Balancer Controller
 
 Production clusters expose Medusa via an Application Load Balancer managed by
