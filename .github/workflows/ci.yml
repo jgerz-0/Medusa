@@ -50,9 +50,91 @@ jobs:
 
       - name: Terraform validate
         run: terraform validate
+  security-scans:
+    name: Container, IaC, and dependency scans
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.14.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Trivy configuration scan
+        uses: aquasecurity/trivy-action@0.14.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: 'HIGH,CRITICAL'
+
+      - name: tfsec scan
+        uses: aquasecurity/tfsec-action@v1.0.4
+        with:
+          working_directory: infra/terraform
+
+      - name: Set up Python for dependency audit
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry and pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "poetry==1.8.2" "pip-audit==2.7.3"
+
+      - name: Run Python dependency audit
+        run: |
+          poetry export --directory controller --format requirements.txt --without-hashes --output /tmp/controller-requirements.txt
+          poetry export --directory workers/web/nuclei --format requirements.txt --without-hashes --output /tmp/nuclei-requirements.txt
+          pip-audit -r /tmp/controller-requirements.txt
+          pip-audit -r /tmp/nuclei-requirements.txt
+
+      - name: Set up Node.js for dependency audit
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Install frontend dependencies (frozen)
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Run pnpm security audit
+        working-directory: frontend
+        run: pnpm audit --audit-level high
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      - name: Install conftest
+        run: |
+          curl -L https://github.com/open-policy-agent/conftest/releases/download/v0.45.0/conftest_0.45.0_Linux_x86_64.tar.gz \
+            | tar -xz conftest
+          sudo install -m 0755 conftest /usr/local/bin/conftest
+
+      - name: Run policy-as-code checks
+        run: |
+          conftest test infra/terraform --policy infra/policy
+          conftest test infra/docker --policy infra/policy
+          conftest test infra/helm/medusa --policy infra/policy --input helm
   lint-test:
     name: Lint and Test
     runs-on: ubuntu-latest
+    needs:
+      - terraform
+      - security-scans
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -140,3 +222,77 @@ jobs:
       - name: Run frontend typecheck
         working-directory: frontend
         run: pnpm run typecheck
+  supply-chain:
+    name: Build, sign, and attest artifacts
+    runs-on: ubuntu-latest
+    needs:
+      - lint-test
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      COSIGN_EXPERIMENTAL: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.4.0
+
+      - name: Build controller container image
+        run: |
+          mkdir -p artifacts/container
+          docker build -t medusa-controller:${{ github.sha }} -f infra/docker/controller.Dockerfile .
+          docker save medusa-controller:${{ github.sha }} -o artifacts/container/controller.tar
+
+      - name: Build frontend container image
+        run: |
+          docker build -t medusa-frontend:${{ github.sha }} -f infra/docker/frontend.Dockerfile .
+          docker save medusa-frontend:${{ github.sha }} -o artifacts/container/frontend.tar
+
+      - name: Package Helm chart
+        run: |
+          mkdir -p artifacts/helm
+          helm dependency update infra/helm/medusa
+          helm package infra/helm/medusa --destination artifacts/helm
+
+      - name: Sign supply-chain artifacts
+        run: |
+          mkdir -p artifacts/signatures
+          for artifact in artifacts/container/*.tar artifacts/helm/*.tgz; do
+            name=$(basename "$artifact")
+            cosign sign-blob --yes \
+              --output-signature artifacts/signatures/${name}.sig \
+              --output-certificate artifacts/signatures/${name}.crt \
+              --bundle artifacts/signatures/${name}.sigstore.json \
+              "$artifact"
+          done
+
+      - name: Generate provenance statements
+        run: |
+          mkdir -p artifacts/provenance
+          timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          for artifact in artifacts/container/*.tar artifacts/helm/*.tgz; do
+            name=$(basename "$artifact")
+            sha=$(sha256sum "$artifact" | cut -d ' ' -f1)
+            cat <<EOF > artifacts/provenance/${name}.intoto.jsonl
+{"_type":"https://in-toto.io/Statement/v0.1","subject":[{"name":"$name","digest":{"sha256":"$sha"}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildType":"https://github.com/${{ github.repository }}/.github/workflows/ci.yml","buildConfig":{"builder":"github-actions","artifact":"$name"},"metadata":{"invocationId":"${{ github.run_id }}","buildStartedOn":"$timestamp","buildFinishedOn":"$timestamp"}}}
+EOF
+            cosign sign-blob --yes \
+              --output-signature artifacts/signatures/${name}.intoto.sig \
+              --output-certificate artifacts/signatures/${name}.intoto.crt \
+              --bundle artifacts/signatures/${name}.intoto.sigstore.json \
+              artifacts/provenance/${name}.intoto.jsonl
+          done
+
+      - name: Upload supply-chain artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-bundle
+          path: artifacts/
