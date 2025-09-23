@@ -17,8 +17,10 @@ Phase 6 extends the Medusa controller and dashboard with analyst workflows, expo
 
 ## Export Pipeline
 
-* `/reports/export` returns base64-encoded HTML or PDF reports with evidence snapshots, metadata, and deterministic CVSS estimates (severity-derived).
-* The Next.js UI proxies downloads through `/api/reports/export` to deliver files to the browser while keeping API credentials server-side.
+* `POST /reports/export` renders deterministic HTML or PDF snapshots, persists the artifact to MinIO/S3, and records a `report_exports` row capturing storage bucket/key, SHA-256 checksum, requester, and filter metadata.
+* `GET /reports/export` lists recent exports (filterable by scan or finding) so analysts can review retention history directly in the UI.
+* `GET /reports/{id}` streams the stored artifact after verifying the checksum matches the recorded digest; the controller returns MinIO metadata headers for audit trails.
+* The Next.js UI proxies downloads through `/api/reports/export`, supports both on-demand generation and fetching existing artifacts by `reportId`, and surfaces recent exports with timestamps.
 
 ## Ticketing
 
@@ -27,8 +29,15 @@ Phase 6 extends the Medusa controller and dashboard with analyst workflows, expo
 
 ## Security & Auditability
 
-* All new endpoints reuse `record_audit_event`, ensure immutable hashes for comments/tickets, and sanitize inputs (tags, statuses, references).
-* Hash fields on persisted records (`metadata_hash`, `evidence_hash`, `advisories_hash`, `errors_hash`, `provenance_hash`, `payload_hash`) are guaranteed to be populated using canonical JSON serialization so downstream systems can detect tampering.
-* Role constants now include `report:export` and `ticket:create`; admin credentials receive both by default.
+* All new endpoints reuse `record_audit_event`, ensure immutable hashes for comments/tickets, and sanitize inputs (tags, statuses, references). Report exports add `download_report` audit entries keyed by report ID, storage location, and checksum.
+* Hash fields on persisted records (`metadata_hash`, `evidence_hash`, `advisories_hash`, `errors_hash`, `provenance_hash`, `payload_hash`, `content_sha256`) are guaranteed to be populated using canonical serialization so downstream systems can detect tampering.
+* Role constants now include `report:export` and `ticket:create`; admin credentials receive both by default. The `/reports/{id}` download endpoint enforces both `findings:read` and `report:export` to prevent bulk exfiltration.
+
+## Retention & MinIO Controls
+
+* Report artifacts live under the `MEDUSA_REPORT_EXPORT_BUCKET`/`MEDUSA_REPORT_EXPORT_PREFIX` namespace (defaults: `medusa-reports`/`reports`). Operations teams can apply MinIO/S3 lifecycle policies against this prefix to match retention SLAs.
+* Stored exports retain the finding IDs and scan identifiers used to generate them, enabling forensic review of which scope was shared.
+* UI download links include the recorded checksum so recipients can verify integrity outside the platform.
+* Local development without MinIO credentials falls back to ephemeral in-memory storage so engineers can exercise the workflow without external dependencies. This mode is non-persistent by design.
 
 Consult the updated API tests (`controller/tests/test_api_contracts.py`) for example payloads and regression coverage.

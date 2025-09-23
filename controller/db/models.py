@@ -521,6 +521,30 @@ class FindingTicket(TimestampMixin, Base):
     finding: Mapped["Finding"] = relationship(back_populates="tickets")
 
 
+class ReportExport(TimestampMixin, Base):
+    """Persistent record of generated report artifacts stored in object storage."""
+
+    __tablename__ = "report_exports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_default_uuid)
+    format: Mapped[str] = mapped_column(String(8), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_length: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_bucket: Mapped[str] = mapped_column(String(128), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    generated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), nullable=False
+    )
+    finding_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    scan_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    finding_ids: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+
+
 class BinarySample(TimestampMixin, Base):
     """Normalized metadata about uploaded binaries produced by preprocessing."""
 
@@ -1020,6 +1044,16 @@ def _finding_enrichment_prevent_mutation(
     )
     if changed:
         raise ValueError("Finding enrichment payloads are immutable once recorded.")
+
+
+@event.listens_for(ReportExport, "before_insert", propagate=True)
+def _report_export_normalize(mapper, connection, target: ReportExport) -> None:
+    if target.metadata_json is None:
+        target.metadata_json = {}
+    if target.finding_ids is None:
+        target.finding_ids = []
+    if not isinstance(target.finding_ids, list):
+        target.finding_ids = list(target.finding_ids)
 
 
 class PrincipalCredential(Base):

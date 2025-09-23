@@ -1,9 +1,9 @@
-from datetime import datetime, timedelta, timezone
-import uuid
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Generator, Optional, Tuple
 
+from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -40,6 +40,8 @@ from controller.main import (
     get_db_session,
     get_notification_service,
     get_queue_client,
+    ROLE_FINDINGS_READ,
+    ROLE_REPORT_EXPORT,
     get_settings,
 )
 from controller.notifications import (
@@ -2433,7 +2435,27 @@ def test_finding_workflow_and_reporting(
     assert export_response.status_code == 200, export_response.text
     report_payload = export_response.json()
     assert report_payload["format"] == "html"
-    assert report_payload["content"]
+    assert report_payload["storage"]["bucket"]
+    assert len(report_payload["checksum"]) == 64
+
+    download_response = client.get(
+        f"/reports/{report_payload['report_id']}",
+        headers=auth_headers(),
+    )
+    assert download_response.status_code == 200
+    assert download_response.headers["content-type"].startswith("text/html")
+    assert hashlib.sha256(download_response.content).hexdigest() == report_payload["checksum"]
+
+    history_response = client.get(
+        "/reports/export",
+        headers=auth_headers(),
+    )
+    assert history_response.status_code == 200
+    history_payload = history_response.json()
+    assert any(
+        item["report_id"] == report_payload["report_id"]
+        for item in history_payload["data"]
+    )
 
     filtered = client.get(
         "/findings",
@@ -2451,6 +2473,56 @@ def test_finding_workflow_and_reporting(
     assert timeline.status_code == 200
     timeline_payload = timeline.json()["data"]
     assert isinstance(timeline_payload, list)
+
+
+def test_report_download_requires_export_role(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    finding_id = _create_finding_record(session_factory)
+    export_response = client.post(
+        "/reports/export",
+        json={"finding_ids": [finding_id], "format": "pdf"},
+        headers=auth_headers(),
+    )
+    assert export_response.status_code == 200, export_response.text
+    report_payload = export_response.json()
+
+    limited_key = "limited-viewer"
+    with session_factory() as session:
+        credential = PrincipalCredential(
+            subject="limited-viewer",
+            auth_method="api_key",
+            key_hash=_hash_secret(limited_key),
+            roles=[ROLE_FINDINGS_READ],
+        )
+        session.add(credential)
+        session.commit()
+
+    limited_headers = {"X-API-Key": limited_key}
+    forbidden_download = client.get(
+        f"/reports/{report_payload['report_id']}",
+        headers=limited_headers,
+    )
+    assert forbidden_download.status_code == status.HTTP_403_FORBIDDEN
+
+    with session_factory() as session:
+        credential = (
+            session.query(PrincipalCredential)
+            .filter(PrincipalCredential.subject == "limited-viewer")
+            .one()
+        )
+        credential.roles = [ROLE_FINDINGS_READ, ROLE_REPORT_EXPORT]
+        session.add(credential)
+        session.commit()
+
+    allowed_download = client.get(
+        f"/reports/{report_payload['report_id']}",
+        headers=limited_headers,
+    )
+    assert allowed_download.status_code == status.HTTP_200_OK
+    assert allowed_download.headers["content-type"].startswith("application/pdf")
 
 
 def test_finding_detail_includes_ticket_sync_state(

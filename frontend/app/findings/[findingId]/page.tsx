@@ -5,9 +5,10 @@ import { formatDistanceToNow } from 'date-fns';
 import {
   fetchFinding,
   fetchFindingComments,
-  fetchFindingTimeline
+  fetchFindingTimeline,
+  fetchReportExports
 } from '@/lib/api';
-import type { FindingComment, FindingTimelineEvent } from '@/lib/types';
+import type { FindingComment, FindingTimelineEvent, ReportExportResponse } from '@/lib/types';
 import { ROLE_ANALYST, ROLE_REPORT_EXPORT, ROLE_TICKETING_CREATE } from '@/lib/rbac';
 import { StatusBadge } from '@/components/StatusBadge';
 import { RequiredRolesNotice, type RoleRequirement } from '@/components/RequiredRolesNotice';
@@ -214,6 +215,10 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
   const timeline = await fetchFindingTimeline(params.findingId).catch(
     (): FindingTimelineEvent[] => []
   );
+  const reportHistory = await fetchReportExports({
+    findingId: params.findingId,
+    limit: 5
+  }).catch((): ReportExportResponse[] => []);
 
   const metadataScanner =
     typeof finding.metadata?.['scanner'] === 'string'
@@ -459,15 +464,45 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
             href={`/api/reports/export?format=pdf&findingId=${finding.id}`}
             className="btn btn-primary text-xs uppercase tracking-wide"
           >
-            Download PDF
+            Generate PDF
           </a>
           <a
             href={`/api/reports/export?format=html&findingId=${finding.id}`}
             className="btn btn-secondary text-xs uppercase tracking-wide"
           >
-            Download HTML
+            Generate HTML
           </a>
         </div>
+        <section className="rounded border border-surface-muted/40 bg-surface-muted/10 p-3">
+          <header className="mb-2 flex items-center justify-between">
+            <h4 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Recent exports</h4>
+            <span className="text-[10px] uppercase tracking-wide text-gray-500">Stored in MinIO/S3</span>
+          </header>
+          {reportHistory.length === 0 ? (
+            <p className="text-xs text-gray-500">No persisted exports recorded yet.</p>
+          ) : (
+            <ul className="divide-y divide-surface-muted/40">
+              {reportHistory.map((record) => (
+                <li key={record.report_id} className="flex flex-col gap-1 py-2 text-xs text-gray-300 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <p className="font-mono text-[11px] text-gray-400">
+                      {record.report_id.slice(0, 8)} • {record.format.toUpperCase()} • {formatTimestamp(record.generated_at)}
+                    </p>
+                    <p className="text-[10px] text-gray-500">
+                      Requested by {record.requested_by} • checksum {record.checksum.slice(0, 12)}…
+                    </p>
+                  </div>
+                  <a
+                    href={`/api/reports/export?reportId=${record.report_id}&format=${record.format}`}
+                    className="text-[11px] font-semibold uppercase tracking-wide text-sky-400 hover:text-sky-300"
+                  >
+                    Download
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       </article>
 
       <article className="card space-y-4 p-6">

@@ -17,8 +17,11 @@ from controller.main import (
     app,
     get_db_session,
     get_queue_client,
+    get_report_storage,
     get_settings,
+    _build_report_storage,
 )
+from controller.storage import ReportStorage, ReportStorageReference
 
 
 class InMemoryQueue(QueueClient):
@@ -29,11 +32,41 @@ class InMemoryQueue(QueueClient):
         self.messages.append((channel, payload))
 
 
+class InMemoryReportStorage(ReportStorage):
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+        self.content_types: dict[str, str] = {}
+
+    def store(
+        self,
+        *,
+        report_id: str,
+        data: bytes,
+        content_type: str,
+        extension: str,
+    ) -> ReportStorageReference:
+        key = f"exports/{report_id}.{extension}"
+        self.objects[key] = bytes(data)
+        self.content_types[key] = content_type
+        return ReportStorageReference(
+            bucket="test-report-bucket",
+            key=key,
+            content_type=content_type,
+        )
+
+    def fetch(self, reference: ReportStorageReference) -> bytes:
+        stored = self.objects.get(reference.key)
+        if stored is None:
+            raise RuntimeError("missing test artifact")
+        return stored
+
+
 @pytest.fixture()
 def api_client() -> (
     Generator[Tuple[TestClient, InMemoryQueue, sessionmaker, Settings], None, None]
 ):
     get_settings.cache_clear()  # type: ignore[attr-defined]
+    _build_report_storage.cache_clear()
     settings = Settings(
         database_url="sqlite+pysqlite:///:memory:",
         redis_url="redis://localhost:6379/0",
@@ -68,6 +101,7 @@ def api_client() -> (
     SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
 
     queue = InMemoryQueue()
+    storage = InMemoryReportStorage()
 
     with SessionFactory() as session:
         bootstrap_credential = PrincipalCredential(
@@ -92,14 +126,19 @@ def api_client() -> (
     def override_queue() -> InMemoryQueue:
         return queue
 
+    def override_report_storage() -> InMemoryReportStorage:
+        return storage
+
     app.dependency_overrides[get_settings] = override_settings
     app.dependency_overrides[get_db_session] = override_session
     app.dependency_overrides[get_queue_client] = override_queue
+    app.dependency_overrides[get_report_storage] = override_report_storage
 
     with TestClient(app) as client:
         yield client, queue, SessionFactory, settings
 
     app.dependency_overrides.clear()
     get_settings.cache_clear()  # type: ignore[attr-defined]
+    _build_report_storage.cache_clear()
     Base.metadata.drop_all(engine)
     engine.dispose()
