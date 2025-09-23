@@ -1,5 +1,6 @@
 import { controllerApiKey, controllerBaseUrl, controllerJwt } from './config';
 import type {
+  AnomalyEvent,
   Finding,
   FindingComment,
   FindingTimelineEvent,
@@ -38,6 +39,10 @@ interface ReconRunCollectionResponse extends ApiCollectionResponse<ReconRun[]> {
 interface ReconObservationCollectionResponse
   extends ApiCollectionResponse<ReconObservation[]> {}
 
+interface AnomalyCollectionResponse extends ApiCollectionResponse<AnomalyEvent[]> {}
+
+interface AnomalyItemResponse extends ApiItemResponse<AnomalyEvent> {}
+
 export interface PaginationState {
   page: number;
   pageSize: number;
@@ -66,6 +71,14 @@ export interface FindingsQuery {
   scope?: string;
   page?: number;
   pageSize?: number;
+}
+
+export interface AnomalyQuery extends PaginationQuery {
+  type?: string;
+  actor?: string;
+  source?: string;
+  from?: string;
+  to?: string;
 }
 
 function buildPath(
@@ -369,6 +382,35 @@ export async function fetchFindingsTimeline(
     to: query?.to
   });
   const payload = await request<ApiCollectionResponse<FindingsTimelineBucket[]>>(path);
+  return payload.data;
+}
+
+export async function fetchAnomalies(
+  query?: AnomalyQuery
+): Promise<PaginatedResponse<AnomalyEvent[]>> {
+  const limit = query?.pageSize ? Math.max(1, Math.trunc(query.pageSize)) : undefined;
+  const page = query?.page ? Math.max(1, Math.trunc(query.page)) : undefined;
+  const offset = page && limit ? (page - 1) * limit : undefined;
+
+  const path = buildPath('/anomalies', {
+    type: query?.type,
+    actor: query?.actor,
+    source: query?.source,
+    from: query?.from,
+    to: query?.to,
+    limit: limit ? `${limit}` : undefined,
+    offset: offset !== undefined ? `${offset}` : undefined
+  });
+
+  const payload = await request<AnomalyCollectionResponse>(path);
+  return {
+    data: payload.data,
+    pagination: deserializePagination(payload.meta)
+  } satisfies PaginatedResponse<AnomalyEvent[]>;
+}
+
+export async function fetchAnomaly(id: string): Promise<AnomalyEvent> {
+  const payload = await request<AnomalyItemResponse>(`/anomalies/${id}`);
   return payload.data;
 }
 

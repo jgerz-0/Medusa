@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta, timezone
 import uuid
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Generator, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Generator, Optional, Tuple
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -213,6 +213,34 @@ def _create_finding_record(session_factory: sessionmaker) -> str:
         session.commit()
 
         return str(finding.id)
+
+
+def _create_anomaly_event(
+    session_factory: sessionmaker,
+    *,
+    anomaly_type: str = "login_spike",
+    actor: str = "analyst@example.com",
+    source: str = "auth-gateway",
+    metadata: Optional[dict[str, Any]] = None,
+) -> str:
+    """Persist an anomaly event for API regression tests."""
+
+    detected_at = datetime.now(timezone.utc)
+    with session_factory() as session:
+        event = AnomalyEvent(
+            anomaly_type=anomaly_type,
+            actor=actor,
+            source=source,
+            detected_at=detected_at,
+            first_seen=detected_at - timedelta(minutes=15),
+            last_seen=detected_at,
+            count=5,
+            window_seconds=900,
+            metadata_json=metadata or {},
+        )
+        session.add(event)
+        session.commit()
+        return str(event.id)
 
 
 def _provision_principal(
@@ -1522,6 +1550,99 @@ def test_findings_detail_rbac_regression(
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["data"]["id"] == finding_id
+
+
+def test_anomalies_list_filters_and_audit(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    metadata = {
+        "raw": "<script>alert('x')</script>",
+        "details": {"ip": "203.0.113.5", "payload": "<img src=x>"},
+        "actors": ["analyst<script>", "ops"],
+    }
+    anomaly_id = _create_anomaly_event(session_factory, metadata=metadata)
+    _create_anomaly_event(
+        session_factory,
+        anomaly_type="network_spike",
+        actor="systemd",
+        source="sensor",
+        metadata={"raw": "benign"},
+    )
+
+    response = client.get(
+        "/anomalies",
+        params={"type": "login_spike", "limit": 10, "offset": 0},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    assert payload["meta"] == {"total": 1, "limit": 10, "offset": 0}
+    assert len(payload["data"]) == 1
+    event = payload["data"][0]
+    assert event["id"] == anomaly_id
+
+    sanitized_metadata = event["metadata"]
+    assert "<" not in sanitized_metadata["raw"]
+    assert "&lt;" in sanitized_metadata["raw"]
+    assert "<" not in sanitized_metadata["details"]["payload"]
+    assert "<" not in sanitized_metadata["actors"][0]
+
+    with session_factory() as session:
+        audit_entries = session.query(AuditLog).filter(AuditLog.action == "list_anomalies").all()
+        assert len(audit_entries) == 1
+        snapshot = audit_entries[0].evidence_snapshot
+        assert snapshot["filters"]["anomaly_type"] == "login_spike"
+        assert snapshot["returned"] == 1
+
+
+def test_anomaly_detail_sanitizes_metadata_and_audits(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    anomaly_id = _create_anomaly_event(
+        session_factory,
+        metadata={"note": "<b>alert</b>", "count": 7},
+    )
+
+    response = client.get(f"/anomalies/{anomaly_id}", headers=auth_headers())
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["id"] == anomaly_id
+    assert payload["metadata"]["note"].startswith("&lt;b&gt;")
+    assert payload["metadata"]["count"] == 7
+
+    with session_factory() as session:
+        audit_entry = (
+            session.query(AuditLog)
+            .filter(AuditLog.action == "view_anomaly")
+            .one()
+        )
+        snapshot = audit_entry.evidence_snapshot
+        assert snapshot.get("resource_id") == anomaly_id
+        assert snapshot.get("anomaly_type") == "login_spike"
+
+
+def test_anomalies_require_finding_roles(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    anomaly_id = _create_anomaly_event(session_factory)
+
+    _secret, limited_headers = _provision_principal(
+        client, subject="anomaly-rbac", roles=["scans:read"]
+    )
+
+    forbidden_list = client.get("/anomalies", headers=limited_headers)
+    assert forbidden_list.status_code == 403
+
+    forbidden_detail = client.get(
+        f"/anomalies/{anomaly_id}", headers=limited_headers
+    )
+    assert forbidden_detail.status_code == 403
 
 
 def test_findings_scope_filter(api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]) -> None:
