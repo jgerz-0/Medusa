@@ -98,6 +98,38 @@ pnpm lint
 pnpm run typecheck
 ```
 
+## CI security gates and supply-chain attestations
+
+Our CI pipeline enforces supply-chain integrity in addition to unit tests. Contributors
+must verify these guardrails locally when touching the relevant assets:
+
+- **Container and dependency scanning** – Run Trivy against the repository filesystem and
+  configuration, plus execute `pip-audit` on exported Poetry requirements and `pnpm audit` on
+  the frontend lockfile. Resolve high/critical findings or document accepted risk.
+- **Infrastructure-as-code policy** – Maintain Rego policies under `infra/policy/` and execute
+  the same Conftest checks as CI:
+  ```bash
+  conftest test infra/terraform --policy infra/policy
+  conftest test infra/docker --policy infra/policy
+  conftest test infra/helm/medusa --policy infra/policy --input helm
+  ```
+- **Signature and provenance generation** – Build the controller and frontend container images,
+  package the Helm chart, and sign each artifact with [cosign](https://docs.sigstore.dev/cosign/overview/).
+  Produce an in-toto provenance statement per artifact and store the signatures with the chart
+  or image tarball. Example commands mirror the CI job:
+  ```bash
+  docker build -t medusa-controller:dev -f infra/docker/controller.Dockerfile .
+  docker save medusa-controller:dev -o controller.tar
+  cosign sign-blob --output-signature controller.sig --output-certificate controller.crt controller.tar
+
+  helm dependency update infra/helm/medusa
+  helm package infra/helm/medusa --destination ./dist
+  cosign sign-blob --output-signature ./dist/medusa.sig --output-certificate ./dist/medusa.crt ./dist/medusa-*.tgz
+  ```
+
+Uploading unsigned container images or charts, or bypassing provenance generation, will cause
+CI to fail. Keep the signatures in your release artifacts or attach them to the PR for review.
+
 ## Commit hygiene
 
 - Enable the provided pre-commit hooks:
