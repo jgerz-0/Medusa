@@ -14,8 +14,10 @@ describe('Route loading states', () => {
     expect(columns).toHaveLength(6);
 
     const rows = within(table).getAllByRole('row');
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(1);
 
+    const skeletonRows = table.querySelectorAll('tbody tr');
+    expect(skeletonRows.length).toBeGreaterThan(0);
     expect(within(tableStatus).getAllByTestId('table-skeleton-line').length).toBeGreaterThan(0);
   });
 
@@ -33,8 +35,10 @@ describe('Route loading states', () => {
     expect(columns).toHaveLength(7);
 
     const rows = within(table).getAllByRole('row');
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(1);
 
+    const skeletonRows = table.querySelectorAll('tbody tr');
+    expect(skeletonRows.length).toBeGreaterThan(0);
     expect(within(tableStatus).getAllByTestId('table-skeleton-line').length).toBeGreaterThan(0);
   });
 });

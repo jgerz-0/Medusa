@@ -14,6 +14,50 @@ export interface RequiredRolesNoticeProps {
   docsUrl?: string;
 }
 
+function uniqueRoles(sections: RoleRequirement[]): ControllerRole[] {
+  const roleSet = new Set<ControllerRole>();
+  for (const section of sections) {
+    for (const role of section.roles) {
+      roleSet.add(role);
+    }
+  }
+  return Array.from(roleSet);
+}
+
+interface InlineRoleBadgesProps {
+  sections: RoleRequirement[];
+  className?: string;
+  label?: string;
+}
+
+export function InlineRoleBadges({ sections, className, label = 'Controller RBAC' }: InlineRoleBadgesProps) {
+  const roles = uniqueRoles(sections);
+  if (roles.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      className={clsx(
+        'flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-wide text-emerald-300',
+        className
+      )}
+    >
+      <span className="font-semibold">{label}</span>
+      <ul className="flex flex-wrap gap-1">
+        {roles.map((role) => (
+          <li
+            key={role}
+            className="rounded bg-emerald-700/40 px-2 py-0.5 text-[0.65rem] font-semibold text-emerald-100"
+          >
+            {role}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function RequiredRolesNotice({
   sections,
   className,
@@ -60,8 +104,8 @@ export function RequiredRolesNotice({
             </span>
           </div>
           <p className="text-xs text-emerald-200/80">
-            The controller enforces these roles before returning data or accepting state changes. Missing scopes surface audit log
-            denials for incident response.
+            The controller enforces these roles before returning data or accepting state changes. Missing scopes surface audit
+            log denials for incident response.
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
             {sections.map((section) => (

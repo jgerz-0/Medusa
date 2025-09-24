@@ -92,6 +92,8 @@ describe('FindingsTable', () => {
     expect(screen.getAllByText(/ago$/i)).toHaveLength(5);
     expect(screen.getByText('1 advisory')).toBeVisible();
     expect(screen.getByText('Not enriched')).toBeVisible();
+    expect(screen.getByText(/controller rbac/i)).toBeInTheDocument();
+    expect(screen.getByText('findings:read')).toBeInTheDocument();
   });
 
   it('renders scanner metadata for ZAP and SQLMap findings', () => {
