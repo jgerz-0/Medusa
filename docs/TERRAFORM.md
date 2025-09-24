@@ -138,6 +138,32 @@ kubectl exec -n observability statefulset/alertmanager-kube-prometheus-stack-ale
 
 If the template references additional routes (for example, `medusa_priority=page`), confirm the labels exist on incoming alerts before promoting to production.
 
+#### Controller SLO dashboards and alerts
+
+When `observability_mode = "kube-prometheus-stack"`, Terraform now renders the controller SLO Grafana dashboard and the associated Prometheus `PrometheusRule`. Existing clusters should import the live resources before switching the module on:
+
+```bash
+# Import the ConfigMap rendered by the previous deployment
+terraform -chdir=infra/terraform import \
+  module.observability.kubernetes_config_map.medusa_grafana_dashboards[0] \
+  observability/medusa-grafana-dashboards
+
+# Import the PrometheusRule that guards the controller/worker SLOs
+terraform -chdir=infra/terraform import \
+  module.observability.kubernetes_manifest.medusa_slo_alerts[0] \
+  observability/medusa-slo-alerts
+
+# Validate formatting and planned changes
+terraform -chdir=infra/terraform plan -target=module.observability
+
+# Lint the Grafana dashboard JSON before committing changes
+jq empty infra/terraform/modules/observability/templates/grafana-medusa-controller-dashboard.json.tftpl
+# Optional: validate the dashboard schema using grafana-toolkit if installed
+# npx @grafana/toolkit plugin:lint --config infra/terraform/modules/observability/templates/grafana-medusa-controller-dashboard.json.tftpl
+```
+
+The dashboard surfaces HTTP latency, queue depth, and worker runtime histograms published by the controller. The PrometheusRule enforces SLO guardrails for HTTP 5xx burn rate, controller latency, queue depth, and worker throughput. Adjust the thresholds per environment by overriding the template file and re-running `terraform plan`.
+
 ### Pod Security Standards
 
 Terraform owns the Medusa namespace and attaches Kubernetes Pod Security Standards (PSS) labels so admission control is deterministic across clusters. The module sets `pod-security.kubernetes.io/{enforce,audit,warn}=restricted` by default and injects the Helm override `podSecurityStandards.namespaceLabelsOnly=true`. This keeps the Helm release from attempting to recreate or manage the namespace while still enforcing `restricted` level guardrails cluster-side.

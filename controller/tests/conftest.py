@@ -28,8 +28,9 @@ class InMemoryQueue(QueueClient):
     def __init__(self) -> None:
         self.messages: list[Tuple[str, dict]] = []
 
-    def enqueue(self, channel: str, payload: dict) -> None:  # type: ignore[override]
+    def enqueue(self, channel: str, payload: dict) -> int:  # type: ignore[override]
         self.messages.append((channel, payload))
+        return len(self.messages)
 
 
 class InMemoryReportStorage(ReportStorage):
