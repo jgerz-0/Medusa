@@ -213,6 +213,29 @@ class RedisJobQueue:
         document["failed_at"] = datetime.now(tz=timezone.utc).isoformat()
         self._client.rpush(self._config.dead_letter_key, json.dumps(document))
 
+    def requeue(
+        self, job: QueuedJob, *, reason: str = "retry", error: Optional[str] = None
+    ) -> None:
+        document = json.loads(job.raw_payload)
+        attempts = int(document.get("attempts", 0)) + 1
+        document["attempts"] = attempts
+        if reason:
+            document["last_failure_reason"] = reason
+        if error:
+            document["last_error"] = error
+        retry_entry = {
+            "attempt": attempts,
+            "reason": reason,
+            "error": error,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        history = document.get("retry_history")
+        if isinstance(history, list):
+            history.append(retry_entry)
+        else:
+            document["retry_history"] = [retry_entry]
+        self._client.rpush(self._config.queue_key, json.dumps(document))
+
     def _deserialize(self, payload: str) -> QueuedJob:
         document = json.loads(payload)
         attempts = int(document.get("attempts", 0))
@@ -256,6 +279,10 @@ class ArtifactStorage:
 
     def persist(self, job: AngrJob, name: str, payload: Mapping[str, object]) -> AngrArtifact:
         bucket = self._default_bucket or job.object_bucket
+        if not bucket:
+            raise RuntimeError(
+                "No object storage bucket configured for angr artifact persistence"
+            )
         suffix = uuid.uuid4().hex
         key = f"{self._prefix}{job.sample_id}/{name}-{suffix}.json"
         self._client.put_json(bucket, key, dict(payload))
@@ -465,20 +492,29 @@ class AngrAnalysisProcessor:
 class Worker:
     """Main worker loop orchestrating queue polling and job execution."""
 
-    def __init__(self, config: WorkerConfig) -> None:
+    def __init__(
+        self,
+        config: WorkerConfig,
+        *,
+        runner: Optional[ContainerRunner] = None,
+        queue: Optional[RedisJobQueue] = None,
+        storage: Optional[ArtifactStorage] = None,
+        callback: Optional[CallbackClient] = None,
+        processor: Optional[AngrAnalysisProcessor] = None,
+    ) -> None:
         self._config = config
         self._shutdown_event = threading.Event()
         runtime_config = config.runtime_config()
         runtime_config.base_flags = tuple(runtime_config.base_flags)
-        self._runner = ContainerRunner(runtime_config)
-        self._queue = RedisJobQueue(config)
-        self._storage = ArtifactStorage(
+        self._runner = runner or ContainerRunner(runtime_config)
+        self._queue = queue or RedisJobQueue(config)
+        self._storage = storage or ArtifactStorage(
             self._build_storage_client(config),
             default_bucket=config.analysis_bucket,
             prefix=config.analysis_prefix,
         )
-        self._callback = CallbackClient(config.callback_token)
-        self._processor = AngrAnalysisProcessor(
+        self._callback = callback or CallbackClient(config.callback_token)
+        self._processor = processor or AngrAnalysisProcessor(
             config,
             runner=self._runner,
             storage=self._storage,
@@ -499,16 +535,32 @@ class Worker:
             queued_job = self._queue.fetch()
             if not queued_job:
                 continue
-            try:
-                self._processor.process(queued_job)
-            except Exception as exc:
-                LOG.exception("Job %s failed: %s", queued_job.job.job_id, exc)
-                self._queue.dead_letter(
-                    queued_job, reason="processing_error", error=str(exc)
-                )
+            self._handle_job(queued_job)
 
     def shutdown(self) -> None:
         self._shutdown_event.set()
+
+    def _handle_job(self, queued_job: QueuedJob) -> None:
+        try:
+            self._processor.process(queued_job)
+        except Exception as exc:
+            LOG.exception("Job %s failed: %s", queued_job.job.job_id, exc)
+            attempts = queued_job.attempts + 1
+            if attempts < self._config.max_attempts:
+                LOG.info(
+                    "Retrying angr job", extra={"job_id": queued_job.job.job_id, "attempt": attempts}
+                )
+                self._queue.requeue(
+                    queued_job,
+                    reason="retry_pending",
+                    error=str(exc),
+                )
+            else:
+                self._queue.dead_letter(
+                    queued_job,
+                    reason="max_attempts_exceeded",
+                    error=str(exc),
+                )
 
 
 def _install_signal_handlers(worker: Worker) -> None:

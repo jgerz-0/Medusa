@@ -530,6 +530,12 @@ def test_symbolic_execution_enqueue_flow(
     assert job["sample_id"] == sample_id
     assert job["metadata"]["analysis_depth"] == 256
     assert job["metadata"]["timeout_seconds"] == 600
+    assert job["object_bucket"] == "binary-uploads"
+    assert job["object_key"] == "uploads/sample.bin"
+    assert job["attempts"] == 0
+    assert job["metadata"]["target_scope"] == target_payload["scope"]
+    assert job["metadata"]["initiated_by"] == "bootstrap-admin"
+    assert job["metadata"]["analyst_metadata"] == {"strategy": "dfs"}
     assert job["callback_url"].endswith(
         "/internal/binary/symbolic-execution/callback"
     )

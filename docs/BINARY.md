@@ -170,6 +170,50 @@ Execute a single job for debugging:
 poetry run python -m workers.binary.fuzzing.worker --once job.json
 ```
 
+### Symbolic Execution Worker
+
+`workers/binary/angr` coordinates symbolic execution jobs submitted through
+`POST /binary/symbolic-execution`. The controller verifies sample ownership,
+records an audit log, and enqueues a payload onto
+`queues:binary:symbolic-execution` with callback metadata and analyst hints.
+
+- The worker downloads the normalized sample from MinIO/S3, mounts it read-only
+  into a hardened container (`BINARY_SYMBOLIC_EXECUTION_RUNTIME`) and executes the
+  configured harness command (`BINARY_SYMBOLIC_EXECUTION_COMMAND`).
+- Runtime flags are validated against the same allow-list used by the static
+  analysis runtime, and you can provide additional flags via the
+  space-separated `BINARY_SYMBOLIC_EXECUTION_RUNTIME_FLAGS` environment variable
+  (e.g., `--cpus=2 --memory=2g`).
+- Harness stdout must emit deterministic JSON describing artifacts, findings,
+  and run metadata. Raw stdout is still preserved if JSON decoding fails so the
+  controller can surface actionable errors.
+- Persisted artifacts land under the configured
+  `BINARY_SYMBOLIC_EXECUTION_PREFIX` (default `analysis/symbolic/`). Ensure the
+  bucket exists before enqueueing jobs so crash evidence and path constraints
+  are retained for analysts.
+- Failures are retried automatically until the job exceeds
+  `BINARY_SYMBOLIC_EXECUTION_MAX_ATTEMPTS`. Each retry increments the
+  `attempts` counter in Redis and preserves the last error message for audit
+  visibility. Once the ceiling is hit the payload is moved to the
+  dead-letter list (`BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY`).
+- Kubernetes clusters should mount the container runtime socket (for example
+  `/var/run/docker.sock`) via the Helm values
+  `workers.binarySymbolicExecution.extraVolumes` and
+  `workers.binarySymbolicExecution.extraVolumeMounts`, or use a runtime class
+  that exposes the necessary interface to the pod.
+
+Run the symbolic execution worker locally:
+
+```bash
+poetry run python -m workers.binary.angr.worker
+```
+
+Execute a single job for debugging:
+
+```bash
+poetry run python -m workers.binary.angr.worker --once job.json
+```
+
 ### Environment Variables
 
 | Variable | Purpose |
@@ -192,6 +236,17 @@ poetry run python -m workers.binary.fuzzing.worker --once job.json
 | `BINARY_ANALYSIS_BUCKET` | Bucket for persisted analyzer artifacts (defaults to the sample's bucket). |
 | `BINARY_ANALYSIS_PREFIX` | Prefix inside the analysis bucket (default `analysis/reports/`). |
 | `MEDUSA_BINARY_STATIC_ANALYSIS_CALLBACK_TOKEN` | Shared secret required for worker callbacks. |
+| `BINARY_SYMBOLIC_EXECUTION_QUEUE_KEY` | Redis list key for angr jobs (default `queues:binary:symbolic-execution`). |
+| `BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY` | Redis key for failed symbolic execution jobs. |
+| `BINARY_SYMBOLIC_EXECUTION_RUNTIME` | Container runtime binary (`docker` or `podman`). |
+| `BINARY_SYMBOLIC_EXECUTION_RUNTIME_FLAGS` | Space-separated runtime flags validated against the allow-list. |
+| `BINARY_SYMBOLIC_EXECUTION_IMAGE` | Hardened angr harness image to execute. |
+| `BINARY_SYMBOLIC_EXECUTION_COMMAND` | Entrypoint executed inside the harness container. |
+| `BINARY_SYMBOLIC_EXECUTION_TIMEOUT` | Default harness timeout in seconds. |
+| `BINARY_SYMBOLIC_EXECUTION_MAX_ATTEMPTS` | Number of times a job is retried before landing in the dead-letter queue. |
+| `BINARY_SYMBOLIC_EXECUTION_BUCKET` | Bucket for persisted symbolic execution artifacts (defaults to the sample's bucket). |
+| `BINARY_SYMBOLIC_EXECUTION_PREFIX` | Prefix inside the artifact bucket (default `analysis/symbolic/`). |
+| `MEDUSA_BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN` | Shared secret required for symbolic execution worker callbacks. |
 
 Run the worker locally:
 
