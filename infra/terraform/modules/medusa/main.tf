@@ -31,6 +31,13 @@ provider "helm" {
 locals {
   chart_path = abspath("${path.root}/../helm/medusa")
 
+  signature_verifications = {
+    for name, policy in var.image_signature_enforcements :
+    name => merge(policy, {
+      attestation_predicate_types = try(policy.attestation_predicate_types, [])
+    })
+  }
+
   bucket_names = merge(
     {
       artifact = lookup(var.bucket_names, "artifact", "")
@@ -426,6 +433,30 @@ resource "kubernetes_manifest" "sealed_secret" {
   depends_on = [kubernetes_namespace.medusa]
 }
 
+resource "null_resource" "cosign_verify" {
+  for_each = local.signature_verifications
+
+  triggers = {
+    image        = each.value.image
+    key_checksum = sha256(each.value.public_key_base64)
+    identity     = try(each.value.certificate_identity, "")
+    oidc_issuer  = try(each.value.certificate_oidc_issuer, "")
+    attestations = join(",", try(each.value.attestation_predicate_types, []))
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/sh", "-c"]
+    environment = {
+      COSIGN_IMAGE             = each.value.image
+      COSIGN_PUBLIC_KEY_BASE64 = each.value.public_key_base64
+      COSIGN_CERT_IDENTITY     = try(each.value.certificate_identity, "")
+      COSIGN_CERT_OIDC_ISSUER  = try(each.value.certificate_oidc_issuer, "")
+      COSIGN_ATTESTATION_TYPES = join(",", try(each.value.attestation_predicate_types, []))
+    }
+    command = templatefile("${path.module}/templates/cosign-verify.sh.tpl", {})
+  }
+}
+
 resource "helm_release" "medusa" {
   name             = var.release_name
   namespace        = var.namespace
@@ -444,5 +475,6 @@ resource "helm_release" "medusa" {
     var.secret_strategy == "inline" && var.manage_inline_secret ? kubernetes_secret.inline : [],
     var.secret_strategy == "externalSecret" && var.manage_external_secret ? kubernetes_manifest.external_secret : [],
     var.secret_strategy == "sealedSecret" && var.manage_sealed_secret ? kubernetes_manifest.sealed_secret : [],
+    values(null_resource.cosign_verify),
   )
 }
