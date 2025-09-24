@@ -11,15 +11,15 @@ spec:
   groups:
     - name: medusa.controller.slo
       rules:
-        - alert: MedusaController5xxErrorBudgetBurn
+        - alert: MedusaControllerErrorBudgetBurn
           annotations:
-            summary: "Controller 5xx error budget burn > 2% over 15m"
+            summary: "Controller HTTP error budget burn > 2% over 15m"
             runbook_url: "https://runbooks.medusa/security/controller-5xx"
             dashboard_uid: "medusa-controller"
           expr: |
-            sum(rate(medusa_controller_http_requests_total{status_code=~"5.."}[5m]))
+            sum(rate(medusa_controller_http_request_outcomes_total{result="error"}[5m]))
               /
-            clamp_min(sum(rate(medusa_controller_http_requests_total[5m])), 1)
+            clamp_min(sum(rate(medusa_controller_http_request_outcomes_total[5m])), 1)
               > 0.02
           for: 15m
           labels:
@@ -72,6 +72,17 @@ spec:
           for: 10m
           labels:
             severity: warning
+            service: workers
+        - alert: MedusaWorkerCallbackErrors
+          annotations:
+            summary: "Worker callback errors detected for 10m"
+            runbook_url: "https://runbooks.medusa/security/worker-callback-errors"
+            dashboard_uid: "medusa-controller"
+          expr: |
+            sum(rate(medusa_worker_callback_outcomes_total{result="error"}[5m])) > 0
+          for: 10m
+          labels:
+            severity: critical
             service: workers
         - alert: MedusaQueueDepthExceedsCapacity
           annotations:

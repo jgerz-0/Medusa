@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Dict, Tuple
 
 import pytest
+from fastapi import status
 from fastapi.testclient import TestClient
 
 from controller.tests.test_api_contracts import (
@@ -13,7 +14,9 @@ from controller.tests.test_api_contracts import (
 )
 
 
-def _read_metric_value(metrics_text: str, metric_name: str, labels: Dict[str, str]) -> float:
+def _read_metric_value(
+    metrics_text: str, metric_name: str, labels: Dict[str, str]
+) -> float:
     for line in metrics_text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -44,7 +47,7 @@ def _parse_metric_line(line: str) -> Tuple[str, Dict[str, str], float]:
 
 
 def test_metrics_endpoint_is_public(
-    api_client: Tuple[TestClient, object, object, object]
+    api_client: Tuple[TestClient, object, object, object],
 ) -> None:
     client, _queue, _session_factory, _settings = api_client
 
@@ -52,10 +55,11 @@ def test_metrics_endpoint_is_public(
 
     assert response.status_code == 200
     assert "medusa_controller_http_requests_total" in response.text
+    assert "medusa_controller_http_request_outcomes_total" in response.text
 
 
 def test_metrics_record_scan_jobs_and_audit_events(
-    api_client: Tuple[TestClient, object, object, object]
+    api_client: Tuple[TestClient, object, object, object],
 ) -> None:
     client, _queue, _session_factory, _settings = api_client
 
@@ -111,7 +115,7 @@ def test_metrics_record_scan_jobs_and_audit_events(
 
 
 def test_metrics_track_enrichment_callback(
-    api_client: Tuple[TestClient, object, object, object]
+    api_client: Tuple[TestClient, object, object, object],
 ) -> None:
     client, _queue, session_factory, _settings = api_client
     finding_id, _scan_id = _persist_sample_finding(session_factory)
@@ -123,6 +127,11 @@ def test_metrics_track_enrichment_callback(
         baseline_metrics.text,
         "medusa_worker_callbacks_total",
         {"worker": "enrichment"},
+    )
+    baseline_success = _read_metric_value(
+        baseline_metrics.text,
+        "medusa_worker_callback_outcomes_total",
+        {"worker": "enrichment", "result": "success"},
     )
     baseline_items = _read_metric_value(
         baseline_metrics.text,
@@ -138,7 +147,7 @@ def test_metrics_track_enrichment_callback(
             {
                 "source": "nvd",
                 "identifier": "CVE-2024-0001",
-                "summary": "Metrics enrichment", 
+                "summary": "Metrics enrichment",
                 "severity": "MEDIUM",
                 "cvss_score": 5.0,
                 "published": datetime.now(timezone.utc).isoformat(),
@@ -170,6 +179,53 @@ def test_metrics_track_enrichment_callback(
         "medusa_worker_callback_items_total",
         {"worker": "enrichment"},
     )
+    updated_success = _read_metric_value(
+        updated_metrics.text,
+        "medusa_worker_callback_outcomes_total",
+        {"worker": "enrichment", "result": "success"},
+    )
 
     assert pytest.approx(updated_callbacks) == baseline_callbacks + 1
     assert pytest.approx(updated_items) == baseline_items + 1
+    assert pytest.approx(updated_success) == baseline_success + 1
+
+
+def test_metrics_track_enrichment_callback_errors(
+    api_client: Tuple[TestClient, object, object, object],
+) -> None:
+    client, _queue, _session_factory, _settings = api_client
+
+    baseline_metrics = client.get("/metrics")
+    assert baseline_metrics.status_code == 200
+
+    baseline_errors = _read_metric_value(
+        baseline_metrics.text,
+        "medusa_worker_callback_outcomes_total",
+        {"worker": "enrichment", "result": "error"},
+    )
+
+    payload = {
+        "job_id": "metrics-job-err",
+        "finding_id": "00000000-0000-0000-0000-000000000000",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "advisories": [],
+        "errors": {},
+    }
+
+    callback_response = client.post(
+        "/internal/enrich/callback",
+        json=payload,
+        headers=enrichment_headers(),
+    )
+    assert callback_response.status_code == status.HTTP_404_NOT_FOUND
+
+    updated_metrics = client.get("/metrics")
+    assert updated_metrics.status_code == 200
+
+    updated_errors = _read_metric_value(
+        updated_metrics.text,
+        "medusa_worker_callback_outcomes_total",
+        {"worker": "enrichment", "result": "error"},
+    )
+
+    assert pytest.approx(updated_errors) == baseline_errors + 1

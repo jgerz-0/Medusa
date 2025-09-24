@@ -8,6 +8,9 @@ from typing import Dict, Iterable, Iterator, Tuple
 
 CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
 
+_DEFAULT_SUCCESS_BOUNDARY = 500
+_WORKER_RESULT_LABELS = {"success", "error"}
+
 
 class MetricsRegistry:
     """Registry that tracks metric instances in insertion order."""
@@ -177,6 +180,13 @@ REQUEST_LATENCY = HistogramMetric(
 )
 METRICS_REGISTRY.register(REQUEST_LATENCY)
 
+REQUEST_OUTCOME_COUNTER = CounterMetric(
+    "medusa_controller_http_request_outcomes_total",
+    "HTTP request outcomes labelled by success or error for SLO burn calculations.",
+    ("method", "endpoint", "result"),
+)
+METRICS_REGISTRY.register(REQUEST_OUTCOME_COUNTER)
+
 AUDIT_EVENT_COUNTER = CounterMetric(
     "medusa_audit_events_total",
     "Audit log events recorded by action name.",
@@ -205,6 +215,13 @@ WORKER_CALLBACK_COUNTER = CounterMetric(
     ("worker",),
 )
 METRICS_REGISTRY.register(WORKER_CALLBACK_COUNTER)
+
+WORKER_CALLBACK_OUTCOME_COUNTER = CounterMetric(
+    "medusa_worker_callback_outcomes_total",
+    "Worker callback outcomes grouped by result (success, error).",
+    ("worker", "result"),
+)
+METRICS_REGISTRY.register(WORKER_CALLBACK_OUTCOME_COUNTER)
 
 WORKER_ITEM_COUNTER = CounterMetric(
     "medusa_worker_callback_items_total",
@@ -241,18 +258,30 @@ def render_latest() -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def _classify_http_result(status_code: int) -> str:
+    """Return an SLO-friendly classification for an HTTP response code."""
+
+    if status_code < 0:
+        return "error"
+    return "success" if status_code < _DEFAULT_SUCCESS_BOUNDARY else "error"
+
+
 def observe_http_request(
     *, method: str, endpoint: str, status_code: int, duration_seconds: float
 ) -> None:
     """Track request counters and latency for HTTP traffic."""
 
     label_status = str(status_code)
+    result = _classify_http_result(status_code)
     REQUEST_COUNTER.labels(
         method=method, endpoint=endpoint, status_code=label_status
     ).inc()
     REQUEST_LATENCY.labels(
         method=method, endpoint=endpoint, status_code=label_status
     ).observe(duration_seconds)
+    REQUEST_OUTCOME_COUNTER.labels(
+        method=method, endpoint=endpoint, result=result
+    ).inc()
 
 
 def record_audit_event(action: str) -> None:
@@ -283,10 +312,21 @@ def record_worker_callback(
     *,
     queue_latency_seconds: float | None = None,
     runtime_seconds: float | None = None,
+    result: str = "success",
 ) -> None:
-    """Track worker callback invocations and persisted payload counts."""
+    """Track worker callback invocations and persisted payload counts.
 
+    The ``result`` label is coerced to ``success`` or ``error`` to keep
+    cardinality bounded for SLO burn calculations.
+    """
+
+    normalized_result = (result or "success").lower()
+    if normalized_result not in _WORKER_RESULT_LABELS:
+        normalized_result = "error"
     WORKER_CALLBACK_COUNTER.labels(worker=worker).inc()
+    WORKER_CALLBACK_OUTCOME_COUNTER.labels(
+        worker=worker, result=normalized_result
+    ).inc()
     if items_persisted > 0:
         WORKER_ITEM_COUNTER.labels(worker=worker).inc(float(items_persisted))
     normalized_queue = _normalize_seconds(queue_latency_seconds)
@@ -304,8 +344,10 @@ __all__ = [
     "METRICS_REGISTRY",
     "REQUEST_COUNTER",
     "REQUEST_LATENCY",
+    "REQUEST_OUTCOME_COUNTER",
     "QUEUE_DEPTH_SAMPLES",
     "WORKER_CALLBACK_COUNTER",
+    "WORKER_CALLBACK_OUTCOME_COUNTER",
     "WORKER_ITEM_COUNTER",
     "WORKER_QUEUE_LATENCY",
     "WORKER_EXECUTION_LATENCY",
