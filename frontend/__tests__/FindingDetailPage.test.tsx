@@ -1,7 +1,7 @@
 import type { AnchorHTMLAttributes, ReactNode } from 'react';
 import { render, screen, within } from '@testing-library/react';
 import FindingDetailPage from '@/app/findings/[findingId]/page';
-import { fetchFinding, fetchFindingComments, fetchFindingTimeline } from '@/lib/api';
+import { fetchFinding, fetchFindingComments, fetchFindingTimeline, fetchReportExports } from '@/lib/api';
 import type { Finding, FindingComment, FindingTimelineEvent } from '@/lib/types';
 
 jest.mock('@/app/findings/[findingId]/forms', () => ({
@@ -32,7 +32,8 @@ jest.mock('next/link', () => ({
 jest.mock('@/lib/api', () => ({
   fetchFinding: jest.fn(),
   fetchFindingComments: jest.fn(),
-  fetchFindingTimeline: jest.fn()
+  fetchFindingTimeline: jest.fn(),
+  fetchReportExports: jest.fn()
 }));
 
 describe('FindingDetailPage RBAC notice', () => {
@@ -43,6 +44,7 @@ describe('FindingDetailPage RBAC notice', () => {
   const mockFetchFindingTimeline = fetchFindingTimeline as jest.MockedFunction<
     typeof fetchFindingTimeline
   >;
+  const mockFetchReportExports = fetchReportExports as jest.MockedFunction<typeof fetchReportExports>;
   let consoleErrorSpy: jest.SpyInstance;
 
   const baseFinding: Finding = {
@@ -92,6 +94,7 @@ describe('FindingDetailPage RBAC notice', () => {
     mockFetchFinding.mockResolvedValue(baseFinding);
     mockFetchFindingComments.mockResolvedValue([] as FindingComment[]);
     mockFetchFindingTimeline.mockResolvedValue([] as FindingTimelineEvent[]);
+    mockFetchReportExports.mockResolvedValue([]);
 
     const ui = await FindingDetailPage({ params: { findingId: baseFinding.id } });
 
@@ -111,6 +114,8 @@ describe('FindingDetailPage RBAC notice', () => {
   it('renders ticket status badges and hyperlinks when available', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2024-01-01T05:00:00.000Z'));
+
+    mockFetchReportExports.mockResolvedValue([]);
 
     const findingWithTickets: Finding = {
       ...baseFinding,
@@ -148,6 +153,7 @@ describe('FindingDetailPage RBAC notice', () => {
     mockFetchFinding.mockResolvedValue(findingWithTickets);
     mockFetchFindingComments.mockResolvedValue([] as FindingComment[]);
     mockFetchFindingTimeline.mockResolvedValue([] as FindingTimelineEvent[]);
+    mockFetchReportExports.mockResolvedValue([]);
 
     const ui = await FindingDetailPage({ params: { findingId: findingWithTickets.id } });
 

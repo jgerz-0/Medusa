@@ -14,7 +14,7 @@ describe('ScansTable', () => {
     jest.useRealTimers();
   });
 
-  it('renders deterministic scan rows with status badges', () => {
+  it('renders deterministic scan rows with status badges and RBAC badges', () => {
     const scans: Scan[] = [
       {
         id: 'scan-001',
@@ -48,7 +48,7 @@ describe('ScansTable', () => {
     const scannerCells = screen.getAllByText('nuclei');
     expect(scannerCells).toHaveLength(2);
 
-    const table = screen.getByRole('table');
+    const table = screen.getByRole('table', { name: /scans/i });
     const rows = within(table).getAllByRole('row');
     // first row is header
     expect(rows).toHaveLength(scans.length + 1);
@@ -57,5 +57,9 @@ describe('ScansTable', () => {
     expect(screen.getByTestId('status-completed')).toBeVisible();
 
     expect(screen.getAllByText(/ago$/i)).toHaveLength(4);
+
+    const rbacLabel = screen.getByText(/controller rbac/i);
+    expect(rbacLabel).toBeInTheDocument();
+    expect(screen.getByText('scans:read')).toBeInTheDocument();
   });
 });

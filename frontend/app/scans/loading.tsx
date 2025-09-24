@@ -1,4 +1,4 @@
-import { TableSkeleton } from '@/components/TableSkeleton';
+import { ScansTable } from '@/components/ScansTable';
 import { Skeleton } from '@/components/Skeleton';
 import { RequiredRolesNotice } from '@/components/RequiredRolesNotice';
 import {
@@ -6,6 +6,55 @@ import {
   ROLE_SCANS_READ,
   ROLE_TARGETS_READ
 } from '@/lib/rbac';
+
+export function ScanLaunchFormSkeleton() {
+  return (
+    <div
+      className="card border-surface-muted/60 bg-surface-muted/10 p-6"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="Loading scan launch form"
+    >
+      <span className="sr-only">Loading scan launch form</span>
+      <div className="grid gap-6 md:grid-cols-2">
+        <div className="space-y-4">
+          <Skeleton className="h-4 w-48" data-testid="table-skeleton-line" />
+          <Skeleton className="h-12 w-full" data-testid="table-skeleton-line" />
+          <Skeleton className="h-24 w-full" data-testid="table-skeleton-line" />
+        </div>
+        <div className="space-y-4">
+          <Skeleton className="h-4 w-40" data-testid="table-skeleton-line" />
+          <Skeleton className="h-10 w-full" data-testid="table-skeleton-line" />
+          <Skeleton className="h-20 w-full" data-testid="table-skeleton-line" />
+        </div>
+      </div>
+      <div className="mt-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <Skeleton className="h-10 w-48 md:w-64" data-testid="table-skeleton-line" />
+        <div className="flex flex-wrap gap-3">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <Skeleton key={index} className="h-10 w-32" data-testid="table-skeleton-line" />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function ScansTableSkeleton() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="Loading scans table"
+      className="space-y-3"
+    >
+      <span className="sr-only">Loading scans table</span>
+      <ScansTable scans={[]} isLoading skeletonRowCount={6} showPaginationSkeleton />
+    </div>
+  );
+}
 
 export default function ScansLoading() {
   return (
@@ -40,47 +89,8 @@ export default function ScansLoading() {
           ]}
         />
       </header>
-      <div
-        className="card border-surface-muted/60 bg-surface-muted/10 p-6"
-        role="status"
-        aria-live="polite"
-        aria-busy="true"
-        aria-label="Loading scan launch form"
-      >
-        <span className="sr-only">Loading scan launch form</span>
-        <div className="grid gap-6 md:grid-cols-2">
-          <div className="space-y-4">
-            <Skeleton className="h-4 w-48" data-testid="table-skeleton-line" />
-            <Skeleton className="h-12 w-full" data-testid="table-skeleton-line" />
-            <Skeleton className="h-24 w-full" data-testid="table-skeleton-line" />
-          </div>
-          <div className="space-y-4">
-            <Skeleton className="h-4 w-40" data-testid="table-skeleton-line" />
-            <Skeleton className="h-10 w-full" data-testid="table-skeleton-line" />
-            <Skeleton className="h-20 w-full" data-testid="table-skeleton-line" />
-          </div>
-        </div>
-        <div className="mt-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <Skeleton className="h-10 w-48 md:w-64" data-testid="table-skeleton-line" />
-          <div className="flex flex-wrap gap-3">
-            {Array.from({ length: 3 }).map((_, index) => (
-              <Skeleton key={index} className="h-10 w-32" data-testid="table-skeleton-line" />
-            ))}
-          </div>
-        </div>
-      </div>
-      <TableSkeleton
-        caption="Scans"
-        loadingLabel="Loading scans table"
-        columns={[
-          { key: 'target', header: 'Target', widthClass: 'w-48' },
-          { key: 'scanner', header: 'Scanner', widthClass: 'w-24' },
-          { key: 'status', header: 'Status', widthClass: 'w-24' },
-          { key: 'findings', header: 'Findings', widthClass: 'w-16' },
-          { key: 'created', header: 'Created', widthClass: 'w-28' },
-          { key: 'updated', header: 'Last Updated', widthClass: 'w-28' }
-        ]}
-      />
+      <ScanLaunchFormSkeleton />
+      <ScansTableSkeleton />
     </section>
   );
 }

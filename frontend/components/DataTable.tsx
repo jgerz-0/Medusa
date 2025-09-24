@@ -1,11 +1,16 @@
 import Link from 'next/link';
+import clsx from 'clsx';
 import { ReactNode } from 'react';
+import { Skeleton } from './Skeleton';
+import { InlineRoleBadges, type RoleRequirement } from './RequiredRolesNotice';
 
 interface Column<T> {
   key: string;
   header: string;
   className?: string;
   render?: (item: T) => ReactNode;
+  skeletonClassName?: string;
+  skeletonLines?: number;
 }
 
 export interface DataTablePaginationConfig {
@@ -23,6 +28,13 @@ interface DataTableProps<T> {
   emptyState?: ReactNode;
   itemKey: (item: T) => string;
   pagination?: DataTablePaginationConfig;
+  caption?: string;
+  ariaLabel?: string;
+  isLoading?: boolean;
+  skeletonRowCount?: number;
+  requiredRoleSections?: RoleRequirement[];
+  requiredRoleLabel?: string;
+  showPaginationSkeleton?: boolean;
 }
 
 interface PaginationLinkProps {
@@ -98,7 +110,7 @@ function TablePager({ pagination }: { pagination: DataTablePaginationConfig }) {
 
   return (
     <div className="flex flex-col gap-3 rounded-md border border-surface-muted/60 bg-surface-muted/20 px-4 py-3 text-xs text-gray-400 md:flex-row md:items-center md:justify-between">
-      <div>
+      <div role="status" aria-live="polite" aria-atomic="true">
         <p className="font-medium text-gray-300">
           Showing{' '}
           <span className="text-white">
@@ -110,7 +122,7 @@ function TablePager({ pagination }: { pagination: DataTablePaginationConfig }) {
           Page {currentPage.toLocaleString()} of {totalPages.toLocaleString()} • {safePageSize.toLocaleString()} rows per page
         </p>
       </div>
-      <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-4">
+      <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-4" aria-label="Pagination controls">
         <div className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-gray-500">
           <span>Rows:</span>
           <div className="flex gap-1">
@@ -158,14 +170,53 @@ function TablePager({ pagination }: { pagination: DataTablePaginationConfig }) {
   );
 }
 
-export function DataTable<T>({ columns, data, emptyState, itemKey, pagination }: DataTableProps<T>) {
+function renderSkeletonCell(lines: number, className?: string) {
+  const safeLines = Number.isFinite(lines) && lines > 0 ? Math.trunc(lines) : 1;
+  return (
+    <div className="flex flex-col gap-2">
+      {Array.from({ length: safeLines }).map((_, index) => (
+        <Skeleton
+          key={index}
+          className={clsx(index === 0 ? 'h-4' : 'h-3', className ?? 'w-full')}
+          data-testid="table-skeleton-line"
+        />
+      ))}
+    </div>
+  );
+}
+
+export function DataTable<T>({
+  columns,
+  data,
+  emptyState,
+  itemKey,
+  pagination,
+  caption,
+  ariaLabel,
+  isLoading = false,
+  skeletonRowCount = 6,
+  requiredRoleSections,
+  requiredRoleLabel = 'Controller RBAC',
+  showPaginationSkeleton = true
+}: DataTableProps<T>) {
   const hasRows = data.length > 0;
+  const showSkeleton = isLoading;
+  const shouldRenderEmptyState = !showSkeleton && !hasRows;
+  const tableCaption = caption ?? ariaLabel;
+  const tableLabel = ariaLabel ?? caption;
+  const skeletonRows = Array.from({ length: Math.max(1, Math.trunc(skeletonRowCount)) });
+  const renderRoleBadges =
+    requiredRoleSections && requiredRoleSections.length > 0 ? (
+      <InlineRoleBadges sections={requiredRoleSections} label={requiredRoleLabel} />
+    ) : null;
 
   return (
     <div className="space-y-3">
-      {hasRows ? (
-        <div className="card overflow-hidden">
-          <table className="table-grid">
+      {renderRoleBadges}
+      {showSkeleton || hasRows ? (
+        <div className="card overflow-hidden" aria-live={showSkeleton ? 'polite' : undefined}>
+          <table className="table-grid" aria-label={tableLabel} aria-busy={showSkeleton || undefined}>
+            {tableCaption ? <caption className="sr-only">{tableCaption}</caption> : null}
             <thead className="bg-surface-muted/60">
               <tr>
                 {columns.map((column) => (
@@ -179,16 +230,26 @@ export function DataTable<T>({ columns, data, emptyState, itemKey, pagination }:
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-surface-muted/70">
-              {data.map((item) => (
-                <tr key={itemKey(item)} className="hover:bg-surface-muted/40">
-                  {columns.map((column) => (
-                    <td key={column.key} className={`px-4 py-3 text-sm text-gray-200 ${column.className ?? ''}`}>
-                      {column.render ? column.render(item) : (item as Record<string, ReactNode>)[column.key]}
-                    </td>
+            <tbody className="divide-y divide-surface-muted/70" aria-hidden={showSkeleton || undefined}>
+              {showSkeleton
+                ? skeletonRows.map((_, rowIndex) => (
+                    <tr key={`skeleton-${rowIndex}`} className="hover:bg-surface-muted/40">
+                      {columns.map((column) => (
+                        <td key={column.key} className={`px-4 py-3 ${column.className ?? ''}`}>
+                          {renderSkeletonCell(column.skeletonLines ?? 1, column.skeletonClassName)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))
+                : data.map((item) => (
+                    <tr key={itemKey(item)} className="hover:bg-surface-muted/40">
+                      {columns.map((column) => (
+                        <td key={column.key} className={`px-4 py-3 text-sm text-gray-200 ${column.className ?? ''}`}>
+                          {column.render ? column.render(item) : (item as Record<string, ReactNode>)[column.key]}
+                        </td>
+                      ))}
+                    </tr>
                   ))}
-                </tr>
-              ))}
             </tbody>
           </table>
         </div>
@@ -198,7 +259,25 @@ export function DataTable<T>({ columns, data, emptyState, itemKey, pagination }:
         </div>
       )}
 
-      {pagination ? <TablePager pagination={pagination} /> : null}
+      {pagination && !showSkeleton ? <TablePager pagination={pagination} /> : null}
+      {showSkeleton && showPaginationSkeleton ? (
+        <div className="card border-surface-muted/60 bg-surface-muted/20 px-4 py-3">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="space-y-2">
+              <Skeleton className="h-4 w-40" data-testid="table-skeleton-line" />
+              <Skeleton className="h-3 w-32" data-testid="table-skeleton-line" />
+            </div>
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-4">
+              <Skeleton className="h-8 w-28 md:w-32" data-testid="table-skeleton-line" />
+              <div className="flex gap-2">
+                {Array.from({ length: 4 }).map((_, index) => (
+                  <Skeleton key={index} className="h-8 w-16" data-testid="table-skeleton-line" />
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

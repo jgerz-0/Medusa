@@ -4,6 +4,8 @@ import { DataTable, type DataTablePaginationConfig } from './DataTable';
 import { StatusBadge } from './StatusBadge';
 import type { Finding } from '@/lib/types';
 import { buildSearchParamsHref, type SearchParamsInput } from '@/lib/searchParams';
+import { ROLE_FINDINGS_READ } from '@/lib/rbac';
+import type { RoleRequirement } from './RequiredRolesNotice';
 
 function relativeTime(value: string) {
   return formatDistanceToNow(new Date(value), { addSuffix: true });
@@ -19,7 +21,17 @@ interface FindingsTableProps {
   pagination?: Pick<DataTablePaginationConfig, 'page' | 'pageSize' | 'total'>;
   searchParams?: SearchParamsInput;
   basePath?: string;
+  isLoading?: boolean;
+  skeletonRowCount?: number;
+  showPaginationSkeleton?: boolean;
 }
+
+const FINDINGS_TABLE_RBAC: RoleRequirement[] = [
+  {
+    title: 'View findings',
+    roles: [ROLE_FINDINGS_READ]
+  }
+];
 
 function buildPaginationConfig(
   pagination: Pick<DataTablePaginationConfig, 'page' | 'pageSize' | 'total'>,
@@ -65,19 +77,35 @@ function buildPaginationConfig(
   } satisfies DataTablePaginationConfig;
 }
 
-export function FindingsTable({ findings, pagination, searchParams, basePath = '/findings' }: FindingsTableProps) {
+export function FindingsTable({
+  findings,
+  pagination,
+  searchParams,
+  basePath = '/findings',
+  isLoading = false,
+  skeletonRowCount,
+  showPaginationSkeleton
+}: FindingsTableProps) {
   const tablePagination = pagination ? buildPaginationConfig(pagination, searchParams, basePath) : undefined;
 
   return (
     <DataTable<Finding>
+      caption="Findings"
+      ariaLabel="Findings"
       itemKey={(finding) => finding.id}
       data={findings}
       emptyState={<p>No findings were produced for this selection.</p>}
       pagination={tablePagination}
+      isLoading={isLoading}
+      skeletonRowCount={skeletonRowCount}
+      showPaginationSkeleton={showPaginationSkeleton}
+      requiredRoleSections={FINDINGS_TABLE_RBAC}
       columns={[
         {
           key: 'title',
           header: 'Finding',
+          skeletonClassName: 'w-3/4',
+          skeletonLines: 3,
           render: (finding) => (
             <div className="flex flex-col">
               <Link
@@ -91,7 +119,8 @@ export function FindingsTable({ findings, pagination, searchParams, basePath = '
                 Scanner {scannerLabel(finding)} • Rule {finding.template_id}
               </span>
               <span className="text-xs text-gray-500">
-                {finding.assigned_to ? `Assigned to ${finding.assigned_to}` : 'Unassigned'} • {finding.comment_count} comment{finding.comment_count === 1 ? '' : 's'}
+                {finding.assigned_to ? `Assigned to ${finding.assigned_to}` : 'Unassigned'} • {finding.comment_count} comment
+                {finding.comment_count === 1 ? '' : 's'}
               </span>
             </div>
           )
@@ -99,16 +128,22 @@ export function FindingsTable({ findings, pagination, searchParams, basePath = '
         {
           key: 'severity',
           header: 'Severity',
+          skeletonClassName: 'w-20',
+          skeletonLines: 1,
           render: (finding) => <StatusBadge value={finding.severity} />
         },
         {
           key: 'status',
           header: 'Status',
+          skeletonClassName: 'w-20',
+          skeletonLines: 1,
           render: (finding) => <StatusBadge value={finding.status} />
         },
         {
           key: 'tags',
           header: 'Tags',
+          skeletonClassName: 'w-32',
+          skeletonLines: 2,
           render: (finding) => (
             <div className="flex flex-wrap gap-1 text-xs text-gray-300">
               {finding.tags.length > 0 ? (
@@ -129,6 +164,8 @@ export function FindingsTable({ findings, pagination, searchParams, basePath = '
         {
           key: 'enrichment',
           header: 'Enrichment',
+          skeletonClassName: 'w-28',
+          skeletonLines: 2,
           render: (finding) => {
             const latest = finding.enrichments?.[0];
             if (!latest) {
@@ -162,6 +199,8 @@ export function FindingsTable({ findings, pagination, searchParams, basePath = '
         {
           key: 'detected_at',
           header: 'Detected',
+          skeletonClassName: 'w-32',
+          skeletonLines: 1,
           render: (finding) => (
             <span className="text-xs text-gray-400" title={finding.detected_at}>
               {relativeTime(finding.detected_at)}
@@ -171,6 +210,8 @@ export function FindingsTable({ findings, pagination, searchParams, basePath = '
         {
           key: 'updated_at',
           header: 'Last Updated',
+          skeletonClassName: 'w-32',
+          skeletonLines: 1,
           render: (finding) => (
             <span className="text-xs text-gray-400" title={finding.updated_at}>
               {relativeTime(finding.updated_at)}

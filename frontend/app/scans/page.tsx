@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { fetchScans, fetchTargets } from '@/lib/api';
 import { ScansTable } from '@/components/ScansTable';
@@ -8,8 +9,8 @@ import {
   ROLE_SCANS_READ,
   ROLE_TARGETS_READ
 } from '@/lib/rbac';
-import type { Target } from '@/lib/types';
 import type { SearchParamsInput } from '@/lib/searchParams';
+import { ScanLaunchFormSkeleton, ScansTableSkeleton } from './loading';
 
 export const metadata: Metadata = {
   title: 'Scans | Medusa Operations Console'
@@ -29,26 +30,59 @@ function parsePositiveInteger(value: string | string[] | undefined, fallback: nu
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export default async function ScansPage({ searchParams }: ScansPageProps) {
-  let error: string | null = null;
-  let scansResponse: Awaited<ReturnType<typeof fetchScans>> | null = null;
-  let targets: Target[] = [];
-  let targetError: string | null = null;
+async function ScanLaunchFormBoundary() {
+  try {
+    const targets = await fetchTargets();
+    return <ScanLaunchForm targets={targets} />;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to load targets.';
+    return (
+      <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200" role="alert">
+        {message}
+      </div>
+    );
+  }
+}
 
+interface ScansTableBoundaryProps {
+  page: number;
+  pageSize: number;
+  searchParams?: SearchParamsInput;
+}
+
+async function ScansTableBoundary(props?: ScansTableBoundaryProps) {
+  if (!props) {
+    return (
+      <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200" role="alert">
+        Failed to load scans.
+      </div>
+    );
+  }
+
+  const { page, pageSize, searchParams } = props;
+
+  try {
+    const scansResponse = await fetchScans({ page, pageSize });
+    return (
+      <ScansTable
+        scans={scansResponse.data ?? []}
+        pagination={scansResponse.pagination ?? undefined}
+        searchParams={searchParams}
+      />
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to load scans.';
+    return (
+      <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200" role="alert">
+        {message}
+      </div>
+    );
+  }
+}
+
+export default function ScansPage({ searchParams }: ScansPageProps) {
   const page = parsePositiveInteger(searchParams?.page, 1);
   const pageSize = parsePositiveInteger(searchParams?.page_size, 25);
-
-  try {
-    scansResponse = await fetchScans({ page, pageSize });
-  } catch (err) {
-    error = err instanceof Error ? err.message : 'Failed to load scans.';
-  }
-
-  try {
-    targets = await fetchTargets();
-  } catch (err) {
-    targetError = err instanceof Error ? err.message : 'Failed to load targets.';
-  }
 
   return (
     <section className="space-y-4">
@@ -82,24 +116,14 @@ export default async function ScansPage({ searchParams }: ScansPageProps) {
           ]}
         />
       </header>
-      {targetError ? (
-        <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200">
-          {targetError}
-        </div>
-      ) : (
-        <ScanLaunchForm targets={targets} />
-      )}
-      {error ? (
-        <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200">
-          {error}
-        </div>
-      ) : (
-        <ScansTable
-          scans={scansResponse?.data ?? []}
-          pagination={scansResponse?.pagination ?? undefined}
-          searchParams={searchParams}
-        />
-      )}
+      <Suspense fallback={<ScanLaunchFormSkeleton />}>
+        {/* @ts-expect-error Async Server Component */}
+        <ScanLaunchFormBoundary />
+      </Suspense>
+      <Suspense fallback={<ScansTableSkeleton />}>
+        {/* @ts-expect-error Async Server Component */}
+        <ScansTableBoundary page={page} pageSize={pageSize} searchParams={searchParams} />
+      </Suspense>
     </section>
   );
 }

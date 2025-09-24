@@ -1,9 +1,9 @@
-import { TableSkeleton } from '@/components/TableSkeleton';
+import { FindingsTable } from '@/components/FindingsTable';
 import { Skeleton } from '@/components/Skeleton';
 import { RequiredRolesNotice } from '@/components/RequiredRolesNotice';
 import { ROLE_ANALYST, ROLE_FINDINGS_READ } from '@/lib/rbac';
 
-function FiltersSkeleton({ label }: { label: string }) {
+export function FindingsFiltersSkeleton({ label }: { label: string }) {
   return (
     <div
       className="card border-surface-muted/60 bg-surface-muted/10 px-4 py-3"
@@ -41,6 +41,39 @@ function FiltersSkeleton({ label }: { label: string }) {
   );
 }
 
+export function FindingsTableSkeleton() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="Loading findings table"
+      className="space-y-3"
+    >
+      <span className="sr-only">Loading findings table</span>
+      <FindingsTable findings={[]} isLoading skeletonRowCount={6} showPaginationSkeleton />
+    </div>
+  );
+}
+
+export function FindingsTimelineSkeleton() {
+  return (
+    <div
+      className="card border-surface-muted/60 bg-surface-muted/10 p-6"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="Loading findings timeline"
+    >
+      <span className="sr-only">Loading findings timeline</span>
+      <div className="space-y-4">
+        <Skeleton className="h-4 w-32" data-testid="table-skeleton-line" />
+        <Skeleton className="h-64 w-full" data-testid="table-skeleton-line" />
+      </div>
+    </div>
+  );
+}
+
 export default function FindingsLoading() {
   return (
     <section className="space-y-4" aria-busy="true" aria-live="polite">
@@ -65,46 +98,10 @@ export default function FindingsLoading() {
             }
           ]}
         />
-        <FiltersSkeleton label="Loading findings filters" />
+        <FindingsFiltersSkeleton label="Loading findings filters" />
       </header>
-      <TableSkeleton
-        caption="Findings"
-        loadingLabel="Loading findings table"
-        columns={[
-          {
-            key: 'finding',
-            header: 'Finding',
-            lineWidths: ['w-3/4', 'w-1/2', 'w-2/3']
-          },
-          { key: 'severity', header: 'Severity', widthClass: 'w-24' },
-          { key: 'status', header: 'Status', widthClass: 'w-24' },
-          {
-            key: 'tags',
-            header: 'Tags',
-            lineWidths: ['w-28', 'w-32']
-          },
-          {
-            key: 'enrichment',
-            header: 'Enrichment',
-            lineWidths: ['w-24', 'w-20']
-          },
-          { key: 'detected', header: 'Detected', widthClass: 'w-32' },
-          { key: 'updated', header: 'Last Updated', widthClass: 'w-32' }
-        ]}
-      />
-      <div
-        className="card border-surface-muted/60 bg-surface-muted/10 p-6"
-        role="status"
-        aria-live="polite"
-        aria-busy="true"
-        aria-label="Loading findings timeline"
-      >
-        <span className="sr-only">Loading findings timeline</span>
-        <div className="space-y-4">
-          <Skeleton className="h-4 w-32" data-testid="table-skeleton-line" />
-          <Skeleton className="h-64 w-full" data-testid="table-skeleton-line" />
-        </div>
-      </div>
+      <FindingsTableSkeleton />
+      <FindingsTimelineSkeleton />
     </section>
   );
 }

@@ -1,12 +1,17 @@
+import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { fetchFindings, fetchFindingsTimeline, fetchReportExports } from '@/lib/api';
-import type { FindingsTimelineBucket, ReportExportResponse } from '@/lib/types';
+import type { ReportExportResponse } from '@/lib/types';
 import { FindingsTable } from '@/components/FindingsTable';
 import { FindingsFilters } from '@/components/FindingsFilters';
 import { FindingsTimeline } from '@/components/FindingsTimeline';
 import { RequiredRolesNotice } from '@/components/RequiredRolesNotice';
 import { ROLE_ANALYST, ROLE_FINDINGS_READ } from '@/lib/rbac';
 import type { SearchParamsInput } from '@/lib/searchParams';
+import { FindingsTableSkeleton, FindingsTimelineSkeleton } from './loading';
+
+type FindingsQueryState = Parameters<typeof fetchFindings>[0];
+type FindingsTimelineQueryState = Parameters<typeof fetchFindingsTimeline>[0];
 
 export const metadata: Metadata = {
   title: 'Findings | Medusa Operations Console'
@@ -26,13 +31,105 @@ function parsePositiveInteger(value: string | string[] | undefined, fallback: nu
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export default async function FindingsPage({ searchParams }: FindingsPageProps) {
-  let error: string | null = null;
-  let findingsResponse: Awaited<ReturnType<typeof fetchFindings>> | null = null;
-  let timeline: FindingsTimelineBucket[] = [];
-  let timelineError: string | null = null;
-  let recentExports: ReportExportResponse[] = [];
+async function FindingsTableBoundary(props?: {
+  query: FindingsQueryState;
+  searchParams?: SearchParamsInput;
+}) {
+  if (!props || !props.query) {
+    return (
+      <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200" role="alert">
+        Failed to load findings.
+      </div>
+    );
+  }
 
+  const { query, searchParams } = props;
+
+  try {
+    const findingsResponse = await fetchFindings(query);
+    return (
+      <FindingsTable
+        findings={findingsResponse.data ?? []}
+        pagination={findingsResponse.pagination ?? undefined}
+        searchParams={searchParams}
+      />
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to load findings.';
+    return (
+      <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200" role="alert">
+        {message}
+      </div>
+    );
+  }
+}
+
+async function FindingsTimelineBoundary(props?: { query: FindingsTimelineQueryState }) {
+  if (!props || !props.query) {
+    return (
+      <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200" role="alert">
+        Failed to load timeline.
+      </div>
+    );
+  }
+
+  const { query } = props;
+
+  try {
+    const timeline = await fetchFindingsTimeline(query);
+    return <FindingsTimeline buckets={timeline} />;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to load timeline.';
+    return (
+      <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200" role="alert">
+        {message}
+      </div>
+    );
+  }
+}
+
+interface FindingsExportsBoundaryProps {
+  scanId?: string;
+}
+
+async function FindingsExportsBoundary({ scanId }: FindingsExportsBoundaryProps = {}) {
+  let recentExports: ReportExportResponse[] = [];
+  try {
+    recentExports = await fetchReportExports({
+      scanId,
+      limit: 5
+    });
+  } catch {
+    recentExports = [];
+  }
+
+  if (recentExports.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="w-full max-w-sm rounded border border-surface-muted/40 bg-surface-muted/10 p-3">
+      <h4 className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Recent exports</h4>
+      <ul className="mt-2 space-y-1">
+        {recentExports.map((record) => (
+          <li key={record.report_id} className="flex items-center justify-between gap-2 text-[11px] text-gray-300">
+            <span className="font-mono text-[10px] text-gray-500">
+              {record.report_id.slice(0, 8)} • {record.format.toUpperCase()} • {new Date(record.generated_at).toLocaleString()}
+            </span>
+            <a
+              href={`/api/reports/export?reportId=${record.report_id}&format=${record.format}`}
+              className="text-[10px] font-semibold uppercase tracking-wide text-sky-400 hover:text-sky-300"
+            >
+              Download
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export default function FindingsPage({ searchParams }: FindingsPageProps) {
   const page = parsePositiveInteger(searchParams?.page, 1);
   const pageSize = parsePositiveInteger(searchParams?.page_size, 50);
 
@@ -52,9 +149,9 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
     assigned: typeof searchParams?.assigned === 'string' ? searchParams?.assigned : undefined,
     from: typeof searchParams?.from === 'string' ? searchParams?.from : undefined,
     to: typeof searchParams?.to === 'string' ? searchParams?.to : undefined
-  };
+  } satisfies Record<string, string | undefined>;
 
-  const query = {
+  const query: FindingsQueryState = {
     scanId: filterParams.scan,
     severity: filterParams.severity,
     status: filterParams.status,
@@ -67,26 +164,16 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
     pageSize
   };
 
-  try {
-    findingsResponse = await fetchFindings(query);
-  } catch (err) {
-    error = err instanceof Error ? err.message : 'Failed to load findings.';
-  }
-
-  try {
-    timeline = await fetchFindingsTimeline({
-      scanId: query.scanId,
-      severity: query.severity,
-      status: query.status,
-      scope: query.scope,
-      tag: query.tag,
-      assignedTo: query.assignedTo,
-      from: query.from,
-      to: query.to
-    });
-  } catch (err) {
-    timelineError = err instanceof Error ? err.message : 'Failed to load timeline.';
-  }
+  const timelineQuery: FindingsTimelineQueryState = {
+    scanId: query.scanId,
+    severity: query.severity,
+    status: query.status,
+    scope: query.scope,
+    tag: query.tag,
+    assignedTo: query.assignedTo,
+    from: query.from,
+    to: query.to
+  };
 
   const hasFilters = Boolean(
     filterParams.scan ||
@@ -134,17 +221,6 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
     return `/api/reports/export?${queryString}`;
   }
 
-  if (exportEnabled) {
-    try {
-      recentExports = await fetchReportExports({
-        scanId: query.scanId,
-        limit: 5
-      });
-    } catch {
-      recentExports = [];
-    }
-  }
-
   return (
     <section className="space-y-4">
       <header className="space-y-2">
@@ -181,25 +257,11 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
                 ? 'Exports respect the active filters applied to this view.'
                 : 'Apply filters or a scan ID to enable exports.'}
             </p>
-            {exportEnabled && recentExports.length > 0 ? (
-              <div className="w-full max-w-sm rounded border border-surface-muted/40 bg-surface-muted/10 p-3">
-                <h4 className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Recent exports</h4>
-                <ul className="mt-2 space-y-1">
-                  {recentExports.map((record) => (
-                    <li key={record.report_id} className="flex items-center justify-between gap-2 text-[11px] text-gray-300">
-                      <span className="font-mono text-[10px] text-gray-500">
-                        {record.report_id.slice(0, 8)} • {record.format.toUpperCase()} • {new Date(record.generated_at).toLocaleString()}
-                      </span>
-                      <a
-                        href={`/api/reports/export?reportId=${record.report_id}&format=${record.format}`}
-                        className="text-[10px] font-semibold uppercase tracking-wide text-sky-400 hover:text-sky-300"
-                      >
-                        Download
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+            {exportEnabled ? (
+              <Suspense fallback={null}>
+                {/* @ts-expect-error Async Server Component */}
+                <FindingsExportsBoundary scanId={query.scanId} />
+              </Suspense>
             ) : null}
           </div>
         </div>
@@ -234,24 +296,14 @@ export default async function FindingsPage({ searchParams }: FindingsPageProps) 
           </div>
         ) : null}
       </header>
-      {error ? (
-        <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200">
-          {error}
-        </div>
-      ) : (
-        <FindingsTable
-          findings={findingsResponse?.data ?? []}
-          pagination={findingsResponse?.pagination ?? undefined}
-          searchParams={searchParams}
-        />
-      )}
-      {timelineError ? (
-        <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200">
-          {timelineError}
-        </div>
-      ) : (
-        <FindingsTimeline buckets={timeline} />
-      )}
+      <Suspense fallback={<FindingsTableSkeleton />}>
+        {/* @ts-expect-error Async Server Component */}
+        <FindingsTableBoundary query={query} searchParams={searchParams} />
+      </Suspense>
+      <Suspense fallback={<FindingsTimelineSkeleton />}>
+        {/* @ts-expect-error Async Server Component */}
+        <FindingsTimelineBoundary query={timelineQuery} />
+      </Suspense>
     </section>
   );
 }
