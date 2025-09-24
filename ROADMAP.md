@@ -63,7 +63,7 @@ Implementation guidance for these deliverables lives in [docs/TERRAFORM.md](docs
 - OIDC/OAuth2 auth flows with granular RBAC policies.
 - Rate limiting, anomaly detection, and continuous scope compliance checks.
 - CI/CD pipelines with IaC validation, security scanning, and supply-chain attestation.
-- Disaster recovery playbooks and tabletop exercise documentation.
+- ✅ Disaster recovery playbooks and tabletop exercise documentation. See [docs/runbooks/DISASTER_RECOVERY.md](docs/runbooks/DISASTER_RECOVERY.md) for RPO/RTO targets, restoration drills wired into CI, and quarterly tabletop cadences.
 
 ---
 **Tracking:** Each phase should map to GitHub milestones. Create issues for deliverables, tag them by agent/service, and update documentation in tandem with implementation changes.

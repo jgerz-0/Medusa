@@ -33,6 +33,9 @@ Phase 5 delivers the production-grade automation needed to run Medusa inside har
 - **IRSA and ALB wiring** is automated through Terraform-managed IAM roles and the AWS Load Balancer Controller rollout covered in [docs/KUBERNETES.md](docs/KUBERNETES.md#provision-the-aws-load-balancer-controller).
 - **Observability options** span embedded Prometheus/Grafana stacks and full Prometheus Operator installs as outlined in [docs/TERRAFORM.md](docs/TERRAFORM.md#observability) and the optional metrics stack configuration in [docs/KUBERNETES.md](docs/KUBERNETES.md#metrics-stack-optional).
 
+## Operational Runbooks
+- **[Disaster Recovery](docs/runbooks/DISASTER_RECOVERY.md)** – Documents RPO/RTO targets, RDS and S3/MinIO restoration workflows, cross-region failover via `infra/terraform` modules, validation commands wired into CI, and quarterly tabletop exercise checklists.
+
 ## Quickstart (Local Development)
 
 ### Prerequisites
