@@ -225,6 +225,38 @@ NetworkPolicies automatically whitelist every enabled worker component based on
 third-party agents (for example, externally managed scoring pipelines) without
 losing the hardened defaults.
 
+## Network policy egress matrix
+
+Every Medusa worker now renders a dedicated `NetworkPolicy` that restricts
+egress to the data-plane services it genuinely needs. DNS lookups against
+`kube-dns` remain permitted unless `workers.<name>.networkPolicy.allowDNS` is set
+to `false`. Scanner traffic is confined to explicit CIDR ranges by populating
+`workers.<name>.networkPolicy.targetCIDRs`; the defaults block external
+destinations until you declare the authorized scope. The matrix below lists the
+baseline egress permissions:
+
+| Worker | Redis | Controller callbacks | MinIO (artifacts) | PostgreSQL | Qdrant | Target CIDRs |
+| --- | --- | --- | --- | --- | --- | --- |
+| nuclei | Allowed | Allowed | Allowed | Blocked | Blocked | `[]` (blocked until set) |
+| zap *(disabled by default)* | Allowed | Allowed | Blocked | Blocked | Blocked | `[]` (blocked until set) |
+| sqlmap *(disabled by default)* | Allowed | Allowed | Blocked | Blocked | Blocked | `[]` (blocked until set) |
+| ticketing | Blocked | Blocked | Blocked | Allowed | Blocked | `[]` (blocked until set) |
+| anomaly | Allowed | Allowed | Blocked | Allowed | Blocked | `[]` (blocked until set) |
+| recon | Allowed | Allowed | Blocked | Blocked | Blocked | `[]` (blocked until set) |
+| validator | Allowed | Allowed | Blocked | Blocked | Blocked | `[]` (blocked until set) |
+| binaryPreprocess | Allowed | Blocked | Allowed | Allowed | Blocked | `[]` (blocked until set) |
+| binaryStaticAnalysis | Allowed | Allowed | Allowed | Blocked | Blocked | `[]` (blocked until set) |
+| binarySymbolicExecution | Allowed | Allowed | Allowed | Blocked | Blocked | `[]` (blocked until set) |
+| binaryFuzzing | Allowed | Allowed | Allowed | Blocked | Blocked | `[]` (blocked until set) |
+| cveEnrichment | Blocked | Allowed | Blocked | Blocked | Allowed | `[]` (blocked until set) |
+| scopeMonitor | Allowed | Allowed | Blocked | Allowed | Blocked | `[]` (blocked until set) |
+
+Tune the per-worker policy in `infra/helm/medusa/values.yaml` before each
+engagement so scanners cannot leave the approved CIDR ranges. If a worker needs
+additional downstream systems (for example a third-party ticketing API), add
+bespoke `ipBlock` entries under `targetCIDRs` instead of widening namespace
+access.
+
 ## Verify the deployment
 
 ```bash

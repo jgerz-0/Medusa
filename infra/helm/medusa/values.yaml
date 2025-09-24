@@ -396,6 +396,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: true
+      allowPostgres: false
+      allowQdrant: false
+      targetCIDRs: []
 
   zap:
     enabled: false
@@ -463,6 +472,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: false
+      allowPostgres: false
+      allowQdrant: false
+      targetCIDRs: []
 
   sqlmap:
     enabled: false
@@ -525,6 +543,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: false
+      allowPostgres: false
+      allowQdrant: false
+      targetCIDRs: []
 
   ticketing:
     enabled: true
@@ -586,6 +613,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: false
+      allowControllerCallback: false
+      allowArtifactStorage: false
+      allowPostgres: true
+      allowQdrant: false
+      targetCIDRs: []
 
   anomaly:
     enabled: true
@@ -653,6 +689,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: false
+      allowPostgres: true
+      allowQdrant: false
+      targetCIDRs: []
 
   recon:
     enabled: true
@@ -711,6 +756,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: false
+      allowPostgres: false
+      allowQdrant: false
+      targetCIDRs: []
 
   validator:
     enabled: true
@@ -768,6 +822,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: false
+      allowPostgres: false
+      allowQdrant: false
+      targetCIDRs: []
 
   binaryPreprocess:
     enabled: true
@@ -831,6 +894,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: false
+      allowArtifactStorage: true
+      allowPostgres: true
+      allowQdrant: false
+      targetCIDRs: []
 
   binaryStaticAnalysis:
     enabled: true
@@ -903,6 +975,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: true
+      allowPostgres: false
+      allowQdrant: false
+      targetCIDRs: []
 
   binarySymbolicExecution:
     enabled: true
@@ -973,6 +1054,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: true
+      allowPostgres: false
+      allowQdrant: false
+      targetCIDRs: []
 
   binaryFuzzing:
     enabled: true
@@ -1047,6 +1137,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: true
+      allowPostgres: false
+      allowQdrant: false
+      targetCIDRs: []
   cveEnrichment:
     enabled: true
     type: job
@@ -1110,6 +1209,15 @@ workers:
       roleBindingAnnotations: {}
       additionalSubjects: []
       rules: []
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: false
+      allowControllerCallback: true
+      allowArtifactStorage: false
+      allowPostgres: false
+      allowQdrant: true
+      targetCIDRs: []
 
   scopeMonitor:
     enabled: true
@@ -1178,6 +1286,15 @@ workers:
             - secrets
           verbs:
             - get
+    networkPolicy:
+      enabled: true
+      allowDNS: true
+      allowRedis: true
+      allowControllerCallback: true
+      allowArtifactStorage: false
+      allowPostgres: true
+      allowQdrant: false
+      targetCIDRs: []
 
 networkPolicies:
   enabled: true

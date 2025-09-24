@@ -104,4 +104,116 @@ spec:
         {{- end }}
   policyTypes:
     - Ingress
+{{- $root := . -}}
+{{- range $workerName, $workerConfig := .Values.workers }}
+  {{- if and (kindIs "map" $workerConfig) ($workerConfig.enabled | default false) }}
+    {{- $np := $workerConfig.networkPolicy | default dict }}
+    {{- if ($np.enabled | default true) }}
+      {{- $component := $workerConfig.component | default (printf "%s-worker" ($workerName | kebabcase)) }}
+      {{- $redisComponent := default "redis" $root.Values.redis.component }}
+      {{- $postgresComponent := default "postgresql" $root.Values.postgresql.component }}
+      {{- $minioComponent := default "minio" $root.Values.minio.component }}
+      {{- $qdrantComponent := default "qdrant" $root.Values.qdrant.component }}
+      {{- $targetCIDRs := $np.targetCIDRs | default (list) }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "medusa.fullname" $root }}-{{ $component | replace "_" "-" }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: {{ $component }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    []
+  egress:
+{{- $hasEgress := false }}
+{{- if $np.allowRedis | default false }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+              app.kubernetes.io/component: {{ $redisComponent }}
+      ports:
+        - port: {{ $root.Values.redis.service.port }}
+          protocol: TCP
+{{- $hasEgress = true }}
+{{- end }}
+{{- if $np.allowPostgres | default false }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+              app.kubernetes.io/component: {{ $postgresComponent }}
+      ports:
+        - port: {{ $root.Values.postgresql.service.port }}
+          protocol: TCP
+{{- $hasEgress = true }}
+{{- end }}
+{{- if $np.allowArtifactStorage | default false }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+              app.kubernetes.io/component: {{ $minioComponent }}
+      ports:
+        - port: {{ $root.Values.minio.service.apiPort }}
+          protocol: TCP
+{{- $hasEgress = true }}
+{{- end }}
+{{- if $np.allowQdrant | default false }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+              app.kubernetes.io/component: {{ $qdrantComponent }}
+      ports:
+        - port: {{ $root.Values.qdrant.service.httpPort }}
+          protocol: TCP
+{{- $hasEgress = true }}
+{{- end }}
+{{- if $np.allowControllerCallback | default false }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+              app.kubernetes.io/component: controller
+      ports:
+        - port: {{ $root.Values.controller.service.port }}
+          protocol: TCP
+{{- $hasEgress = true }}
+{{- end }}
+{{- if and ($np.allowDNS | default true) }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+{{- $hasEgress = true }}
+{{- end }}
+{{- if gt (len $targetCIDRs) 0 }}
+    - to:
+{{- range $cidr := $targetCIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr }}
+{{- end }}
+{{- $hasEgress = true }}
+{{- end }}
+{{- if not $hasEgress }}
+    []
+{{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
 {{- end }}
