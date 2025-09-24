@@ -1,0 +1,91 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: medusa-slo-alerts
+  namespace: ${namespace}
+  labels:
+    app.kubernetes.io/name: medusa-slo-alerts
+    app.kubernetes.io/component: observability
+    medusa.security/scope: observability
+spec:
+  groups:
+    - name: medusa.controller.slo
+      rules:
+        - alert: MedusaController5xxErrorBudgetBurn
+          annotations:
+            summary: "Controller 5xx error budget burn > 2% over 15m"
+            runbook_url: "https://runbooks.medusa/security/controller-5xx"
+            dashboard_uid: "medusa-controller"
+          expr: |
+            sum(rate(medusa_controller_http_requests_total{status_code=~"5.."}[5m]))
+              /
+            clamp_min(sum(rate(medusa_controller_http_requests_total[5m])), 1)
+              > 0.02
+          for: 15m
+          labels:
+            severity: warning
+            service: controller
+        - alert: MedusaControllerLatencySLOBurn
+          annotations:
+            summary: "Controller p95 latency above 2s for 15m"
+            runbook_url: "https://runbooks.medusa/security/controller-latency"
+            dashboard_uid: "medusa-controller"
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum(rate(medusa_controller_http_request_duration_seconds_bucket[5m])) by (le)
+            ) > 2
+          for: 15m
+          labels:
+            severity: warning
+            service: controller
+    - name: medusa.worker.slo
+      rules:
+        - alert: MedusaWorkerQueueLatencyViolation
+          annotations:
+            summary: "Worker queue latency p95 above 60s"
+            runbook_url: "https://runbooks.medusa/security/worker-queue-latency"
+            dashboard_uid: "medusa-controller"
+          expr: |
+            max by (worker) (
+              histogram_quantile(
+                0.95,
+                sum(rate(medusa_worker_queue_latency_seconds_bucket[5m])) by (le, worker)
+              )
+            ) > 60
+          for: 10m
+          labels:
+            severity: critical
+            service: workers
+        - alert: MedusaWorkerExecutionDurationViolation
+          annotations:
+            summary: "Worker execution duration p95 above 5m"
+            runbook_url: "https://runbooks.medusa/security/worker-runtime"
+            dashboard_uid: "medusa-controller"
+          expr: |
+            max by (worker) (
+              histogram_quantile(
+                0.95,
+                sum(rate(medusa_worker_execution_duration_seconds_bucket[5m])) by (le, worker)
+              )
+            ) > 300
+          for: 10m
+          labels:
+            severity: warning
+            service: workers
+        - alert: MedusaQueueDepthExceedsCapacity
+          annotations:
+            summary: "Queue depth p95 exceeded 250 items"
+            runbook_url: "https://runbooks.medusa/security/queue-depth"
+            dashboard_uid: "medusa-controller"
+          expr: |
+            max by (job_type) (
+              histogram_quantile(
+                0.95,
+                sum(rate(medusa_controller_queue_depth_bucket[5m])) by (le, job_type)
+              )
+            ) > 250
+          for: 10m
+          labels:
+            severity: warning
+            service: workers

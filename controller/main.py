@@ -1062,9 +1062,7 @@ def _sanitize_anomaly_metadata(value: Any, *, depth: int = 0) -> Any:
             if index >= ANOMALY_METADATA_MAX_ITEMS:
                 sanitized_items.append("[truncated]")
                 break
-            sanitized_items.append(
-                _sanitize_anomaly_metadata(item, depth=depth + 1)
-            )
+            sanitized_items.append(_sanitize_anomaly_metadata(item, depth=depth + 1))
         return sanitized_items
 
     if isinstance(value, bytes):
@@ -1392,7 +1390,9 @@ class ReconJobRequest(BaseModel):
                 raise ValueError("authorized_scopes must contain at least one entry")
         else:
             if not self.targets:
-                raise ValueError("At least one target must be supplied for active recon jobs")
+                raise ValueError(
+                    "At least one target must be supplied for active recon jobs"
+                )
         return self
 
 
@@ -2368,7 +2368,7 @@ class QueueClient:
 
     def enqueue(
         self, channel: str, payload: Dict[str, Any]
-    ) -> None:  # pragma: no cover - interface definition
+    ) -> int:  # pragma: no cover - interface definition
         raise NotImplementedError
 
 
@@ -2387,10 +2387,15 @@ class RedisQueueClient(QueueClient):
             )
         return self._client
 
-    def enqueue(self, channel: str, payload: Dict[str, Any]) -> None:
+    def enqueue(self, channel: str, payload: Dict[str, Any]) -> int:
         serialized = json.dumps(payload, sort_keys=True)
         # rpush appends jobs to the right side of the list, providing FIFO ordering.
         self.client.rpush(channel, serialized)
+        try:
+            depth = int(self.client.llen(channel))
+        except Exception:  # pragma: no cover - defensive path for Redis outages
+            depth = -1
+        return depth
 
 
 def get_db_session() -> Iterator[Session]:
@@ -2894,9 +2899,7 @@ def _authenticate_oidc(
 
             ttl_seconds = settings.oidc_auto_provision_expires_in_seconds
             expiration_candidate = (
-                now + timedelta(seconds=ttl_seconds)
-                if ttl_seconds
-                else None
+                now + timedelta(seconds=ttl_seconds) if ttl_seconds else None
             )
             transaction = db.begin_nested() if db.in_transaction() else db.begin()
             new_record = PrincipalCredential(
@@ -4037,9 +4040,7 @@ def _classify_target_asset_type(scope: str) -> Literal["domain", "ipv4", "ipv6"]
     return "ipv6" if network.version == 6 else "ipv4"
 
 
-def _normalize_seed_for_scope(
-    seed: str, asset_type: str, scope: str
-) -> Optional[str]:
+def _normalize_seed_for_scope(seed: str, asset_type: str, scope: str) -> Optional[str]:
     candidate = (seed or "").strip()
     if not candidate:
         return None
@@ -4094,9 +4095,9 @@ def _prepare_active_recon_targets(
     return prepared, scopes
 
 
-def _discovery_diff_status(discovery: ReconDiscovery) -> Literal[
-    "approved", "in_scope", "scope_extension", "unmatched"
-]:
+def _discovery_diff_status(
+    discovery: ReconDiscovery,
+) -> Literal["approved", "in_scope", "scope_extension", "unmatched"]:
     if discovery.status == RECON_STATUS_APPROVED:
         return "approved"
     if discovery.matched_scope:
@@ -4244,9 +4245,7 @@ def schedule_recon_job(
     job_targets: List[Dict[str, Any]] = []
 
     if request.mode == "active":
-        job_targets, active_scopes = _prepare_active_recon_targets(
-            request.targets, db
-        )
+        job_targets, active_scopes = _prepare_active_recon_targets(request.targets, db)
         execution_payload["targets"] = job_targets
         execution_payload["tools"] = request.tools.model_dump(exclude_none=True)
         authorized_scopes = active_scopes
@@ -4267,8 +4266,10 @@ def schedule_recon_job(
     if request.mode == "feed" and request.feed is not None:
         job_payload["feed"] = request.feed.model_dump(exclude_none=True)
 
-    queue.enqueue(settings.recon_queue_channel, job_payload)
-    metrics.record_job_enqueued("recon")
+    queue_depth = queue.enqueue(settings.recon_queue_channel, job_payload)
+    metrics.record_job_enqueued(
+        "recon", queue_depth=queue_depth if queue_depth >= 0 else None
+    )
 
     record_audit_event(
         db,
@@ -4291,9 +4292,11 @@ def schedule_recon_job(
         source=request.source,
         mode=request.mode,
         authorized_scopes=authorized_scopes,
-        targets=[ReconTargetConfig.model_validate(target) for target in job_targets]
-        if job_targets
-        else [],
+        targets=(
+            [ReconTargetConfig.model_validate(target) for target in job_targets]
+            if job_targets
+            else []
+        ),
     )
 
 
@@ -4320,9 +4323,7 @@ def list_recon_discoveries(
         normalized_status = status_filter.strip().lower()
         query = query.filter(ReconDiscovery.status == normalized_status)
 
-    discoveries = (
-        query.order_by(ReconDiscovery.last_seen.desc()).limit(200).all()
-    )
+    discoveries = query.order_by(ReconDiscovery.last_seen.desc()).limit(200).all()
     data = [
         ReconDiscoveryResponse(
             id=discovery.id,
@@ -4333,7 +4334,9 @@ def list_recon_discoveries(
             matched_scope=discovery.matched_scope,
             metadata=dict(discovery.metadata_json),
             status=discovery.status,
-            first_seen=_coerce_recon_timestamp(discovery.first_seen, discovery.first_seen),
+            first_seen=_coerce_recon_timestamp(
+                discovery.first_seen, discovery.first_seen
+            ),
             last_seen=_coerce_recon_timestamp(discovery.last_seen, discovery.last_seen),
             occurrences=discovery.occurrences,
             approved_target_id=discovery.approved_target_id,
@@ -4792,9 +4795,11 @@ def enqueue_scan(
     db.commit()
     db.refresh(scan)
 
-    queue.enqueue(queue_channel, job_payload)
+    queue_depth = queue.enqueue(queue_channel, job_payload)
 
-    metrics.record_job_enqueued(scan.scanner)
+    metrics.record_job_enqueued(
+        scan.scanner, queue_depth=queue_depth if queue_depth >= 0 else None
+    )
 
     record_audit_event(
         db,
@@ -4909,9 +4914,11 @@ def enqueue_binary_preprocess(
         "metadata": job_metadata,
     }
 
-    queue.enqueue(settings.binary_preprocess_queue_channel, job_payload)
+    queue_depth = queue.enqueue(settings.binary_preprocess_queue_channel, job_payload)
 
-    metrics.record_job_enqueued("binary_preprocess")
+    metrics.record_job_enqueued(
+        "binary_preprocess", queue_depth=queue_depth if queue_depth >= 0 else None
+    )
 
     record_audit_event(
         db,
@@ -5029,9 +5036,14 @@ def enqueue_binary_static_analysis(
         "metadata": job_metadata,
     }
 
-    queue.enqueue(settings.binary_static_analysis_queue_channel, job_payload)
+    queue_depth = queue.enqueue(
+        settings.binary_static_analysis_queue_channel, job_payload
+    )
 
-    metrics.record_job_enqueued(SCAN_TYPE_BINARY_STATIC)
+    metrics.record_job_enqueued(
+        SCAN_TYPE_BINARY_STATIC,
+        queue_depth=queue_depth if queue_depth >= 0 else None,
+    )
 
     record_audit_event(
         db,
@@ -5160,9 +5172,14 @@ def enqueue_binary_symbolic_execution(
         "metadata": job_metadata,
     }
 
-    queue.enqueue(settings.binary_symbolic_execution_queue_channel, job_payload)
+    queue_depth = queue.enqueue(
+        settings.binary_symbolic_execution_queue_channel, job_payload
+    )
 
-    metrics.record_job_enqueued(SCAN_TYPE_BINARY_SYMBOLIC)
+    metrics.record_job_enqueued(
+        SCAN_TYPE_BINARY_SYMBOLIC,
+        queue_depth=queue_depth if queue_depth >= 0 else None,
+    )
 
     record_audit_event(
         db,
@@ -5287,9 +5304,12 @@ def enqueue_binary_fuzzing(
     if request.fuzz_duration_seconds:
         job_payload["max_duration_seconds"] = request.fuzz_duration_seconds
 
-    queue.enqueue(settings.binary_fuzzing_queue_channel, job_payload)
+    queue_depth = queue.enqueue(settings.binary_fuzzing_queue_channel, job_payload)
 
-    metrics.record_job_enqueued(SCAN_TYPE_BINARY_FUZZING)
+    metrics.record_job_enqueued(
+        SCAN_TYPE_BINARY_FUZZING,
+        queue_depth=queue_depth if queue_depth >= 0 else None,
+    )
 
     record_audit_event(
         db,
@@ -5351,9 +5371,11 @@ def enqueue_enrichment(
         "requested_by": principal.subject,
         "requested_at": queued_at.isoformat(),
     }
-    queue.enqueue(settings.cve_enrichment_queue_channel, job_payload)
+    queue_depth = queue.enqueue(settings.cve_enrichment_queue_channel, job_payload)
 
-    metrics.record_job_enqueued("enrichment_cve")
+    metrics.record_job_enqueued(
+        "enrichment_cve", queue_depth=queue_depth if queue_depth >= 0 else None
+    )
 
     record_audit_event(
         db,
@@ -5448,8 +5470,10 @@ def enqueue_validation(
         "submitted_at": queued_at.isoformat(),
     }
 
-    queue.enqueue(settings.validator_queue_channel, job_payload)
-    metrics.record_job_enqueued("validation")
+    queue_depth = queue.enqueue(settings.validator_queue_channel, job_payload)
+    metrics.record_job_enqueued(
+        "validation", queue_depth=queue_depth if queue_depth >= 0 else None
+    )
 
     finding.validation_status = "queued"
     finding.validated_at = None
@@ -5619,13 +5643,11 @@ def get_anomaly(
         resource_id=f"/anomalies/{anomaly_id}",
     )
 
-    record = (
-        db.query(AnomalyEvent)
-        .filter(AnomalyEvent.id == anomaly_id)
-        .one_or_none()
-    )
+    record = db.query(AnomalyEvent).filter(AnomalyEvent.id == anomaly_id).one_or_none()
     if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Anomaly not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Anomaly not found"
+        )
 
     response_payload = serialize_anomaly_event(record)
 
@@ -5761,7 +5783,10 @@ def _persist_scan_callback(
 
     if settings.validator_queue_channel and validation_jobs:
         for job in validation_jobs:
-            queue.enqueue(settings.validator_queue_channel, job["payload"])
+            depth = queue.enqueue(settings.validator_queue_channel, job["payload"])
+            metrics.record_job_enqueued(
+                "validation", queue_depth=depth if depth >= 0 else None
+            )
             record_audit_event(
                 db,
                 actor=principal,
@@ -5869,6 +5894,52 @@ def _handle_scan_callback(
         validator_callback_url=validator_callback_url,
     )
     return scan, findings_persisted
+
+
+def _compute_scan_job_latencies(scan: Scan) -> Tuple[Optional[float], Optional[float]]:
+    """Derive queue wait and execution runtimes for a scan job."""
+
+    queue_latency: Optional[float] = None
+    runtime: Optional[float] = None
+
+    created_at = _ensure_utc(scan.created_at)
+    started_at = _ensure_utc(scan.started_at)
+    completed_at = _ensure_utc(scan.completed_at)
+
+    if created_at and started_at:
+        queue_latency = max(0.0, (started_at - created_at).total_seconds())
+
+    if started_at and completed_at:
+        runtime = max(0.0, (completed_at - started_at).total_seconds())
+
+    return queue_latency, runtime
+
+
+def _ensure_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_iso_datetime(value: object) -> Optional[datetime]:
+    """Parse ISO-8601 timestamps from payload metadata into UTC datetimes."""
+
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    return None
 
 
 def _persist_static_analysis_callback(
@@ -6154,18 +6225,16 @@ def recon_callback(
         if payload.execution
         else {"mode": execution_mode, "targets": [], "tools": {}}
     )
-    run = (
-        db.query(ReconRun)
-        .filter(ReconRun.job_id == payload.job_id)
-        .one_or_none()
-    )
+    run = db.query(ReconRun).filter(ReconRun.job_id == payload.job_id).one_or_none()
     if run is None:
         run = ReconRun(
             job_id=payload.job_id,
             source=payload.source,
             mode=execution_mode,
             status="completed",
-            retrieved_at=_coerce_recon_timestamp(payload.retrieved_at, payload.retrieved_at),
+            retrieved_at=_coerce_recon_timestamp(
+                payload.retrieved_at, payload.retrieved_at
+            ),
             authorized_scopes=list(dict.fromkeys(payload.authorized_scopes or [])),
             tooling=execution_context.get("tools", {}),
             targets=execution_context.get("targets", []),
@@ -6320,7 +6389,13 @@ def nuclei_callback(
         validator_callback_url=str(http_request.url_for("validator_callback")),
     )
 
-    metrics.record_worker_callback(SCAN_TYPE_NUCLEI, findings_persisted)
+    queue_latency, runtime = _compute_scan_job_latencies(scan)
+    metrics.record_worker_callback(
+        SCAN_TYPE_NUCLEI,
+        findings_persisted,
+        queue_latency_seconds=queue_latency,
+        runtime_seconds=runtime,
+    )
 
     record_audit_event(
         db,
@@ -6363,7 +6438,13 @@ def zap_callback(
         validator_callback_url=str(http_request.url_for("validator_callback")),
     )
 
-    metrics.record_worker_callback(SCAN_TYPE_ZAP, findings_persisted)
+    queue_latency, runtime = _compute_scan_job_latencies(scan)
+    metrics.record_worker_callback(
+        SCAN_TYPE_ZAP,
+        findings_persisted,
+        queue_latency_seconds=queue_latency,
+        runtime_seconds=runtime,
+    )
 
     record_audit_event(
         db,
@@ -6406,7 +6487,13 @@ def sqlmap_callback(
         validator_callback_url=str(http_request.url_for("validator_callback")),
     )
 
-    metrics.record_worker_callback(SCAN_TYPE_SQLMAP, findings_persisted)
+    queue_latency, runtime = _compute_scan_job_latencies(scan)
+    metrics.record_worker_callback(
+        SCAN_TYPE_SQLMAP,
+        findings_persisted,
+        queue_latency_seconds=queue_latency,
+        runtime_seconds=runtime,
+    )
 
     record_audit_event(
         db,
@@ -6443,6 +6530,7 @@ def validator_callback(
         )
 
     validation_results: List[Dict[str, Any]] = []
+    queue_latency_samples: List[float] = []
 
     for result in payload.findings:
         finding = db.get(Finding, result.finding_id)
@@ -6487,6 +6575,11 @@ def validator_callback(
         )
 
         validation_metadata = deepcopy(_normalize_payload(finding.validation_metadata))
+        scheduled_at = _parse_iso_datetime(validation_metadata.get("scheduled_at"))
+        if scheduled_at is not None:
+            queue_latency_samples.append(
+                max(0.0, (result.observed_at - scheduled_at).total_seconds())
+            )
         history = validation_metadata.setdefault("history", [])
         history.append(
             {
@@ -6526,7 +6619,16 @@ def validator_callback(
             detail="Failed to persist validator callback",
         ) from exc
 
-    metrics.record_worker_callback("validator", len(validation_results))
+    average_queue_latency = (
+        sum(queue_latency_samples) / len(queue_latency_samples)
+        if queue_latency_samples
+        else None
+    )
+    metrics.record_worker_callback(
+        "validator",
+        len(validation_results),
+        queue_latency_seconds=average_queue_latency,
+    )
 
     notifications: List[CriticalFindingNotification] = []
     for item in validation_results:
@@ -6660,7 +6762,12 @@ def _handle_legacy_validator_callback(
     db.refresh(finding)
     db.refresh(validation)
 
-    metrics.record_worker_callback("validator", 1)
+    queue_latency: Optional[float] = None
+    if payload.requested_at is not None:
+        requested_at = payload.requested_at.astimezone(timezone.utc)
+        queue_latency = max(0.0, (executed_at - requested_at).total_seconds())
+
+    metrics.record_worker_callback("validator", 1, queue_latency_seconds=queue_latency)
 
     record_audit_event(
         db,
@@ -6704,7 +6811,13 @@ def binary_static_analysis_callback(
         payload=payload,
     )
 
-    metrics.record_worker_callback(SCAN_TYPE_BINARY_STATIC, findings_persisted)
+    queue_latency, runtime = _compute_scan_job_latencies(scan)
+    metrics.record_worker_callback(
+        SCAN_TYPE_BINARY_STATIC,
+        findings_persisted,
+        queue_latency_seconds=queue_latency,
+        runtime_seconds=runtime,
+    )
 
     record_audit_event(
         db,
@@ -6742,7 +6855,13 @@ def binary_fuzzing_callback(
         payload=payload,
     )
 
-    metrics.record_worker_callback(SCAN_TYPE_BINARY_FUZZING, findings_persisted)
+    queue_latency, runtime = _compute_scan_job_latencies(scan)
+    metrics.record_worker_callback(
+        SCAN_TYPE_BINARY_FUZZING,
+        findings_persisted,
+        queue_latency_seconds=queue_latency,
+        runtime_seconds=runtime,
+    )
 
     record_audit_event(
         db,
@@ -6780,7 +6899,13 @@ def binary_symbolic_execution_callback(
         payload=payload,
     )
 
-    metrics.record_worker_callback(SCAN_TYPE_BINARY_SYMBOLIC, findings_persisted)
+    queue_latency, runtime = _compute_scan_job_latencies(scan)
+    metrics.record_worker_callback(
+        SCAN_TYPE_BINARY_SYMBOLIC,
+        findings_persisted,
+        queue_latency_seconds=queue_latency,
+        runtime_seconds=runtime,
+    )
 
     record_audit_event(
         db,
@@ -7931,7 +8056,9 @@ def export_findings_report(
             extension=extension,
         )
     except ReportStorageError as exc:
-        LOGGER.exception("Failed to persist report export", extra={"report_id": report_id})
+        LOGGER.exception(
+            "Failed to persist report export", extra={"report_id": report_id}
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Unable to persist report export",
@@ -8079,7 +8206,9 @@ def download_report_export(
     try:
         data = storage.fetch(reference)
     except ReportStorageError as exc:
-        LOGGER.exception("Failed to download report export", extra={"report_id": report_id})
+        LOGGER.exception(
+            "Failed to download report export", extra={"report_id": report_id}
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Unable to download report export",
@@ -8089,7 +8218,11 @@ def download_report_export(
     if checksum != record.content_sha256:
         LOGGER.error(
             "Report export checksum mismatch",
-            extra={"report_id": report_id, "expected": record.content_sha256, "observed": checksum},
+            extra={
+                "report_id": report_id,
+                "expected": record.content_sha256,
+                "observed": checksum,
+            },
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -68,6 +68,18 @@ locals {
     basename(template) => file("${path.module}/templates/${template}")
   }
 
+  grafana_dashboard_json = local.deploy_kube_stack ? templatefile(
+    "${path.module}/templates/grafana-medusa-controller-dashboard.json.tftpl",
+    {}
+  ) : null
+
+  slo_rule_manifest = local.deploy_kube_stack ? templatefile(
+    "${path.module}/templates/prometheus-medusa-slo-rules.yaml.tftpl",
+    {
+      namespace = var.namespace
+    }
+  ) : null
+
   medusa_embedded_values = local.use_embedded ? merge(
     {
       metrics = {
@@ -313,4 +325,39 @@ resource "helm_release" "kube_prometheus_stack" {
     var.create_namespace ? [kubernetes_namespace.observability[0]] : [],
     var.manage_grafana_admin_secret ? [kubernetes_secret.grafana_admin[0]] : [],
   )
+}
+
+resource "kubernetes_config_map" "medusa_grafana_dashboards" {
+  count = local.deploy_kube_stack && local.grafana_dashboard_json != null ? 1 : 0
+
+  metadata {
+    name      = "medusa-grafana-dashboards"
+    namespace = var.namespace
+    labels = merge(
+      var.common_labels,
+      {
+        "app.kubernetes.io/name"      = "medusa-grafana-dashboards",
+        "app.kubernetes.io/component" = "observability",
+        "grafana_dashboard"           = "1",
+      },
+    )
+    annotations = {
+      grafana_folder                  = "Medusa"
+      "medusa.security/description" = "Controller and worker SLO dashboards managed by Terraform."
+    }
+  }
+
+  data = {
+    "medusa-controller.json" = local.grafana_dashboard_json
+  }
+
+  depends_on = [helm_release.kube_prometheus_stack]
+}
+
+resource "kubernetes_manifest" "medusa_slo_alerts" {
+  count = local.deploy_kube_stack && local.slo_rule_manifest != null ? 1 : 0
+
+  manifest = yamldecode(local.slo_rule_manifest)
+
+  depends_on = [helm_release.kube_prometheus_stack]
 }

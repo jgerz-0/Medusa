@@ -45,11 +45,15 @@ class Metric:
         if set(labels.keys()) != set(self.label_names):
             expected = ", ".join(self.label_names)
             provided = ", ".join(labels.keys())
-            raise ValueError(f"Labels mismatch for {self.name}: expected [{expected}], got [{provided}]")
+            raise ValueError(
+                f"Labels mismatch for {self.name}: expected [{expected}], got [{provided}]"
+            )
         ordered = tuple(str(labels[label]) for label in self.label_names)
         return MetricKey(ordered)
 
-    def _format_labels(self, key: MetricKey, extra: Dict[str, object] | None = None) -> str:
+    def _format_labels(
+        self, key: MetricKey, extra: Dict[str, object] | None = None
+    ) -> str:
         label_pairs = [
             f'{name}="{value}"'
             for name, value in zip(self.label_names, key.values, strict=True)
@@ -60,7 +64,9 @@ class Metric:
             return ""
         return "{" + ",".join(label_pairs) + "}"
 
-    def render_samples(self) -> Iterator[str]:  # pragma: no cover - implemented by subclasses
+    def render_samples(
+        self,
+    ) -> Iterator[str]:  # pragma: no cover - implemented by subclasses
         raise NotImplementedError
 
 
@@ -185,6 +191,14 @@ JOB_ENQUEUED_COUNTER = CounterMetric(
 )
 METRICS_REGISTRY.register(JOB_ENQUEUED_COUNTER)
 
+QUEUE_DEPTH_SAMPLES = HistogramMetric(
+    "medusa_controller_queue_depth",
+    "Distribution of queue depth immediately after enqueue operations.",
+    ("job_type",),
+    buckets=(0, 1, 5, 10, 25, 50, 100, 250, 500, 1000),
+)
+METRICS_REGISTRY.register(QUEUE_DEPTH_SAMPLES)
+
 WORKER_CALLBACK_COUNTER = CounterMetric(
     "medusa_worker_callbacks_total",
     "Callbacks processed from asynchronous workers.",
@@ -198,6 +212,22 @@ WORKER_ITEM_COUNTER = CounterMetric(
     ("worker",),
 )
 METRICS_REGISTRY.register(WORKER_ITEM_COUNTER)
+
+WORKER_QUEUE_LATENCY = HistogramMetric(
+    "medusa_worker_queue_latency_seconds",
+    "Time spent waiting in queue before a worker started processing.",
+    ("worker",),
+    buckets=(0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 900.0, 1800.0),
+)
+METRICS_REGISTRY.register(WORKER_QUEUE_LATENCY)
+
+WORKER_EXECUTION_LATENCY = HistogramMetric(
+    "medusa_worker_execution_duration_seconds",
+    "Observed runtime for worker jobs until callback completion.",
+    ("worker",),
+    buckets=(0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 900.0, 1800.0),
+)
+METRICS_REGISTRY.register(WORKER_EXECUTION_LATENCY)
 
 
 def render_latest() -> bytes:
@@ -217,7 +247,9 @@ def observe_http_request(
     """Track request counters and latency for HTTP traffic."""
 
     label_status = str(status_code)
-    REQUEST_COUNTER.labels(method=method, endpoint=endpoint, status_code=label_status).inc()
+    REQUEST_COUNTER.labels(
+        method=method, endpoint=endpoint, status_code=label_status
+    ).inc()
     REQUEST_LATENCY.labels(
         method=method, endpoint=endpoint, status_code=label_status
     ).observe(duration_seconds)
@@ -229,18 +261,40 @@ def record_audit_event(action: str) -> None:
     AUDIT_EVENT_COUNTER.labels(action=action).inc()
 
 
-def record_job_enqueued(job_type: str) -> None:
+def record_job_enqueued(job_type: str, *, queue_depth: int | None = None) -> None:
     """Count a newly enqueued background job (scan, enrichment, etc.)."""
 
     JOB_ENQUEUED_COUNTER.labels(job_type=job_type).inc()
+    if queue_depth is not None:
+        QUEUE_DEPTH_SAMPLES.labels(job_type=job_type).observe(float(queue_depth))
 
 
-def record_worker_callback(worker: str, items_persisted: int) -> None:
+def _normalize_seconds(value: float | None) -> float | None:
+    if value is None:
+        return None
+    if value < 0:
+        return 0.0
+    return value
+
+
+def record_worker_callback(
+    worker: str,
+    items_persisted: int,
+    *,
+    queue_latency_seconds: float | None = None,
+    runtime_seconds: float | None = None,
+) -> None:
     """Track worker callback invocations and persisted payload counts."""
 
     WORKER_CALLBACK_COUNTER.labels(worker=worker).inc()
     if items_persisted > 0:
         WORKER_ITEM_COUNTER.labels(worker=worker).inc(float(items_persisted))
+    normalized_queue = _normalize_seconds(queue_latency_seconds)
+    if normalized_queue is not None:
+        WORKER_QUEUE_LATENCY.labels(worker=worker).observe(normalized_queue)
+    normalized_runtime = _normalize_seconds(runtime_seconds)
+    if normalized_runtime is not None:
+        WORKER_EXECUTION_LATENCY.labels(worker=worker).observe(normalized_runtime)
 
 
 __all__ = [
@@ -250,8 +304,11 @@ __all__ = [
     "METRICS_REGISTRY",
     "REQUEST_COUNTER",
     "REQUEST_LATENCY",
+    "QUEUE_DEPTH_SAMPLES",
     "WORKER_CALLBACK_COUNTER",
     "WORKER_ITEM_COUNTER",
+    "WORKER_QUEUE_LATENCY",
+    "WORKER_EXECUTION_LATENCY",
     "observe_http_request",
     "record_audit_event",
     "record_job_enqueued",
