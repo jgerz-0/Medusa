@@ -52,10 +52,10 @@ without redeploying the controller.
 
 The Next.js analyst console consumes the same OIDC configuration as the controller:
 
-- `/api/auth/login` performs a PKCE authorization-code flow against `MEDUSA_OIDC_ISSUER` using the `MEDUSA_OIDC_CLIENT_ID` credentials.
+- `/api/auth/login` performs a PKCE authorization-code flow against `MEDUSA_OIDC_ISSUER` using the `MEDUSA_OIDC_CLIENT_ID` credentials and requested `MEDUSA_OIDC_SCOPES` (defaulting to `openid profile email offline_access`).
 - Access and refresh tokens returned by the IdP are wrapped in an AES-GCM encrypted cookie (`__Secure-medusa.session`) derived from `MEDUSA_SESSION_SECRET`.
-- Middleware refreshes the access token when the expiration window is within `MEDUSA_OIDC_TOKEN_SKEW_SECONDS` and clears the session when refresh fails.
-- Server components call the controller with the resolved bearer token. If `CONTROLLER_API_KEY` or `CONTROLLER_JWT` is set, the middleware still accepts those headers for automation, but human analysts must complete the OIDC login.
+- Middleware validates the bearer token signature against the issuer JWKS, enforces the configured issuer/audience claims, refreshes the session when the expiration window is within `MEDUSA_OIDC_TOKEN_SKEW_SECONDS`, and clears the cookie if refresh fails.
+- When validation succeeds the middleware injects the bearer/API key headers consumed by server components. Automation may still supply `CONTROLLER_API_KEY` or `CONTROLLER_JWT`, but human analysts must complete the OIDC login.
 
 The session cookie never stores plaintext tokens; the AES-GCM payload includes the subject, access token expiry, and optional refresh token. Tokens are only sent to the controller API over HTTPS via the backend fetch helpers.
 

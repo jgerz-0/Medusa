@@ -93,6 +93,8 @@ Set the following variables in `infra/docker/.env` (or your own environment over
 - `MEDUSA_OIDC_SCOPES` – Scopes requested during the PKCE flow. Defaults to `openid profile email offline_access`.
 
 Optional hardening controls are exposed via `MEDUSA_SESSION_TTL_SECONDS`, `MEDUSA_OIDC_TOKEN_SKEW_SECONDS`, and `MEDUSA_OIDC_REQUEST_TIMEOUT_SECONDS`. The middleware also accepts a `CONTROLLER_JWT` or `CONTROLLER_API_KEY` header for automated smoke tests, but interactive analysts must authenticate through OIDC.
+During normal analyst sessions the middleware validates each bearer token against the issuer JWKS, refreshes when nearing
+expiration, and injects the resolved header into backend fetches so tokens never reach the browser runtime.
 
 Helpful commands:
 

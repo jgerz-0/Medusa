@@ -290,3 +290,5 @@ export async function startLogin(returnTo: string | undefined, origin: string): 
     }
   };
 }
+
+export { validateBearerToken, clearCachedVerificationKeys } from './validator';
