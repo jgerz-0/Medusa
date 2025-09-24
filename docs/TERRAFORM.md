@@ -162,7 +162,7 @@ jq empty infra/terraform/modules/observability/templates/grafana-medusa-controll
 # npx @grafana/toolkit plugin:lint --config infra/terraform/modules/observability/templates/grafana-medusa-controller-dashboard.json.tftpl
 ```
 
-The dashboard surfaces HTTP latency, queue depth, and worker runtime histograms published by the controller. The PrometheusRule enforces SLO guardrails for HTTP 5xx burn rate, controller latency, queue depth, and worker throughput. Adjust the thresholds per environment by overriding the template file and re-running `terraform plan`.
+The dashboard surfaces HTTP latency, queue depth, and worker runtime histograms published by the controller. It now also charts the controller error ratio derived from `medusa_controller_http_request_outcomes_total` and the worker callback outcome split from `medusa_worker_callback_outcomes_total`, giving operators direct visibility into SLO burn and callback health. The PrometheusRule enforces SLO guardrails for HTTP error budget burn, controller latency, queue depth, worker runtime, and callback failures. Adjust the thresholds per environment by overriding the template file and re-running `terraform plan`.
 
 ### Pod Security Standards
 

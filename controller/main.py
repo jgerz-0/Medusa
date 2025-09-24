@@ -6945,6 +6945,7 @@ def enrichment_callback(
         .first()
     )
     if finding is None:
+        metrics.record_worker_callback("enrichment", 0, result="error")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
         )
@@ -6955,6 +6956,7 @@ def enrichment_callback(
         .first()
     )
     if existing is not None:
+        metrics.record_worker_callback("enrichment", 0, result="error")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Enrichment already recorded",
@@ -7005,6 +7007,7 @@ def enrichment_callback(
             "Failed to persist enrichment callback",
             extra={"job_id": payload.job_id, "finding_id": payload.finding_id},
         )
+        metrics.record_worker_callback("enrichment", 0, result="error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to persist enrichment",
@@ -7065,6 +7068,7 @@ def anomaly_callback(
             "Failed to persist anomaly callback",
             extra={"source": payload.source, "count": len(payload.anomalies)},
         )
+        metrics.record_worker_callback("anomaly", 0, result="error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to persist anomaly events",
@@ -7093,6 +7097,8 @@ def anomaly_callback(
             "worker_subject": principal.subject,
         },
     )
+
+    metrics.record_worker_callback("anomaly", len(payload.anomalies))
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
