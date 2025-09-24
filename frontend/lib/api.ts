@@ -1,3 +1,5 @@
+import { cookies } from 'next/headers';
+import { readSession } from '@/lib/auth';
 import { controllerApiKey, controllerBaseUrl, controllerJwt } from './config';
 import type {
   AnomalyEvent,
@@ -202,19 +204,42 @@ export class ControllerValidationError extends ControllerError {
   }
 }
 
-function buildAuthHeaders(): HeadersInit {
+async function resolveSessionCredentials(): Promise<{ bearerToken?: string; apiKey?: string }> {
+  try {
+    const store = cookies();
+    const session = await readSession(store);
+    if (session?.accessToken) {
+      return { bearerToken: session.accessToken };
+    }
+  } catch (error) {
+    console.warn('Failed to resolve session credentials', error);
+  }
+
+  if (controllerApiKey) {
+    return { apiKey: controllerApiKey };
+  }
+  if (controllerJwt) {
+    return { bearerToken: controllerJwt };
+  }
+  return {};
+}
+
+async function buildAuthHeaders(): Promise<HeadersInit> {
   const headers: Record<string, string> = {
     Accept: 'application/json'
   };
 
-  if (controllerApiKey) {
-    headers['X-API-Key'] = controllerApiKey;
-    // Mirror the controller's API key contract over Authorization to keep proxies simple.
-    headers['Authorization'] = `Bearer ${controllerApiKey}`;
+  const { bearerToken, apiKey } = await resolveSessionCredentials();
+
+  if (bearerToken) {
+    headers['Authorization'] = `Bearer ${bearerToken}`;
   }
 
-  if (controllerJwt) {
-    headers['Authorization'] = `Bearer ${controllerJwt}`;
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey;
+    if (!headers['Authorization']) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
   }
 
   return headers;
@@ -256,7 +281,7 @@ function parseIssues(detail: unknown): ValidationIssue[] {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const url = `${controllerBaseUrl.replace(/\/$/, '')}${path}`;
-  const baseHeaders = normalizeHeaders(buildAuthHeaders());
+  const baseHeaders = normalizeHeaders(await buildAuthHeaders());
   if (init.headers) {
     const extraHeaders = normalizeHeaders(init.headers);
     extraHeaders.forEach((value, key) => {
@@ -501,7 +526,7 @@ export async function fetchReportExports(
 
 export async function downloadReportArtifact(reportId: string): Promise<Response> {
   const url = `${controllerBaseUrl.replace(/\/$/, '')}/reports/${reportId}`;
-  const headers = normalizeHeaders(buildAuthHeaders());
+  const headers = normalizeHeaders(await buildAuthHeaders());
   const response = await fetch(url, { cache: 'no-store', headers });
   if (!response.ok) {
     const detail = await response.text();

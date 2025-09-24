@@ -1,64 +1,85 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { controllerApiKey, controllerJwt } from '@/lib/config';
 import {
-  controllerApiKey,
-  controllerJwt,
-  dashboardPassword,
-  dashboardUser
-} from '@/lib/config';
+  clearSession,
+  isAccessTokenExpired,
+  persistSession,
+  readSession,
+  refreshSession
+} from '@/lib/auth';
 
-function unauthorized(): NextResponse {
-  return new NextResponse('Unauthorized', {
-    status: 401,
-    headers: {
-      'WWW-Authenticate': 'Basic realm="Medusa Operations", charset="UTF-8"'
-    }
-  });
-}
-
-function validateBasic(authHeader: string): boolean {
-  const encoded = authHeader.replace(/^Basic\s+/i, '');
-  try {
-    const decoded = atob(encoded);
-    const [user, password] = decoded.split(':');
-    return user === dashboardUser && password === dashboardPassword;
-  } catch (error) {
-    console.error('Failed to decode basic auth payload', error);
+function matchesStaticToken(value: string | null, token: string | undefined): boolean {
+  if (!value || !token) {
     return false;
   }
+  const normalized = value.trim();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.toLowerCase().startsWith('bearer ')) {
+    return normalized.slice(7).trim() === token;
+  }
+  return normalized === token;
 }
 
-function validateBearer(authHeader: string): boolean {
-  const token = authHeader.replace(/^Bearer\s+/i, '');
+function hasStaticCredential(request: NextRequest): boolean {
+  const authHeader = request.headers.get('authorization');
+  const apiKeyHeader = request.headers.get('x-api-key');
   return (
-    !!token &&
-    (token === dashboardPassword || token === controllerApiKey || token === controllerJwt)
+    matchesStaticToken(authHeader, controllerApiKey) ||
+    matchesStaticToken(authHeader, controllerJwt) ||
+    matchesStaticToken(apiKeyHeader, controllerApiKey)
   );
 }
 
-export function middleware(request: NextRequest) {
-  // Enforce auth only when a credential is configured.
-  if (!dashboardPassword && !controllerApiKey && !controllerJwt) {
+function isApiRoute(pathname: string): boolean {
+  return pathname.startsWith('/api/');
+}
+
+function buildLoginRedirect(request: NextRequest): NextResponse {
+  const loginUrl = new URL('/api/auth/login', request.nextUrl.origin);
+  if (request.method === 'GET') {
+    const returnTo = `${request.nextUrl.pathname}${request.nextUrl.search}`;
+    loginUrl.searchParams.set('returnTo', returnTo);
+  }
+  return NextResponse.redirect(loginUrl);
+}
+
+export async function middleware(request: NextRequest) {
+  try {
+    const session = await readSession(request.cookies);
+    if (session) {
+      if (!isAccessTokenExpired(session)) {
+        return NextResponse.next();
+      }
+
+      const refreshed = await refreshSession(session);
+      if (refreshed) {
+        const response = NextResponse.next();
+        await persistSession(response, refreshed);
+        return response;
+      }
+
+      const response = buildLoginRedirect(request);
+      clearSession(response);
+      return response;
+    }
+  } catch (error) {
+    console.error('Failed to resolve session cookie', error);
+  }
+
+  if (hasStaticCredential(request)) {
     return NextResponse.next();
   }
 
-  const header = request.headers.get('authorization');
-
-  if (!header) {
-    return unauthorized();
+  if (isApiRoute(request.nextUrl.pathname) || request.method !== 'GET') {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
 
-  if (header.toLowerCase().startsWith('basic')) {
-    return validateBasic(header) ? NextResponse.next() : unauthorized();
-  }
-
-  if (header.toLowerCase().startsWith('bearer')) {
-    return validateBearer(header) ? NextResponse.next() : unauthorized();
-  }
-
-  return unauthorized();
+  return buildLoginRedirect(request);
 }
 
 export const config = {
-  matcher: ['/((?!_next|favicon.ico|api/health).*)']
+  matcher: ['/((?!_next|favicon.ico|api/auth|api/health).*)']
 };

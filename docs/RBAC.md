@@ -48,6 +48,17 @@ principals using `controller.scripts.seed_principals` and manage the records
 through migrations or automation pipelines so keys can be revoked centrally
 without redeploying the controller.
 
+### Analyst Console Session Handling
+
+The Next.js analyst console consumes the same OIDC configuration as the controller:
+
+- `/api/auth/login` performs a PKCE authorization-code flow against `MEDUSA_OIDC_ISSUER` using the `MEDUSA_OIDC_CLIENT_ID` credentials.
+- Access and refresh tokens returned by the IdP are wrapped in an AES-GCM encrypted cookie (`__Secure-medusa.session`) derived from `MEDUSA_SESSION_SECRET`.
+- Middleware refreshes the access token when the expiration window is within `MEDUSA_OIDC_TOKEN_SKEW_SECONDS` and clears the session when refresh fails.
+- Server components call the controller with the resolved bearer token. If `CONTROLLER_API_KEY` or `CONTROLLER_JWT` is set, the middleware still accepts those headers for automation, but human analysts must complete the OIDC login.
+
+The session cookie never stores plaintext tokens; the AES-GCM payload includes the subject, access token expiry, and optional refresh token. Tokens are only sent to the controller API over HTTPS via the backend fetch helpers.
+
 ### OIDC Auto-Provisioning Controls
 
 Security teams can map identity-provider groups to Medusa roles without

@@ -78,9 +78,21 @@ The smoke test seeds demo targets, enqueues a nuclei job, and waits for the work
 
 ### 4. Develop against the running services
 - Controller API: http://localhost:8000 (OpenAPI at `/docs`)
-- Analyst dashboard: http://localhost:3000 (HTTP basic auth using `analyst` / `analyst` unless you override `DASHBOARD_BASIC_*` in `.env`)
+- Analyst dashboard: http://localhost:3000 (OIDC login kicks off via `/api/auth/login`; populate `MEDUSA_OIDC_*` and `MEDUSA_SESSION_SECRET` in `.env`)
 - MinIO console: http://localhost:9001
 - Qdrant HTTP API: http://localhost:6333
+
+#### Configure analyst console OIDC
+
+Set the following variables in `infra/docker/.env` (or your own environment overrides) to align the dashboard with the controller's OIDC issuer and client configuration:
+
+- `MEDUSA_SESSION_SECRET` – 32+ byte random string used to AES-GCM encrypt the session cookie.
+- `MEDUSA_OIDC_ISSUER` – Issuer URL published by the identity provider (e.g., Keycloak realm issuer).
+- `MEDUSA_OIDC_CLIENT_ID` / `MEDUSA_OIDC_CLIENT_SECRET` – OAuth2 client credentials provisioned for the Medusa frontend.
+- `MEDUSA_OIDC_AUDIENCE` – Audience/client ID that the controller validates on bearer tokens.
+- `MEDUSA_OIDC_SCOPES` – Scopes requested during the PKCE flow. Defaults to `openid profile email offline_access`.
+
+Optional hardening controls are exposed via `MEDUSA_SESSION_TTL_SECONDS`, `MEDUSA_OIDC_TOKEN_SKEW_SECONDS`, and `MEDUSA_OIDC_REQUEST_TIMEOUT_SECONDS`. The middleware also accepts a `CONTROLLER_JWT` or `CONTROLLER_API_KEY` header for automated smoke tests, but interactive analysts must authenticate through OIDC.
 
 Helpful commands:
 

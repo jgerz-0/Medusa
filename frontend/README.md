@@ -11,13 +11,19 @@ pnpm install
 pnpm dev
 ```
 
-Configure credentials in `.env.local` (copy from `.env.example`). Requests to the controller include the API key and optional
-JWT automatically. The default middleware credentials are `analyst` / `analyst`; override `DASHBOARD_BASIC_USER` and `DASHBOARD_BASIC_PASSWORD`
-for your environment.
-Copy `frontend/.env.example` to `.env.local` and tailor the values for your deployment. Requests to the controller include the
-API key and optional JWT automatically. `CONTROLLER_API_KEY` and `CONTROLLER_JWT` must match the credentials issued by the
-controller for this dashboard. The default middleware credentials are `analyst` / `analyst`; override `DASHBOARD_BASIC_USER` and
-`DASHBOARD_BASIC_PASSWORD` for your environment.
+Copy `frontend/.env.example` to `.env.local` and tailor the values for your deployment. Populate the following values so the
+dashboard can complete the PKCE OIDC handshake against your identity provider:
+
+- `MEDUSA_SESSION_SECRET` – random 32+ byte string used to encrypt the session cookie.
+- `MEDUSA_OIDC_ISSUER` – issuer URL published by the IdP.
+- `MEDUSA_OIDC_CLIENT_ID` / `MEDUSA_OIDC_CLIENT_SECRET` – OAuth2 client credentials provisioned for the dashboard.
+- `MEDUSA_OIDC_AUDIENCE` – audience expected by the Medusa controller (often the controller's client ID).
+- `CONTROLLER_API_BASE_URL` – controller URL (defaults to `http://127.0.0.1:8000`).
+- `CONTROLLER_API_KEY` / `CONTROLLER_JWT` – optional automation credentials used when no interactive session exists.
+
+The middleware redirects unauthenticated analysts to `/api/auth/login`, exchanges the authorization code for tokens, and stores
+the resulting access/refresh pair inside an AES-GCM encrypted `__Secure-medusa.session` cookie. API helpers automatically attach
+the decrypted bearer token to controller requests.
 
 ## Orchestrating scans
 
@@ -48,6 +54,6 @@ pnpm lint
 
 ## Deployment notes
 
-- `middleware.ts` enforces either HTTP Basic or Bearer token auth using the configured API key/JWT.
+- `middleware.ts` validates the encrypted session cookie, transparently refreshes OIDC tokens, and falls back to `CONTROLLER_API_KEY`/`CONTROLLER_JWT` headers for automation.
 - Shared components (`LayoutShell`, `DataTable`, `StatusBadge`) keep table rendering consistent across pages.
 - Tailwind theme defaults are documented in [`THEME.md`](./THEME.md) for future iteration by the design system team.
