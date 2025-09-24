@@ -17,12 +17,13 @@ helm_repository_url          = "oci://ghcr.io/medusa/charts"
 helm_repository_username     = "medusa-prod-bot"
 helm_repository_password     = "REPLACE_WITH_OIDC_TOKEN"
 
-# External Secrets Operator (disabled by default until production IRSA is in place).
-enable_external_secrets_operator = false
+# External Secrets Operator (enabled for production secret delivery).
+enable_external_secrets_operator = true
+external_secrets_irsa_role_arn   = "arn:aws:iam::123456789012:role/medusa-prod-external-secrets"
 external_secrets_secret_store_name = "medusa-prod-cluster-secrets"
 
-# Observability stack (enable once ingress, RBAC, and alert routing are signed off).
-enable_observability = false
+# Observability stack (production cluster deploys the hardened kube-prometheus-stack release).
+enable_observability = true
 observability_mode   = "kube-prometheus-stack"
 # observability_manage_grafana_admin_secret = true
 # observability_grafana_admin_credentials = {
@@ -49,7 +50,74 @@ observability_mode   = "kube-prometheus-stack"
 # ]
 # observability_service_monitor_interval       = "15s"
 # observability_service_monitor_scrape_timeout = "10s"
-# observability_enable_alertmanager            = true
+observability_enable_alertmanager = true
+observability_alertmanager_template_settings = {
+  default_receiver = "medusa-security-slack"
+  pagerduty = {
+    receiver         = "medusa-security-pagerduty"
+    secret_name      = "medusa-alertmanager-credentials"
+    secret_key       = "pagerduty-routing-key"
+    severity_label   = "severity"
+    class            = "Medusa Security"
+    component        = "medusa-platform"
+    group            = "medusa"
+  }
+  slack = {
+    receiver       = "medusa-security-slack"
+    secret_name    = "medusa-alertmanager-credentials"
+    secret_key     = "slack-webhook-url"
+    channel        = "#medusa-alerts"
+    username       = "Medusa Alertmanager"
+    icon_emoji     = ":rotating_light:"
+    send_resolved  = true
+    footer         = "Medusa automated alerting"
+  }
+  additional_routes = [
+    {
+      receiver = "medusa-security-pagerduty"
+      matchers = [
+        {
+          name  = "medusa_priority"
+          value = "page"
+        }
+      ]
+    }
+  ]
+}
+
+external_secrets_external_secrets = {
+  alertmanager = {
+    namespace = "observability"
+    target = {
+      name            = "medusa-alertmanager-credentials"
+      creation_policy = "Owner"
+      deletion_policy = "Retain"
+      template = {
+        metadata = {
+          labels = {
+            "medusa.security/owner" = "platform-security"
+          }
+        }
+      }
+    }
+    data = [
+      {
+        secret_key = "pagerduty-routing-key"
+        remote_ref = {
+          key      = "medusa/prod/alertmanager"
+          property = "pagerdutyRoutingKey"
+        }
+      },
+      {
+        secret_key = "slack-webhook-url"
+        remote_ref = {
+          key      = "medusa/prod/alertmanager"
+          property = "slackWebhookUrl"
+        }
+      },
+    ]
+  }
+}
 
 # IRSA bindings for the Medusa controller and workers (disabled by default).
 enable_medusa_irsa = false
@@ -66,6 +134,9 @@ enable_medusa_irsa = false
 enable_aws_lb_controller = true
 aws_lb_controller_scheme = "internet-facing"
 aws_lb_controller_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/medusa-prod-placeholder"
+aws_lb_controller_enable_shield_advanced = true
+aws_lb_controller_waf_web_acl_arn        = "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/medusa-prod/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+aws_lb_controller_ssl_policy             = "ELBSecurityPolicy-TLS13-1-2-2021-06"
 aws_lb_controller_additional_annotations = {
   "alb.ingress.kubernetes.io/listen-ports" = "[{\"HTTPS\":443}]"
   "alb.ingress.kubernetes.io/ssl-redirect" = "443"

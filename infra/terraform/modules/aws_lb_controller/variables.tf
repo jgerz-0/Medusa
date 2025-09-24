@@ -170,6 +170,18 @@ variable "load_balancer_certificate_arn" {
   default     = null
 }
 
+variable "enable_shield_advanced" {
+  description = "Annotate managed ingresses so AWS Shield Advanced protects the resulting ALBs."
+  type        = bool
+  default     = false
+}
+
+variable "waf_web_acl_arn" {
+  description = "Associate a managed AWS WAF web ACL with controller-managed ALBs."
+  type        = string
+  default     = null
+}
+
 variable "load_balancer_ssl_policy" {
   description = "SSL policy enforced on HTTPS listeners."
   type        = string

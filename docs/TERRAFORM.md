@@ -81,21 +81,62 @@ observability_grafana_ingress_hosts = [{
 observability_service_monitor_interval       = "30s"
 observability_service_monitor_scrape_timeout = "10s"
 
-# Wire alerts into PagerDuty, Opsgenie, etc. using Alertmanager configuration
+# Wire alerts into PagerDuty and Slack using the bundled template and External Secrets
 observability_enable_alertmanager = true
-observability_alertmanager_config = <<-EOF
-route:
-  receiver: pagerduty
-receivers:
-  - name: pagerduty
-    pagerduty_configs:
-      - routing_key: ${var.pagerduty_routing_key}
-EOF
+observability_alertmanager_template_settings = {
+  default_receiver = "medusa-security-slack"
+  pagerduty = {
+    receiver       = "medusa-security-pagerduty"
+    secret_name    = "medusa-alertmanager-credentials"
+    secret_key     = "pagerduty-routing-key"
+  }
+  slack = {
+    receiver    = "medusa-security-slack"
+    secret_name = "medusa-alertmanager-credentials"
+    secret_key  = "slack-webhook-url"
+    channel     = "#medusa-alerts"
+  }
+}
+external_secrets_external_secrets = {
+  alertmanager = {
+    namespace = "observability"
+    target = {
+      name            = "medusa-alertmanager-credentials"
+      creation_policy = "Owner"
+      deletion_policy = "Retain"
+    }
+    data = [
+      {
+        secret_key = "pagerduty-routing-key"
+        remote_ref = {
+          key      = "medusa/prod/alertmanager"
+          property = "pagerdutyRoutingKey"
+        }
+      },
+      {
+        secret_key = "slack-webhook-url"
+        remote_ref = {
+          key      = "medusa/prod/alertmanager"
+          property = "slackWebhookUrl"
+        }
+      },
+    ]
+  }
+}
 ```
 
 **Grafana admin rotation.** When Terraform manages the admin secret, rotate credentials by updating `observability_grafana_admin_credentials.password` (or sourcing it from External Secrets) and re-running `terraform apply`. Terraform replaces the Kubernetes secret without downtime. If you disable secret management, provide `observability_grafana_admin_secret_name` to reference an existing Secret or ExternalSecret resource and rotate credentials there.
 
-**External alerting.** The module exposes `observability_alertmanager_config` so Alertmanager can forward incidents to PagerDuty, Slack, email, or SIEM webhooks. Store sensitive tokens in AWS Secrets Manager and render them via External Secrets, then reference the secret in your YAML using the standard Alertmanager templating syntax.
+**External alerting.** The module exposes `observability_alertmanager_config`, but most teams should rely on the hardened `observability_alertmanager_template_settings`. Terraform renders the template, mounts bundled PagerDuty/Slack message templates, and injects the required secret names into the Helm values. Use External Secrets to project the routing keys into the `medusa-alertmanager-credentials` secret. Validate the wiring after `terraform apply`:
+
+```bash
+kubectl get externalsecret -n observability alertmanager
+kubectl get secret -n observability medusa-alertmanager-credentials
+kubectl exec -n observability statefulset/alertmanager-kube-prometheus-stack-alertmanager -c alertmanager -- \
+  cat /etc/alertmanager/config/medusa-common.tmpl
+```
+
+If the template references additional routes (for example, `medusa_priority=page`), confirm the labels exist on incoming alerts before promoting to production.
 
 ### Pod Security Standards
 
