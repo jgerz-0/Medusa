@@ -92,6 +92,9 @@ Medusa embraces agentic modularity. Each service is responsible for a bounded fu
 - Revocation returns `401` with `"API key revoked"` and the same fingerprint metadata, ensuring
   operators can correlate secrets without revealing them.
 
+## Resilience & Disaster Recovery
+- RPO/RTO objectives, Terraform-driven restoration steps for RDS/S3, and cross-region failover workflows are cataloged in the [Disaster Recovery Runbook](runbooks/DISASTER_RECOVERY.md). Follow its validation commands and tabletop cadence to keep architecture assumptions verified.
+
 ## Extensibility Principles
 - New agents register their JSON schema in `docs/interfaces/` and implement handshake contracts with the controller.
 - Infrastructure definitions (Docker, Helm, Terraform) remain declarative and version controlled.
