@@ -1,4 +1,4 @@
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { readSession } from '@/lib/auth';
 import { controllerApiKey, controllerBaseUrl, controllerJwt } from './config';
 import type {
@@ -204,7 +204,48 @@ export class ControllerValidationError extends ControllerError {
   }
 }
 
+function sanitizeHeader(value: string | null): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function parseBearerHeader(value: string | null): string | undefined {
+  const normalized = sanitizeHeader(value);
+  if (!normalized) {
+    return undefined;
+  }
+  if (!normalized.toLowerCase().startsWith('bearer ')) {
+    return undefined;
+  }
+  const token = normalized.slice(7).trim();
+  return token.length > 0 ? token : undefined;
+}
+
+function resolveRequestHeaders(): Headers | null {
+  try {
+    return headers();
+  } catch {
+    return null;
+  }
+}
+
 async function resolveSessionCredentials(): Promise<{ bearerToken?: string; apiKey?: string }> {
+  const requestHeaders = resolveRequestHeaders();
+  if (requestHeaders) {
+    const headerToken = parseBearerHeader(requestHeaders.get('authorization'));
+    if (headerToken) {
+      return { bearerToken: headerToken };
+    }
+
+    const headerApiKey = sanitizeHeader(requestHeaders.get('x-api-key'));
+    if (headerApiKey) {
+      return { apiKey: headerApiKey };
+    }
+  }
+
   try {
     const store = cookies();
     const session = await readSession(store);
@@ -212,7 +253,10 @@ async function resolveSessionCredentials(): Promise<{ bearerToken?: string; apiK
       return { bearerToken: session.accessToken };
     }
   } catch (error) {
-    console.warn('Failed to resolve session credentials', error);
+    const message = error instanceof Error ? error.message : '';
+    if (!message.includes('outside a request scope')) {
+      console.warn('Failed to resolve session credentials', error);
+    }
   }
 
   if (controllerApiKey) {

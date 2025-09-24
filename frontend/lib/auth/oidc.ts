@@ -16,6 +16,7 @@ export interface OidcConfiguration {
   authorizationEndpoint: string;
   tokenEndpoint: string;
   userinfoEndpoint?: string;
+  jwksUri?: string;
 }
 
 export interface TokenResponse {
@@ -66,6 +67,8 @@ async function fetchConfiguration(): Promise<OidcConfiguration> {
     const userinfoEndpoint =
       getOidcUserinfoEndpointOverride() ??
       (typeof payload.userinfo_endpoint === 'string' ? payload.userinfo_endpoint : undefined);
+    const jwksUri =
+      typeof payload.jwks_uri === 'string' ? payload.jwks_uri : undefined;
 
     if (!authorizationEndpoint || !tokenEndpoint) {
       throw new Error('OIDC discovery document did not include authorization or token endpoints.');
@@ -75,7 +78,8 @@ async function fetchConfiguration(): Promise<OidcConfiguration> {
       issuer: typeof payload.issuer === 'string' ? payload.issuer : issuer,
       authorizationEndpoint,
       tokenEndpoint,
-      userinfoEndpoint
+      userinfoEndpoint,
+      jwksUri
     } satisfies OidcConfiguration;
   } finally {
     controller.abort();
