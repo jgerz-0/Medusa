@@ -124,16 +124,21 @@ the IAM role, IRSA wiring, and Helm deployment with hardened defaults
 
 3. Optionally tune advanced settings via the Terraform variables:
 
+   - `aws_lb_controller_enable_shield_advanced` to toggle Shield Advanced on
+     every controller-managed ALB.
+   - `aws_lb_controller_waf_web_acl_arn` to associate a regional WAF ACL with
+     new ALBs and `aws_lb_controller_ssl_policy` to lock TLS to the latest
+     AWS-managed security policy.
    - `aws_lb_controller_security_group_ids` to pin ALBs to precreated security
      groups.
    - `aws_lb_controller_additional_tags` to enforce cost/audit tagging on ALB
      resources.
-   - `medusa_controller_ingress_additional_annotations` to append WAF, Shield,
-     or access-log settings required by your security posture.
+   - `medusa_controller_ingress_additional_annotations` to append workload-
+     specific rules while keeping the Terraform-managed defaults intact.
    - `medusa_controller_shield_enabled`, `medusa_controller_waf_enabled`,
      `medusa_controller_waf_acl_arn`, and
-     `medusa_controller_waf_fail_open` to manage AWS Shield Advanced and WAF
-     bindings without crafting raw annotation maps.
+     `medusa_controller_waf_fail_open` to layer per-ingress overrides on top of
+     the global controller settings when you deploy multiple ingress classes.
 
 ### Harden the ingress with AWS Shield and WAF
 
@@ -143,10 +148,13 @@ rendered deterministically:
 
 ```hcl
 # terraform.tfvars
-medusa_controller_shield_enabled   = true
-medusa_controller_waf_enabled      = true
-medusa_controller_waf_acl_arn      = "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/medusa-prod/abcd1234-5678-90ab-cdef-EXAMPLE"
-medusa_controller_waf_fail_open    = false
+aws_lb_controller_enable_shield_advanced = true
+aws_lb_controller_waf_web_acl_arn        = "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/medusa-prod/abcd1234-5678-90ab-cdef-EXAMPLE"
+aws_lb_controller_ssl_policy             = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+medusa_controller_shield_enabled         = true
+medusa_controller_waf_enabled            = true
+medusa_controller_waf_acl_arn            = "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/medusa-prod/abcd1234-5678-90ab-cdef-EXAMPLE"
+medusa_controller_waf_fail_open          = false
 ```
 
 The module maps these variables to the Helm values under
@@ -170,6 +178,14 @@ groups that match your threat model (e.g., AWSManagedRulesCommonRuleSet and
 AWSManagedRulesKnownBadInputsRuleSet). Keep `failOpen` set to `false` so the ALB
 fails closed if WAF becomes unavailable, and ensure the Shield Advanced
 subscription is enabled on the target account before flipping the toggle.
+
+After Terraform converges, confirm the annotations landed on the ingress class
+and workloads:
+
+```bash
+kubectl get ingressclassparams -n kube-system aws-load-balancer-controller -o yaml | grep -A5 waf
+kubectl describe ingress -n medusa medusa-controller | grep -E "shield-advanced|waf-acl"
+```
 
 ## Install Medusa via Helm
 

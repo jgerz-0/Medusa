@@ -308,6 +308,109 @@ locals {
   )
 }
 
+locals {
+  alertmanager_template_settings = var.observability_alertmanager_template_settings != null ? {
+    default_receiver = var.observability_alertmanager_template_settings.default_receiver
+    pagerduty        = try(var.observability_alertmanager_template_settings.pagerduty, null)
+    slack            = try(var.observability_alertmanager_template_settings.slack, null)
+    additional_routes = try(var.observability_alertmanager_template_settings.additional_routes, [])
+  } : null
+
+  alertmanager_template_pagerduty = local.alertmanager_template_settings != null && local.alertmanager_template_settings.pagerduty != null ? {
+    receiver         = local.alertmanager_template_settings.pagerduty.receiver
+    secret_name      = local.alertmanager_template_settings.pagerduty.secret_name
+    secret_key       = local.alertmanager_template_settings.pagerduty.secret_key
+    severity_label   = try(local.alertmanager_template_settings.pagerduty.severity_label, "severity")
+    class            = try(local.alertmanager_template_settings.pagerduty.class, "Medusa Alert")
+    component        = try(local.alertmanager_template_settings.pagerduty.component, "medusa")
+    group            = try(local.alertmanager_template_settings.pagerduty.group, "medusa")
+    summary_template = try(local.alertmanager_template_settings.pagerduty.summary_template, "medusa.pagerduty.summary")
+  } : null
+
+  alertmanager_template_slack = local.alertmanager_template_settings != null && local.alertmanager_template_settings.slack != null ? {
+    receiver       = local.alertmanager_template_settings.slack.receiver
+    secret_name    = local.alertmanager_template_settings.slack.secret_name
+    secret_key     = local.alertmanager_template_settings.slack.secret_key
+    channel        = local.alertmanager_template_settings.slack.channel
+    username       = try(local.alertmanager_template_settings.slack.username, "Medusa Alertmanager")
+    icon_emoji     = try(local.alertmanager_template_settings.slack.icon_emoji, ":rotating_light:")
+    send_resolved  = try(local.alertmanager_template_settings.slack.send_resolved, true)
+    footer         = try(local.alertmanager_template_settings.slack.footer, "Medusa alerting")
+    title_template = try(local.alertmanager_template_settings.slack.title_template, "medusa.slack.title")
+    body_template  = try(local.alertmanager_template_settings.slack.body_template, "medusa.slack.body")
+  } : null
+
+  alertmanager_template_custom_routes = local.alertmanager_template_settings != null ? [
+    for route in try(local.alertmanager_template_settings.additional_routes, []) : {
+      receiver = route.receiver
+      continue = try(route.continue, false)
+      matchers = [
+        for matcher in try(route.matchers, []) : {
+          name  = matcher.name
+          value = matcher.value
+          regex = try(matcher.regex, false)
+        }
+      ]
+    }
+  ] : []
+
+  alertmanager_template_routes = local.alertmanager_template_settings != null ? concat(
+    local.alertmanager_template_pagerduty != null ? [{
+      receiver = local.alertmanager_template_pagerduty.receiver
+      continue = false
+      matchers = [
+        {
+          name  = local.alertmanager_template_pagerduty.severity_label
+          value = "critical"
+          regex = false
+        }
+      ]
+    }] : [],
+    local.alertmanager_template_custom_routes,
+  ) : []
+
+  observability_alertmanager_config_default = (
+    var.observability_enable_alertmanager && local.alertmanager_template_settings != null
+  ) ? templatefile(
+    "${path.module}/modules/observability/templates/alertmanager-default.tftpl",
+    {
+      cluster          = local.cluster_name
+      environment      = local.environment
+      default_receiver = local.alertmanager_template_settings.default_receiver
+      pagerduty        = local.alertmanager_template_pagerduty
+      slack            = local.alertmanager_template_slack
+      routes           = local.alertmanager_template_routes
+      routes_count     = length(local.alertmanager_template_routes)
+    }
+  ) : null
+
+  observability_alertmanager_config_effective = var.observability_alertmanager_config != null ? var.observability_alertmanager_config : local.observability_alertmanager_config_default
+
+  alertmanager_template_secret_names = local.alertmanager_template_settings != null ? distinct(compact([
+    try(local.alertmanager_template_pagerduty.secret_name, null),
+    try(local.alertmanager_template_slack.secret_name, null),
+  ])) : []
+
+  alertmanager_existing_spec = lookup(var.observability_alertmanager_additional_values, "alertmanagerSpec", {})
+
+  alertmanager_combined_secrets = local.alertmanager_template_settings != null ? distinct(concat(
+    try(local.alertmanager_existing_spec.secrets, []),
+    local.alertmanager_template_secret_names,
+  )) : try(local.alertmanager_existing_spec.secrets, [])
+
+  alertmanager_required_additional_values = length(local.alertmanager_template_secret_names) > 0 ? {
+    alertmanagerSpec = merge(
+      local.alertmanager_existing_spec,
+      { secrets = local.alertmanager_combined_secrets },
+    )
+  } : {}
+
+  observability_alertmanager_additional_values_effective = merge(
+    var.observability_alertmanager_additional_values,
+    local.alertmanager_required_additional_values,
+  )
+}
+
 module "observability" {
   source = "./modules/observability"
 
@@ -351,8 +454,8 @@ module "observability" {
   grafana_admin_credentials        = var.observability_grafana_admin_credentials
 
   enable_alertmanager            = var.observability_enable_alertmanager
-  alertmanager_config            = var.observability_alertmanager_config
-  alertmanager_additional_values = var.observability_alertmanager_additional_values
+  alertmanager_config            = local.observability_alertmanager_config_effective
+  alertmanager_additional_values = local.observability_alertmanager_additional_values_effective
   kube_prometheus_additional_values = var.observability_kube_prometheus_additional_values
   embedded_additional_values        = var.observability_embedded_additional_values
   external_stack_medusa_overrides   = var.observability_external_stack_medusa_overrides
@@ -500,6 +603,8 @@ module "aws_lb_controller" {
   ingress_class_params_name      = var.aws_lb_controller_ingress_class_params_name
   set_default_ingress_class      = var.aws_lb_controller_set_default_ingress_class
   load_balancer_certificate_arn  = var.aws_lb_controller_certificate_arn
+  enable_shield_advanced         = var.aws_lb_controller_enable_shield_advanced
+  waf_web_acl_arn                = var.aws_lb_controller_waf_web_acl_arn
   load_balancer_ssl_policy       = var.aws_lb_controller_ssl_policy
   load_balancer_additional_annotations = var.aws_lb_controller_additional_annotations
   load_balancer_additional_tags        = var.aws_lb_controller_additional_tags

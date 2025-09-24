@@ -1,0 +1,92 @@
+global:
+  resolve_timeout: 5m
+  http_config:
+    follow_redirects: false
+
+templates:
+  - "/etc/alertmanager/config/medusa-common.tmpl"
+
+route:
+  group_by: ['alertname', 'namespace']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: "${default_receiver}"
+%{ if routes_count > 0 }
+  routes:
+%{ for route in routes }
+    - receiver: "${route.receiver}"
+      continue: %{ if route.continue }true%{ else }false%{ endif }
+%{ if length(route.matchers) > 0 }
+      matchers:
+%{ for matcher in route.matchers }
+        - name = "${matcher.name}"
+          value = "${matcher.value}"
+          isRegex = %{ if matcher.regex }true%{ else }false%{ endif }
+%{ endfor }
+%{ endif }
+%{ endfor }
+%{ endif }
+
+receivers:
+  - name: "${default_receiver}"
+%{ if slack != null }
+    slack_configs:
+      - api_url_file: "/etc/alertmanager/secrets/${slack.secret_name}/${slack.secret_key}"
+        channel: "${slack.channel}"
+        username: "${slack.username}"
+        icon_emoji: "${slack.icon_emoji}"
+        send_resolved: %{ if slack.send_resolved }true%{ else }false%{ endif }
+        title: "{{ template \"${slack.title_template}\" . }}"
+        text: "{{ template \"${slack.body_template}\" . }}"
+        footer: "${slack.footer}"
+%{ else }
+%{ if pagerduty != null }
+    pagerduty_configs:
+      - routing_key_file: "/etc/alertmanager/secrets/${pagerduty.secret_name}/${pagerduty.secret_key}"
+        class: "${pagerduty.class}"
+        component: "${pagerduty.component}"
+        group: "${pagerduty.group}"
+        severity: "{{ template \"medusa.severity\" . }}"
+        summary: "{{ template \"${pagerduty.summary_template}\" . }}"
+        details:
+          cluster: "${cluster}"
+          environment: "${environment}"
+          runbook: "{{ template \"medusa.runbook\" . }}"
+%{ else }
+    webhook_configs: []
+%{ endif }
+%{ endif }
+%{ if slack != null && slack.receiver != default_receiver }
+  - name: "${slack.receiver}"
+    slack_configs:
+      - api_url_file: "/etc/alertmanager/secrets/${slack.secret_name}/${slack.secret_key}"
+        channel: "${slack.channel}"
+        username: "${slack.username}"
+        icon_emoji: "${slack.icon_emoji}"
+        send_resolved: %{ if slack.send_resolved }true%{ else }false%{ endif }
+        title: "{{ template \"${slack.title_template}\" . }}"
+        text: "{{ template \"${slack.body_template}\" . }}"
+        footer: "${slack.footer}"
+%{ endif }
+%{ if pagerduty != null && pagerduty.receiver != default_receiver }
+  - name: "${pagerduty.receiver}"
+    pagerduty_configs:
+      - routing_key_file: "/etc/alertmanager/secrets/${pagerduty.secret_name}/${pagerduty.secret_key}"
+        class: "${pagerduty.class}"
+        component: "${pagerduty.component}"
+        group: "${pagerduty.group}"
+        severity: "{{ template \"medusa.severity\" . }}"
+        summary: "{{ template \"${pagerduty.summary_template}\" . }}"
+        details:
+          cluster: "${cluster}"
+          environment: "${environment}"
+          runbook: "{{ template \"medusa.runbook\" . }}"
+%{ endif }
+
+inhibit_rules:
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname", "namespace"]

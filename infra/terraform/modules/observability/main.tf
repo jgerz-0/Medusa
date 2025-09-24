@@ -63,6 +63,11 @@ locals {
     var.service_monitor_scrape_timeout != null ? { scrapeTimeout = var.service_monitor_scrape_timeout } : {},
   )
 
+  alertmanager_template_files = {
+    for template in fileset("${path.module}/templates", "*.tmpl") :
+    basename(template) => file("${path.module}/templates/${template}")
+  }
+
   medusa_embedded_values = local.use_embedded ? merge(
     {
       metrics = {
@@ -236,6 +241,7 @@ locals {
           }
         },
         var.alertmanager_config != null ? { config = var.alertmanager_config } : {},
+        length(local.alertmanager_template_files) > 0 ? { templateFiles = local.alertmanager_template_files } : {},
         var.alertmanager_additional_values,
       )
     } : {

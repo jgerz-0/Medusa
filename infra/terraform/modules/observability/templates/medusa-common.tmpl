@@ -1,0 +1,34 @@
+{{- define "medusa.runbook" -}}
+https://runbooks.medusa/security/{{ default "general" .CommonLabels.alertname | urlquery }}
+{{- end -}}
+
+{{- define "medusa.severity" -}}
+{{- default "unknown" .CommonLabels.severity -}}
+{{- end -}}
+
+{{- define "medusa.slack.title" -}}
+{{- $severity := default "unknown" .CommonLabels.severity -}}
+{{- printf "[%s] %s" (upper $severity) (default "Medusa alert" .CommonLabels.alertname) -}}
+{{- end -}}
+
+{{- define "medusa.slack.body" -}}
+*Status:* {{ title .Status }}
+*Severity:* {{ template "medusa.severity" . }}
+*Environment:* {{ default "unknown" .CommonLabels.environment }}
+*Namespace:* {{ default "unknown" .CommonLabels.namespace }}
+*Summary:* {{ default "no summary provided" .CommonAnnotations.summary }}
+{{- if .CommonAnnotations.runbook_url }}
+*Runbook:* {{ .CommonAnnotations.runbook_url }}
+{{- else }}
+*Runbook:* {{ template "medusa.runbook" . }}
+{{- end }}
+{{- if .CommonAnnotations.linked_incident }}
+*Incident:* {{ .CommonAnnotations.linked_incident }}
+{{- end }}
+{{- end -}}
+
+{{- define "medusa.pagerduty.summary" -}}
+{{- $summary := default "Medusa alert" .CommonAnnotations.summary -}}
+{{- $namespace := default "unknown" .CommonLabels.namespace -}}
+{{- printf "%s (%s)" $summary $namespace -}}
+{{- end -}}

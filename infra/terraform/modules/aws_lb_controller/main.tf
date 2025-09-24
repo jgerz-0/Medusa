@@ -99,6 +99,12 @@ locals {
       "alb.ingress.kubernetes.io/scheme"    = local.load_balancer_scheme,
       "alb.ingress.kubernetes.io/target-type" = local.target_type,
     },
+    var.enable_shield_advanced ? {
+      "alb.ingress.kubernetes.io/shield-advanced-protection" = "true"
+    } : {},
+    var.waf_web_acl_arn != null && trimspace(var.waf_web_acl_arn) != "" ? {
+      "alb.ingress.kubernetes.io/waf-acl-arn" = var.waf_web_acl_arn
+    } : {},
     var.load_balancer_ssl_policy != null && trimspace(var.load_balancer_ssl_policy) != "" ? {
       "alb.ingress.kubernetes.io/ssl-policy" = var.load_balancer_ssl_policy
     } : {},

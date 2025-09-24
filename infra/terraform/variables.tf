@@ -468,6 +468,45 @@ variable "observability_alertmanager_config" {
   default     = null
 }
 
+variable "observability_alertmanager_template_settings" {
+  description = "Inputs for rendering the bundled Alertmanager configuration template. Provide when secrets are sourced via External Secrets."
+  type = object({
+    default_receiver = string
+    pagerduty = optional(object({
+      receiver         = string
+      secret_name      = string
+      secret_key       = string
+      severity_label   = optional(string)
+      class            = optional(string)
+      component        = optional(string)
+      group            = optional(string)
+      summary_template = optional(string)
+    }))
+    slack = optional(object({
+      receiver       = string
+      secret_name    = string
+      secret_key     = string
+      channel        = string
+      username       = optional(string)
+      icon_emoji     = optional(string)
+      send_resolved  = optional(bool)
+      footer         = optional(string)
+      title_template = optional(string)
+      body_template  = optional(string)
+    }))
+    additional_routes = optional(list(object({
+      receiver = string
+      continue = optional(bool)
+      matchers = optional(list(object({
+        name  = string
+        value = string
+        regex = optional(bool)
+      })))
+    })))
+  })
+  default = null
+}
+
 variable "observability_alertmanager_additional_values" {
   description = "Additional map merged into the Alertmanager Helm values."
   type        = map(any)
@@ -627,6 +666,18 @@ variable "aws_lb_controller_set_default_ingress_class" {
 
 variable "aws_lb_controller_certificate_arn" {
   description = "ACM certificate ARN bound to HTTPS listeners created by the controller."
+  type        = string
+  default     = null
+}
+
+variable "aws_lb_controller_enable_shield_advanced" {
+  description = "Enable AWS Shield Advanced protection on controller-managed ALBs."
+  type        = bool
+  default     = false
+}
+
+variable "aws_lb_controller_waf_web_acl_arn" {
+  description = "AWS WAF web ACL ARN associated with controller-managed ALBs."
   type        = string
   default     = null
 }
