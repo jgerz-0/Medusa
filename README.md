@@ -4,7 +4,7 @@ Medusa is an **agentic AI-driven Cyber Reasoning System** that orchestrates reco
 
 ## Core Capabilities
 - **Agentic pipeline** – Recon → Scan → Validate → Enrich → Report with auditable hand-offs.
-- **Multi-scanner coverage** – Nuclei, ZAP, SQLMap, AFL/libFuzzer fuzzing, and checksec/bandit static analyzers running inside isolated containers. (Angr-based symbolic execution remains on the roadmap.)
+- **Multi-scanner coverage** – Nuclei, ZAP, SQLMap, AFL/libFuzzer fuzzing, checksec/bandit static analyzers, and angr symbolic execution harnesses running inside isolated containers.
 - **Deterministic CVE mapping** – NVD/CIRCL lookups with vector-store enrichment that never overrides scanner facts.
 - **Security-first architecture** – Explicit scope enforcement, RBAC, and immutable job logs across all services.
 - **Cloud-native execution** – Containerized workers with optional Kubernetes orchestration for horizontal scale.
@@ -57,8 +57,13 @@ docker compose ps
 
 The compose file mounts `controller/`, `workers/web/nuclei/`, `workers/binary/preprocess/`, `workers/binary/fuzzing/`, and `frontend/` into their respective containers so host edits trigger FastAPI reloads, worker hot-reloads, and Next.js hot module updates. Persistent data lives under `infra/docker/data/`.
 
-### 3. Run migrations and validate the pipeline
+### 3. Prepare object storage, run migrations, and validate the pipeline
 ```bash
+# Provision the MinIO buckets used by binary uploads and symbolic execution artifacts
+docker compose exec minio mc alias set local http://localhost:9000 ${MINIO_ROOT_USER:-medusaadmin} ${MINIO_ROOT_PASSWORD:-medusaadmin123}
+docker compose exec minio mc mb -p local/binary-uploads || true
+docker compose exec minio mc mb -p local/analysis || true
+
 # Apply Alembic migrations against the Postgres container
 docker compose exec controller poetry run alembic upgrade head
 
@@ -66,7 +71,7 @@ docker compose exec controller poetry run alembic upgrade head
 ./infra/docker/smoke-test.sh
 ```
 
-The smoke test seeds demo targets, enqueues a nuclei job, and waits for the worker callback. Set `COMPOSE_BIN=podman compose` if you prefer an alternate runtime.
+The smoke test seeds demo targets, enqueues a nuclei job, and waits for the worker callback. With the buckets in place, you can immediately enqueue binary preprocess, fuzzing, or symbolic execution jobs. Set `COMPOSE_BIN=podman compose` if you prefer an alternate runtime.
 
 ### 4. Develop against the running services
 - Controller API: http://localhost:8000 (OpenAPI at `/docs`)
@@ -80,8 +85,14 @@ Helpful commands:
 # Tail controller logs with audit events
 docker compose logs -f controller
 
+# Inspect symbolic execution retries and callbacks
+docker compose logs -f binary-symbolic-worker
+
 # Inspect queued nuclei jobs
 docker compose exec redis redis-cli llen queues:nuclei:jobs
+
+# Inspect queued symbolic execution jobs
+docker compose exec redis redis-cli llen queues:binary:symbolic-execution
 
 # Tear everything down and wipe volumes
 docker compose down -v

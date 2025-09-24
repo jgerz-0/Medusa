@@ -460,6 +460,44 @@ services:
       - ../../workers/binary/fuzzing:/app/workers/binary/fuzzing:delegated
       # Reuse the host container runtime; tighten permissions in production.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  binary-symbolic-worker:
+    build:
+      context: ../..
+      dockerfile: workers/binary/angr/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-medusa}_binary_symbolic_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${MEDUSA_REDIS_URL:-redis://redis:6379/0}
+      BINARY_SYMBOLIC_EXECUTION_QUEUE_KEY: ${BINARY_SYMBOLIC_EXECUTION_QUEUE_KEY:-queues:binary:symbolic-execution}
+      BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY: ${BINARY_SYMBOLIC_EXECUTION_DEAD_LETTER_KEY:-queues:binary:symbolic-execution:dead}
+      BINARY_SYMBOLIC_EXECUTION_BUCKET: ${BINARY_SYMBOLIC_EXECUTION_BUCKET:-}
+      BINARY_SYMBOLIC_EXECUTION_PREFIX: ${BINARY_SYMBOLIC_EXECUTION_PREFIX:-analysis/symbolic/}
+      BINARY_SYMBOLIC_EXECUTION_POLL_TIMEOUT: ${BINARY_SYMBOLIC_EXECUTION_POLL_TIMEOUT:-5}
+      BINARY_SYMBOLIC_EXECUTION_MAX_ATTEMPTS: ${BINARY_SYMBOLIC_EXECUTION_MAX_ATTEMPTS:-3}
+      BINARY_SYMBOLIC_EXECUTION_RUNTIME: ${BINARY_SYMBOLIC_EXECUTION_RUNTIME:-docker}
+      BINARY_SYMBOLIC_EXECUTION_RUNTIME_FLAGS: ${BINARY_SYMBOLIC_EXECUTION_RUNTIME_FLAGS:-}
+      BINARY_SYMBOLIC_EXECUTION_IMAGE: ${BINARY_SYMBOLIC_EXECUTION_IMAGE:-docker.io/medusa/angr:latest}
+      BINARY_SYMBOLIC_EXECUTION_COMMAND: ${BINARY_SYMBOLIC_EXECUTION_COMMAND:-/opt/medusa/run_angr}
+      BINARY_SYMBOLIC_EXECUTION_TIMEOUT: ${BINARY_SYMBOLIC_EXECUTION_TIMEOUT:-300}
+      BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN: ${BINARY_SYMBOLIC_EXECUTION_CALLBACK_TOKEN:-local-dev-binary-symbolic-callback}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-medusaadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-medusaadmin123}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+    depends_on:
+      redis:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ../../workers/binary/angr:/app/workers/binary/angr:delegated
+      - ../../workers/binary/static_analysis:/app/workers/binary/static_analysis:delegated
+      - /var/run/docker.sock:/var/run/docker.sock:ro
   cve-enrichment-worker:
     build:
       context: ../..
