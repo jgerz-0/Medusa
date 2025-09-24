@@ -115,20 +115,80 @@ must verify these guardrails locally when touching the relevant assets:
   ```
 - **Signature and provenance generation** – Build the controller and frontend container images,
   package the Helm chart, and sign each artifact with [cosign](https://docs.sigstore.dev/cosign/overview/).
-  Produce an in-toto provenance statement per artifact and store the signatures with the chart
-  or image tarball. Example commands mirror the CI job:
-  ```bash
-  docker build -t medusa-controller:dev -f infra/docker/controller.Dockerfile .
-  docker save medusa-controller:dev -o controller.tar
-  cosign sign-blob --output-signature controller.sig --output-certificate controller.crt controller.tar
+  The CI job expects the following GitHub Actions secrets to be populated with base64-encoded
+  material: `COSIGN_PRIVATE_KEY`, `COSIGN_PUBLIC_KEY`, `COSIGN_PASSWORD`, `CONTAINER_REGISTRY`,
+  `CONTAINER_REGISTRY_ORG`, `CONTAINER_REGISTRY_USERNAME`, and `CONTAINER_REGISTRY_PASSWORD`.
+  Mirror the pipeline locally before publishing images:
 
-  helm dependency update infra/helm/medusa
-  helm package infra/helm/medusa --destination ./dist
-  cosign sign-blob --output-signature ./dist/medusa.sig --output-certificate ./dist/medusa.crt ./dist/medusa-*.tgz
-  ```
+  1. Generate a Sigstore key pair once per environment, base64-encode the key files, and store
+     them in your secret manager in addition to the GitHub Actions secrets:
 
-Uploading unsigned container images or charts, or bypassing provenance generation, will cause
-CI to fail. Keep the signatures in your release artifacts or attach them to the PR for review.
+     ```bash
+     cosign generate-key-pair
+     base64 -w0 cosign.key > cosign.key.b64
+     base64 -w0 cosign.pub > cosign.pub.b64
+     ```
+
+  2. Build and push the controller and frontend images with Docker Buildx. Tag images with the
+     commit SHA to keep references immutable:
+
+     ```bash
+     export REGISTRY="ghcr.io"
+     export REGISTRY_ORG="medusa"
+     export IMAGE_TAG="${GIT_SHA:-$(git rev-parse HEAD)}"
+
+     docker buildx build --push \
+       --file infra/docker/controller.Dockerfile \
+       --tag "${REGISTRY}/${REGISTRY_ORG}/medusa-controller:${IMAGE_TAG}" .
+
+     docker buildx build --push \
+       --file infra/docker/frontend.Dockerfile \
+       --tag "${REGISTRY}/${REGISTRY_ORG}/medusa-frontend:${IMAGE_TAG}" .
+     ```
+
+  3. Derive immutable references, sign them, and publish SLSA attestations. The example below
+     assumes your cosign key pair is stored in `cosign.key`/`cosign.pub` and the password is set
+     in `COSIGN_PASSWORD`:
+
+     ```bash
+     controller_ref="$(cosign triangulate "${REGISTRY}/${REGISTRY_ORG}/medusa-controller:${IMAGE_TAG}")"
+     frontend_ref="$(cosign triangulate "${REGISTRY}/${REGISTRY_ORG}/medusa-frontend:${IMAGE_TAG}")"
+
+     cosign sign --yes --key cosign.key "${controller_ref}"
+     cosign sign --yes --key cosign.key "${frontend_ref}"
+
+     cosign attest --yes --key cosign.key --type slsaprovenance \
+       --predicate controller-slsa.json "${controller_ref}"
+     cosign attest --yes --key cosign.key --type slsaprovenance \
+       --predicate frontend-slsa.json "${frontend_ref}"
+     ```
+
+  4. Verify signatures and attestations prior to promotion and provide the digest references to
+     Terraform via `medusa_image_signature_enforcements`:
+
+     ```bash
+     cosign verify --key cosign.pub "${controller_ref}"
+     cosign verify --key cosign.pub "${frontend_ref}"
+
+     cosign verify-attestation --type slsaprovenance --key cosign.pub "${controller_ref}"
+     cosign verify-attestation --type slsaprovenance --key cosign.pub "${frontend_ref}"
+     ```
+
+     ```hcl
+     medusa_image_signature_enforcements = {
+       controller = {
+         image                       = controller_ref
+         public_key_base64           = filebase64("cosign.pub")
+         certificate_identity        = "https://github.com/medusa-org/medusa/.github/workflows/ci.yml@refs/heads/main"
+         certificate_oidc_issuer     = "https://token.actions.githubusercontent.com"
+         attestation_predicate_types = ["slsaprovenance"]
+       }
+     }
+     ```
+
+Uploading unsigned container images or charts, skipping attestation generation, or omitting the
+Terraform enforcement map will cause CI or `terraform apply` to fail. Maintain the provenance
+artifacts alongside release notes so reviewers can audit the full chain of custody.
 
 ## Commit hygiene
 

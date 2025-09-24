@@ -233,6 +233,10 @@ jobs:
       packages: write
     env:
       COSIGN_EXPERIMENTAL: "1"
+      REGISTRY: ${{ secrets.CONTAINER_REGISTRY != '' && secrets.CONTAINER_REGISTRY || 'ghcr.io' }}
+      REGISTRY_ORG: ${{ secrets.CONTAINER_REGISTRY_ORG != '' && secrets.CONTAINER_REGISTRY_ORG || github.repository_owner }}
+      REGISTRY_USERNAME: ${{ secrets.CONTAINER_REGISTRY_USERNAME != '' && secrets.CONTAINER_REGISTRY_USERNAME || github.actor }}
+      REGISTRY_PASSWORD: ${{ secrets.CONTAINER_REGISTRY_PASSWORD != '' && secrets.CONTAINER_REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -242,19 +246,69 @@ jobs:
         with:
           version: v3.14.4
 
+      - name: Configure image coordinates
+        run: |
+          echo "CONTROLLER_IMAGE=${REGISTRY}/${REGISTRY_ORG}/medusa-controller:${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "FRONTEND_IMAGE=${REGISTRY}/${REGISTRY_ORG}/medusa-frontend:${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.4.0
 
-      - name: Build controller container image
+      - name: Prepare cosign key material
+        run: |
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" | base64 --decode > cosign.key
+          chmod 600 cosign.key
+          echo "${{ secrets.COSIGN_PUBLIC_KEY }}" | base64 --decode > cosign.pub
+          {
+            echo "COSIGN_KEY_PATH=${PWD}/cosign.key"
+            echo "COSIGN_PUB_PATH=${PWD}/cosign.pub"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and push controller container image
+        id: build_controller
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/docker/controller.Dockerfile
+          push: true
+          tags: ${{ env.CONTROLLER_IMAGE }}
+
+      - name: Build and push frontend container image
+        id: build_frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/docker/frontend.Dockerfile
+          push: true
+          tags: ${{ env.FRONTEND_IMAGE }}
+
+      - name: Record immutable image references
         run: |
           mkdir -p artifacts/container
-          docker build -t medusa-controller:${{ github.sha }} -f infra/docker/controller.Dockerfile .
-          docker save medusa-controller:${{ github.sha }} -o artifacts/container/controller.tar
+          echo "CONTROLLER_IMAGE_DIGEST=${REGISTRY}/${REGISTRY_ORG}/medusa-controller@${{ steps.build_controller.outputs.digest }}" >> "$GITHUB_ENV"
+          echo "FRONTEND_IMAGE_DIGEST=${REGISTRY}/${REGISTRY_ORG}/medusa-frontend@${{ steps.build_frontend.outputs.digest }}" >> "$GITHUB_ENV"
+          echo "${REGISTRY}/${REGISTRY_ORG}/medusa-controller@${{ steps.build_controller.outputs.digest }}" > artifacts/container/controller-image.txt
+          echo "${REGISTRY}/${REGISTRY_ORG}/medusa-frontend@${{ steps.build_frontend.outputs.digest }}" > artifacts/container/frontend-image.txt
 
-      - name: Build frontend container image
+      - name: Sign container images with cosign
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          docker build -t medusa-frontend:${{ github.sha }} -f infra/docker/frontend.Dockerfile .
-          docker save medusa-frontend:${{ github.sha }} -o artifacts/container/frontend.tar
+          for image in "${CONTROLLER_IMAGE_DIGEST}" "${FRONTEND_IMAGE_DIGEST}"; do
+            cosign sign --yes \
+              --key "${COSIGN_KEY_PATH}" \
+              "$image"
+          done
 
       - name: Package Helm chart
         run: |
@@ -262,33 +316,84 @@ jobs:
           helm dependency update infra/helm/medusa
           helm package infra/helm/medusa --destination artifacts/helm
 
-      - name: Sign supply-chain artifacts
+      - name: Sign Helm chart package
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           mkdir -p artifacts/signatures
-          for artifact in artifacts/container/*.tar artifacts/helm/*.tgz; do
+          for artifact in artifacts/helm/*.tgz; do
             name=$(basename "$artifact")
             cosign sign-blob --yes \
+              --key "${COSIGN_KEY_PATH}" \
               --output-signature artifacts/signatures/${name}.sig \
               --output-certificate artifacts/signatures/${name}.crt \
               --bundle artifacts/signatures/${name}.sigstore.json \
               "$artifact"
           done
 
-      - name: Generate provenance statements
+      - name: Generate and publish SLSA attestations
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          mkdir -p artifacts/provenance
+          mkdir -p artifacts/attestations
           timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          for artifact in artifacts/container/*.tar artifacts/helm/*.tgz; do
-            name=$(basename "$artifact")
-            sha=$(sha256sum "$artifact" | cut -d ' ' -f1)
-            cat <<EOF > artifacts/provenance/${name}.intoto.jsonl
-{"_type":"https://in-toto.io/Statement/v0.1","subject":[{"name":"$name","digest":{"sha256":"$sha"}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildType":"https://github.com/${{ github.repository }}/.github/workflows/ci.yml","buildConfig":{"builder":"github-actions","artifact":"$name"},"metadata":{"invocationId":"${{ github.run_id }}","buildStartedOn":"$timestamp","buildFinishedOn":"$timestamp"}}}
+          for component in controller frontend; do
+            case "$component" in
+              controller)
+                image="${CONTROLLER_IMAGE_DIGEST}"
+                ;;
+              frontend)
+                image="${FRONTEND_IMAGE_DIGEST}"
+                ;;
+            esac
+
+            digest_ref="${image#*@}"
+            digest_value="${digest_ref#sha256:}"
+            predicate="artifacts/attestations/${component}-slsa.json"
+
+            cat <<EOF > "$predicate"
+{
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "subject": [
+    {
+      "name": "${component}",
+      "digest": {
+        "sha256": "${digest_value}"
+      }
+    }
+  ],
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml",
+      "externalParameters": {
+        "component": "${component}",
+        "source": "${GITHUB_REPOSITORY}@${GITHUB_SHA}"
+      },
+      "internalParameters": {
+        "image": "${image}"
+      },
+      "resolvedDependencies": []
+    },
+    "runDetails": {
+      "builder": {
+        "id": "https://github.com/actions"
+      },
+      "metadata": {
+        "invocationId": "${GITHUB_RUN_ID}",
+        "startedOn": "${timestamp}",
+        "finishedOn": "${timestamp}"
+      }
+    }
+  }
+}
 EOF
-            cosign sign-blob --yes \
-              --output-signature artifacts/signatures/${name}.intoto.sig \
-              --output-certificate artifacts/signatures/${name}.intoto.crt \
-              --bundle artifacts/signatures/${name}.intoto.sigstore.json \
-              artifacts/provenance/${name}.intoto.jsonl
+
+            cosign attest --yes \
+              --key "${COSIGN_KEY_PATH}" \
+              --type slsaprovenance \
+              --predicate "$predicate" \
+              "$image"
           done
 
       - name: Upload supply-chain artifacts

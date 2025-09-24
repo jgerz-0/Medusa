@@ -201,6 +201,18 @@ variable "common_labels" {
   default     = {}
 }
 
+variable "image_signature_enforcements" {
+  description = "Cosign verification policies executed before applying the Helm release."
+  type = map(object({
+    image                       = string
+    public_key_base64           = string
+    certificate_identity        = optional(string)
+    certificate_oidc_issuer     = optional(string)
+    attestation_predicate_types = optional(list(string))
+  }))
+  default = {}
+}
+
 variable "namespace_pod_security_standards" {
   description = "Pod Security Standards levels enforced on the Medusa namespace via labels."
   type = object({

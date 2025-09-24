@@ -26,6 +26,8 @@ configuration deterministic and auditable.
     in Git while still driving Helm values for dependent workloads.
 - Wires Helm values with RDS connection strings, S3 bucket names, and callback
   tokens generated elsewhere in Terraform.
+- Enforces cosign signature and provenance verification before Helm upgrades
+  when `image_signature_enforcements` is populated.
 
 ## Usage
 
@@ -72,6 +74,16 @@ module "medusa" {
     binary_fuzzing = random_password.medusa_callback["binary_fuzzing"].result
     zap           = random_password.medusa_callback["zap"].result
     validator     = random_password.medusa_callback["validator"].result
+  }
+
+  image_signature_enforcements = {
+    controller = {
+      image               = "ghcr.io/medusa/controller@sha256:<digest>"
+      public_key_base64   = var.medusa_cosign_public_key_b64
+      certificate_identity = "https://github.com/medusa-org/medusa/.github/workflows/ci.yml@refs/heads/main"
+      certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
+      attestation_predicate_types = ["slsaprovenance"]
+    }
   }
 
   controller_ingress_security = {
@@ -127,4 +139,30 @@ to render the `SealedSecret` manifest directly via the Kubernetes provider.
   using the `externalSecret` strategy.
 - Install the Bitnami Sealed Secrets controller before enabling the
   `sealedSecret` strategy so the rendered manifest can be decrypted at runtime.
+
+### Signature enforcement configuration
+
+Populate `image_signature_enforcements` to require cosign verification prior to
+Helm changes. Each map entry describes the immutable image reference, the
+base64-encoded cosign public key, and optional certificate identity/issuer
+constraints. When `attestation_predicate_types` contains values (for example
+`["slsaprovenance"]`), the module also runs `cosign verify-attestation` to
+ensure provenance documents exist before the Helm release proceeds.
+
+```hcl
+image_signature_enforcements = {
+  controller = {
+    image                       = "ghcr.io/medusa/controller@sha256:..."
+    public_key_base64           = var.medusa_cosign_public_key_b64
+    certificate_identity        = "https://github.com/medusa-org/medusa/.github/workflows/ci.yml@refs/heads/main"
+    certificate_oidc_issuer     = "https://token.actions.githubusercontent.com"
+    attestation_predicate_types = ["slsaprovenance"]
+  }
+}
+```
+
+Terraform executes the verification script locally. Ensure the environment
+running `terraform apply` has the `cosign` CLI available and access to public
+internet endpoints required to fetch signatures and attestations from the
+container registry.
 

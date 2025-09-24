@@ -831,6 +831,18 @@ variable "medusa_extra_values" {
   default     = []
 }
 
+variable "medusa_image_signature_enforcements" {
+  description = "Cosign verification policies enforced before applying the Medusa Helm release."
+  type = map(object({
+    image                       = string
+    public_key_base64           = string
+    certificate_identity        = optional(string)
+    certificate_oidc_issuer     = optional(string)
+    attestation_predicate_types = optional(list(string))
+  }))
+  default = {}
+}
+
 variable "medusa_controller_ingress_enabled" {
   description = "Enable the Medusa controller Ingress resource and pass ALB annotations."
   type        = bool

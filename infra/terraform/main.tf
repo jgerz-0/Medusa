@@ -512,6 +512,7 @@ module "medusa" {
     module.irsa.helm_values,
     local.medusa_controller_ingress_values,
   )
+  image_signature_enforcements = var.medusa_image_signature_enforcements
   common_labels = merge(
     {
       "app.kubernetes.io/managed-by" = "terraform"
