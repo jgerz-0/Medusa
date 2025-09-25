@@ -1632,6 +1632,7 @@ class ScanResponse(BaseModel):
 
 class ScanCollectionResponse(BaseModel):
     data: List[ScanResponse]
+    meta: PaginationMetadata
 
 
 class AuditLogResponse(BaseModel):
@@ -5514,6 +5515,8 @@ app.add_api_route(
 @app.get("/scans", response_model=ScanCollectionResponse)
 def list_scans(
     target_id: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> ScanCollectionResponse:
@@ -5532,7 +5535,20 @@ def list_scans(
     if target_id is not None:
         query = query.filter(Scan.target_id == target_id)
 
-    scans = query.order_by(Scan.created_at.desc()).all()
+    total = query.count()
+    scans = (
+        query.order_by(Scan.created_at.desc()).offset(offset).limit(limit).all()
+    )
+
+    serialized_scans = [serialize_scan(scan) for scan in scans]
+
+    metadata: Dict[str, Any] = {
+        "limit": limit,
+        "offset": offset,
+        "returned": len(serialized_scans),
+    }
+    if target_id is not None:
+        metadata["target_id"] = target_id
 
     record_audit_event(
         db,
@@ -5540,9 +5556,12 @@ def list_scans(
         action="list_scans",
         resource_type="scan",
         resource_id=None,
-        metadata={"target_id": target_id, "count": len(scans)},
+        metadata=metadata,
     )
-    return ScanCollectionResponse(data=[serialize_scan(scan) for scan in scans])
+    return ScanCollectionResponse(
+        data=serialized_scans,
+        meta=PaginationMetadata(total=total, limit=limit, offset=offset),
+    )
 
 
 @app.get("/anomalies", response_model=AnomalyCollectionResponse)
