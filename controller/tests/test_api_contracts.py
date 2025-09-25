@@ -2101,6 +2101,68 @@ def test_scans_listing_enforces_role_requirements(
         "/scans", headers={"Authorization": f"Bearer {analyst_token}"}
     )
     assert analyst_response.status_code == 200
+    analyst_payload = analyst_response.json()
+    assert analyst_payload["meta"] == {"total": 1, "limit": 50, "offset": 0}
+    assert isinstance(analyst_payload["data"], list)
+
+
+def test_scans_listing_applies_limit_offset_and_returns_metadata(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, settings = api_client
+
+    now = datetime.now(tz=timezone.utc)
+
+    with session_factory() as session:
+        target = Target(name="Paginated Target", scope="paginate.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        for index in range(5):
+            created_at = now - timedelta(minutes=index)
+            session.add(
+                Scan(
+                    target_id=target.id,
+                    scanner="nuclei",
+                    parameters={"profile": "baseline"},
+                    initiated_by="controller",
+                    status="completed",
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+
+        session.commit()
+
+    response = client.post(
+        "/principals",
+        json={
+            "subject": "pager@example.com",
+            "auth_method": "jwt",
+            "roles": ["analyst"],
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 201
+
+    token = jwt.encode({"sub": "pager@example.com"}, settings.jwt_secret, algorithm="HS256")
+
+    paged_response = client.get(
+        "/scans",
+        params={"limit": 2, "offset": 1},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert paged_response.status_code == 200
+
+    payload = paged_response.json()
+    assert payload["meta"] == {"total": 5, "limit": 2, "offset": 1}
+    assert len(payload["data"]) == 2
+
+    # Scans are returned in descending creation order, so the second most recent scan
+    # should be first when applying an offset of one.
+    first_scan_created = datetime.fromisoformat(payload["data"][0]["created_at"])
+    second_scan_created = datetime.fromisoformat(payload["data"][1]["created_at"])
+    assert first_scan_created >= second_scan_created
 
 
 def test_audit_log_listing_filters_and_audits(
