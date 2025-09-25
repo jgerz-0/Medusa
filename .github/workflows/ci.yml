@@ -129,6 +129,52 @@ jobs:
           conftest test infra/terraform --policy infra/policy
           conftest test infra/docker --policy infra/policy
           conftest test infra/helm/medusa --policy infra/policy --input helm
+
+  chaos:
+    name: Docker chaos validation
+    runs-on: ubuntu-latest
+    needs:
+      - terraform
+      - security-scans
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare chaos environment
+        working-directory: infra/docker
+        run: cp .env.example .env
+
+      - name: Start Medusa stack for chaos probe
+        working-directory: infra/docker
+        run: docker compose up -d postgres redis minio qdrant controller
+
+      - name: Wait for controller readiness
+        working-directory: infra/docker
+        run: |
+          set -e
+          for attempt in {1..40}; do
+            if curl -sf http://localhost:8000/docs >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "controller health endpoint never became ready" >&2
+          docker compose logs controller
+          exit 1
+
+      - name: Run chaos validation script
+        working-directory: infra/docker
+        run: ./chaos-test.sh
+
+      - name: Dump service logs on failure
+        if: failure()
+        working-directory: infra/docker
+        run: docker compose logs controller redis minio
+
+      - name: Tear down Medusa stack
+        if: always()
+        working-directory: infra/docker
+        run: docker compose down -v
   lint-test:
     name: Lint and Test
     runs-on: ubuntu-latest
