@@ -152,7 +152,9 @@ export interface FindingTimelineEvent {
 export interface FindingsTimelineBucket {
   date: string;
   open: number;
+  pending_validation: number;
   acknowledged: number;
+  invalidated: number;
   resolved: number;
   total: number;
 }
