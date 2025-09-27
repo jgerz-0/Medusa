@@ -1,5 +1,14 @@
 export type ScanStatus = 'queued' | 'running' | 'completed' | 'failed';
-export type FindingStatus = 'open' | 'acknowledged' | 'resolved';
+
+export const FINDING_STATUSES = [
+  'open',
+  'pending_validation',
+  'acknowledged',
+  'invalidated',
+  'resolved',
+] as const;
+
+export type FindingStatus = (typeof FINDING_STATUSES)[number];
 export type SeverityLevel = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
 export interface Target {
