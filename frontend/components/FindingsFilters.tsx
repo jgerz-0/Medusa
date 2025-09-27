@@ -1,7 +1,9 @@
 import Link from 'next/link';
 
+import { FINDING_STATUSES } from '@/lib/types';
+
 const severityOptions = ['critical', 'high', 'medium', 'low', 'info'];
-const statusOptions = ['open', 'acknowledged', 'resolved'];
+const statusOptions = FINDING_STATUSES;
 // Controller scope enforcement yields these discrete values; avoid sending arbitrary strings.
 const scopeOptions = ['unknown', 'in_scope', 'out_of_scope', 'mixed'];
 
@@ -61,7 +63,10 @@ export function FindingsFilters({ searchParams }: FindingsFiltersProps) {
               <option value="">Any</option>
               {statusOptions.map((option) => (
                 <option key={option} value={option}>
-                  {option}
+                  {option
+                    .split('_')
+                    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+                    .join(' ')}
                 </option>
               ))}
             </select>

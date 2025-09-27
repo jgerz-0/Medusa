@@ -2,6 +2,7 @@ import type { AnchorHTMLAttributes, ReactNode } from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { FindingsFilters } from '@/components/FindingsFilters';
+import { FINDING_STATUSES } from '@/lib/types';
 
 jest.mock('next/link', () => ({
   __esModule: true,
@@ -18,6 +19,30 @@ jest.mock('next/link', () => ({
 }));
 
 describe('FindingsFilters scope control', () => {
+  it('renders every supported finding status option with normalized labels', () => {
+    render(<FindingsFilters />);
+
+    const statusSelect = screen.getByLabelText(/^status$/i) as HTMLSelectElement;
+
+    const optionEntries = Array.from(statusSelect.options).map((option) => ({
+      value: option.value,
+      label: option.text,
+    }));
+
+    const expected = [
+      { value: '', label: 'Any' },
+      ...FINDING_STATUSES.map((status) => ({
+        value: status,
+        label: status
+          .split('_')
+          .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+          .join(' '),
+      })),
+    ];
+
+    expect(optionEntries).toEqual(expected);
+  });
+
   it('submits the selected scope option as a query parameter', async () => {
     expect.assertions(3);
 
