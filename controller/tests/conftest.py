@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Generator, Tuple
+from typing import Generator, Optional, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,8 +27,13 @@ from controller.storage import ReportStorage, ReportStorageReference
 class InMemoryQueue(QueueClient):
     def __init__(self) -> None:
         self.messages: list[Tuple[str, dict]] = []
+        self.raise_next: Optional[Exception] = None
 
     def enqueue(self, channel: str, payload: dict) -> int:  # type: ignore[override]
+        if self.raise_next is not None:
+            exc = self.raise_next
+            self.raise_next = None
+            raise exc
         self.messages.append((channel, payload))
         return len(self.messages)
 
@@ -75,6 +80,7 @@ def api_client() -> (
         zap_queue_channel="zap:test",
         sqlmap_queue_channel="sqlmap:test",
         validator_queue_channel="validator:test",
+        ticket_dispatch_queue_channel="tickets:dispatch",
         jwt_secret="unit-test-secret",
         nuclei_callback_token="callback-secret",
         zap_callback_token="zap-callback",
