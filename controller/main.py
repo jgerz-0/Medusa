@@ -2016,6 +2016,7 @@ class FindingResponse(BaseModel):
 
 class FindingCollectionResponse(BaseModel):
     data: List[FindingResponse]
+    meta: PaginationMetadata
 
 
 class FindingItemResponse(BaseModel):
@@ -7437,6 +7438,8 @@ def list_findings(
     ),
     since: Optional[datetime] = Query(None, alias="from"),
     until: Optional[datetime] = Query(None, alias="to"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> FindingCollectionResponse:
@@ -7487,12 +7490,16 @@ def list_findings(
         scope_status=scope,
     )
 
-    web_count = sum(1 for record in filtered if record.category == "web")
-    static_count = sum(1 for record in filtered if record.category == "binary_static")
+    total_records = len(filtered)
+    window = filtered[offset : offset + limit]
+
+    # Track category totals for the returned window to monitor data disclosure.
+    web_count = sum(1 for record in window if record.category == "web")
+    static_count = sum(1 for record in window if record.category == "binary_static")
     symbolic_count = sum(
-        1 for record in filtered if record.category == "binary_symbolic"
+        1 for record in window if record.category == "binary_symbolic"
     )
-    fuzzing_count = sum(1 for record in filtered if record.category == "binary_fuzzing")
+    fuzzing_count = sum(1 for record in window if record.category == "binary_fuzzing")
 
     record_audit_event(
         db,
@@ -7503,7 +7510,10 @@ def list_findings(
         scan_id=scan_id,
         metadata={
             "target_id": target_id,
-            "count": len(filtered),
+            "limit": limit,
+            "offset": offset,
+            "returned": len(window),
+            "total_available": total_records,
             "web_count": web_count,
             "binary_static_count": static_count,
             "binary_symbolic_count": symbolic_count,
@@ -7512,7 +7522,10 @@ def list_findings(
         },
     )
 
-    return FindingCollectionResponse(data=filtered)
+    return FindingCollectionResponse(
+        data=window,
+        meta=PaginationMetadata(total=total_records, limit=limit, offset=offset),
+    )
 
 
 @app.get("/findings/timeline", response_model=FindingTimelineCollectionResponse)
@@ -7616,6 +7629,8 @@ def list_findings_by_scope(
     assigned_to: Optional[str] = Query(None, description="Filter by assignee"),
     since: Optional[datetime] = Query(None, alias="from"),
     until: Optional[datetime] = Query(None, alias="to"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
 ) -> FindingCollectionResponse:
@@ -7629,6 +7644,8 @@ def list_findings_by_scope(
         scope=scope,
         since=since,
         until=until,
+        limit=limit,
+        offset=offset,
         principal=principal,
         db=db,
     )
