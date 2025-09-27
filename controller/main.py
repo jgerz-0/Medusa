@@ -2152,6 +2152,22 @@ class GitHubTicketRequest(BaseModel):
     title: str = Field(..., min_length=5, max_length=255)
     body: Optional[str] = None
 
+    @field_validator("repository")
+    @classmethod
+    def validate_repository(cls, value: str) -> str:
+        """Enforce canonical owner/repository slug formatting."""
+
+        candidate = value.strip()
+        segments = candidate.split("/")
+        if len(segments) != 2 or not all(segments):
+            raise ValueError("Repository must be in 'owner/repository' format")
+        owner, repo = segments
+        allowed = set("abcdefghijklmnopqrstuvwxyz0123456789-_.")
+        normalized = f"{owner.lower()}/{repo.lower()}"
+        if any(ch not in allowed for ch in normalized.replace("/", "")):
+            raise ValueError("Repository slug contains unsupported characters")
+        return normalized
+
 
 class TicketResponse(BaseModel):
     id: str
@@ -8438,6 +8454,8 @@ def create_github_ticket(
     request: GitHubTicketRequest,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
 ) -> TicketResponse:
     enforce_roles(
         principal,
@@ -8461,10 +8479,11 @@ def create_github_ticket(
             detail="Target scope is not authorized for ticketing",
         )
 
-    repo_slug = request.repository.strip().replace("/", "-")
+    repository = request.repository
+    repo_slug = repository.replace("/", "-")
     reference = _generate_ticket_reference(f"GH-{repo_slug}", finding.id, request.title)
     payload = {
-        "repository": request.repository,
+        "repository": repository,
         "title": request.title,
         "body": request.body or finding.description,
         "severity": finding.severity,
@@ -8487,6 +8506,27 @@ def create_github_ticket(
     db.commit()
     db.refresh(ticket)
 
+    job_payload = {"ticket_id": ticket.id, "integration": "github"}
+    try:
+        queue_depth = queue.enqueue(
+            settings.ticket_dispatch_queue_channel,
+            job_payload,
+        )
+    except Exception as exc:
+        LOGGER.exception(
+            "Failed to enqueue GitHub ticket for dispatch",
+            extra={"ticket_id": ticket.id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to enqueue GitHub ticket for dispatch",
+        ) from exc
+
+    metrics.record_job_enqueued(
+        "ticket_dispatch",
+        queue_depth=queue_depth if queue_depth >= 0 else None,
+    )
+
     record_audit_event(
         db,
         actor=principal,
@@ -8494,7 +8534,11 @@ def create_github_ticket(
         resource_type="finding",
         resource_id=finding.id,
         finding_id=finding.id,
-        metadata={"reference": reference, "repository": request.repository},
+        metadata={
+            "reference": reference,
+            "repository": repository,
+            "queue_channel": settings.ticket_dispatch_queue_channel,
+        },
     )
 
     return TicketResponse(
