@@ -133,6 +133,16 @@ ALLOWED_ROLES = {
 FINDING_STATUS_PENDING_VALIDATION = "pending_validation"
 FINDING_STATUS_OPEN = "open"
 FINDING_STATUS_INVALIDATED = "invalidated"
+FINDING_STATUS_ACKNOWLEDGED = "acknowledged"
+FINDING_STATUS_RESOLVED = "resolved"
+
+FINDING_TIMELINE_STATUSES: Tuple[str, ...] = (
+    FINDING_STATUS_PENDING_VALIDATION,
+    FINDING_STATUS_OPEN,
+    FINDING_STATUS_INVALIDATED,
+    FINDING_STATUS_ACKNOWLEDGED,
+    FINDING_STATUS_RESOLVED,
+)
 
 VALIDATION_STATUS_PENDING = "pending"
 VALIDATION_STATUS_PASSED = "passed"
@@ -1986,8 +1996,8 @@ class FindingResponse(BaseModel):
         FINDING_STATUS_PENDING_VALIDATION,
         FINDING_STATUS_OPEN,
         FINDING_STATUS_INVALIDATED,
-        "acknowledged",
-        "resolved",
+        FINDING_STATUS_ACKNOWLEDGED,
+        FINDING_STATUS_RESOLVED,
     ]
     template_id: str
     evidence: Optional[str]
@@ -2041,10 +2051,12 @@ class FindingTimelineResponse(BaseModel):
 
 class FindingTimelineBucket(BaseModel):
     date: datetime
-    open: int
-    acknowledged: int
-    resolved: int
-    total: int
+    pending_validation: int = 0
+    open: int = 0
+    invalidated: int = 0
+    acknowledged: int = 0
+    resolved: int = 0
+    total: int = 0
 
 
 class FindingTimelineCollectionResponse(BaseModel):
@@ -2056,7 +2068,11 @@ class FindingAssignmentRequest(BaseModel):
 
 
 class FindingStatusUpdateRequest(BaseModel):
-    status: Literal["open", "acknowledged", "resolved"]
+    status: Literal[
+        FINDING_STATUS_OPEN,
+        FINDING_STATUS_ACKNOWLEDGED,
+        FINDING_STATUS_RESOLVED,
+    ]
 
 
 class FindingTagsUpdateRequest(BaseModel):
@@ -7263,24 +7279,28 @@ def _build_timeline_buckets(
     for record in responses:
         detected = record.detected_at.astimezone(timezone.utc)
         key = detected.date()
-        bucket = timeline.setdefault(key, {"open": 0, "acknowledged": 0, "resolved": 0})
-        bucket[record.status] = bucket.get(record.status, 0) + 1
+        bucket = timeline.setdefault(
+            key, {status: 0 for status in FINDING_TIMELINE_STATUSES}
+        )
+        if record.status not in bucket:
+            bucket[record.status] = 0
+        bucket[record.status] += 1
 
     ordered: List[FindingTimelineBucket] = []
     for day in sorted(timeline.keys()):
         counts = timeline[day]
         timestamp = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
-        total = (
-            counts.get("open", 0)
-            + counts.get("acknowledged", 0)
-            + counts.get("resolved", 0)
-        )
+        total = sum(counts.get(status, 0) for status in FINDING_TIMELINE_STATUSES)
         ordered.append(
             FindingTimelineBucket(
                 date=timestamp,
-                open=counts.get("open", 0),
-                acknowledged=counts.get("acknowledged", 0),
-                resolved=counts.get("resolved", 0),
+                pending_validation=counts.get(
+                    FINDING_STATUS_PENDING_VALIDATION, 0
+                ),
+                open=counts.get(FINDING_STATUS_OPEN, 0),
+                invalidated=counts.get(FINDING_STATUS_INVALIDATED, 0),
+                acknowledged=counts.get(FINDING_STATUS_ACKNOWLEDGED, 0),
+                resolved=counts.get(FINDING_STATUS_RESOLVED, 0),
                 total=total,
             )
         )
