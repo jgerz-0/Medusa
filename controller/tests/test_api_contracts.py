@@ -89,6 +89,7 @@ def api_client() -> (
         zap_queue_channel="zap:test",
         sqlmap_queue_channel="sqlmap:test",
         validator_queue_channel="validator:test",
+        ticket_dispatch_queue_channel="tickets:dispatch",
         jwt_secret="unit-test-secret",
         nuclei_callback_token="callback-secret",
         zap_callback_token="zap-callback",

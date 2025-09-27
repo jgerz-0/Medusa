@@ -633,6 +633,10 @@ class Settings(BaseSettings):
         "queues:recon:jobs",
         description="Redis list channel for authorized recon pull jobs.",
     )
+    ticket_dispatch_queue_channel: str = Field(
+        "queues:tickets:dispatch",
+        description="Redis list channel for ticket dispatcher jobs.",
+    )
     jwt_secret: str = Field(
         ..., description="JWT secret used to validate bearer tokens."
     )
@@ -8323,6 +8327,8 @@ def create_jira_ticket(
     request: JiraTicketRequest,
     principal: Principal = Depends(authenticate),
     db: Session = Depends(get_db_session),
+    queue: QueueClient = Depends(get_queue_client),
+    settings: Settings = Depends(get_settings),
 ) -> TicketResponse:
     enforce_roles(
         principal,
@@ -8374,6 +8380,27 @@ def create_jira_ticket(
     db.commit()
     db.refresh(ticket)
 
+    job_payload = {"ticket_id": ticket.id, "integration": "jira"}
+    try:
+        queue_depth = queue.enqueue(
+            settings.ticket_dispatch_queue_channel,
+            job_payload,
+        )
+    except Exception as exc:
+        LOGGER.exception(
+            "Failed to enqueue Jira ticket for dispatch",
+            extra={"ticket_id": ticket.id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to enqueue Jira ticket for dispatch",
+        ) from exc
+
+    metrics.record_job_enqueued(
+        "ticket_dispatch",
+        queue_depth=queue_depth if queue_depth >= 0 else None,
+    )
+
     record_audit_event(
         db,
         actor=principal,
@@ -8381,7 +8408,11 @@ def create_jira_ticket(
         resource_type="finding",
         resource_id=finding.id,
         finding_id=finding.id,
-        metadata={"reference": reference, "project_key": request.project_key.upper()},
+        metadata={
+            "reference": reference,
+            "project_key": request.project_key.upper(),
+            "queue_channel": settings.ticket_dispatch_queue_channel,
+        },
     )
 
     return TicketResponse(
