@@ -550,22 +550,53 @@ export async function exportFindingsReport(
   });
 }
 
-export interface ReportExportsQuery {
+export interface ReportExportsQuery extends PaginationQuery {
   scanId?: string;
   findingId?: string;
   limit?: number;
+  offset?: number;
 }
 
 export async function fetchReportExports(
   query?: ReportExportsQuery
-): Promise<ReportExportResponse[]> {
+): Promise<PaginatedResponse<ReportExportResponse[]>> {
+  const requestedLimit =
+    typeof query?.limit === 'number' && Number.isFinite(query.limit) && query.limit > 0
+      ? Math.trunc(query.limit)
+      : undefined;
+  const requestedPageSize =
+    typeof query?.pageSize === 'number' && Number.isFinite(query.pageSize) && query.pageSize > 0
+      ? Math.trunc(query.pageSize)
+      : undefined;
+  const limit = requestedLimit ?? requestedPageSize;
+
+  const requestedOffset =
+    typeof query?.offset === 'number' && Number.isFinite(query.offset) && query.offset >= 0
+      ? Math.trunc(query.offset)
+      : undefined;
+  const requestedPage =
+    typeof query?.page === 'number' && Number.isFinite(query.page) && query.page > 0
+      ? Math.trunc(query.page)
+      : undefined;
+
+  const computedOffset =
+    requestedOffset !== undefined
+      ? requestedOffset
+      : requestedPage !== undefined && limit !== undefined
+        ? (requestedPage - 1) * limit
+        : undefined;
+
   const path = buildPath('/reports/export', {
     scan_id: query?.scanId,
     findingId: query?.findingId,
-    limit: query?.limit ? `${query.limit}` : undefined
+    limit: limit !== undefined ? `${limit}` : undefined,
+    offset: computedOffset !== undefined ? `${computedOffset}` : undefined
   });
   const payload = await request<ReportExportCollectionResponse>(path);
-  return payload.data;
+  return {
+    data: payload.data ?? [],
+    pagination: deserializePagination(payload.meta)
+  } satisfies PaginatedResponse<ReportExportResponse[]>;
 }
 
 export async function downloadReportArtifact(reportId: string): Promise<Response> {

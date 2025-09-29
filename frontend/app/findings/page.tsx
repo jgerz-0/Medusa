@@ -1,13 +1,15 @@
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { fetchFindings, fetchFindingsTimeline, fetchReportExports } from '@/lib/api';
+import type { PaginatedResponse, PaginationState } from '@/lib/api';
 import type { ReportExportResponse } from '@/lib/types';
+import { DataTablePager, type DataTablePaginationConfig } from '@/components/DataTable';
 import { FindingsTable } from '@/components/FindingsTable';
 import { FindingsFilters } from '@/components/FindingsFilters';
 import { FindingsTimeline } from '@/components/FindingsTimeline';
 import { RequiredRolesNotice } from '@/components/RequiredRolesNotice';
 import { ROLE_ANALYST, ROLE_FINDINGS_READ } from '@/lib/rbac';
-import type { SearchParamsInput } from '@/lib/searchParams';
+import { buildSearchParamsHref, type SearchParamsInput } from '@/lib/searchParams';
 import { FindingsTableSkeleton, FindingsTimelineSkeleton } from './loading';
 
 type FindingsQueryState = Parameters<typeof fetchFindings>[0];
@@ -90,42 +92,120 @@ async function FindingsTimelineBoundary(props?: { query: FindingsTimelineQuerySt
 
 interface FindingsExportsBoundaryProps {
   scanId?: string;
+  searchParams?: SearchParamsInput;
+  basePath?: string;
 }
 
-async function FindingsExportsBoundary({ scanId }: FindingsExportsBoundaryProps = {}) {
-  let recentExports: ReportExportResponse[] = [];
+function buildExportsPaginationConfig(
+  pagination: PaginationState,
+  searchParams: SearchParamsInput,
+  basePath: string
+): DataTablePaginationConfig {
+  const safePageSize = pagination.pageSize > 0 ? Math.trunc(pagination.pageSize) : 5;
+
+  return {
+    ...pagination,
+    pageSize: safePageSize,
+    pageSizeOptions: [5, 10, 20],
+    onPageChange: (page) => {
+      if (!Number.isFinite(page) || page < 1) {
+        return undefined;
+      }
+
+      return buildSearchParamsHref({
+        basePath,
+        params: searchParams,
+        updates: {
+          exports_page: `${Math.trunc(page)}`,
+          exports_page_size: `${safePageSize}`
+        }
+      });
+    },
+    onPageSizeChange: (pageSize) => {
+      if (!Number.isFinite(pageSize) || pageSize < 1) {
+        return undefined;
+      }
+
+      const normalized = Math.trunc(pageSize);
+      return buildSearchParamsHref({
+        basePath,
+        params: searchParams,
+        updates: {
+          exports_page: '1',
+          exports_page_size: `${normalized}`
+        }
+      });
+    }
+  } satisfies DataTablePaginationConfig;
+}
+
+export async function FindingsExportsBoundary({
+  scanId,
+  searchParams,
+  basePath = '/findings'
+}: FindingsExportsBoundaryProps = {}) {
+  const page = parsePositiveInteger(searchParams?.exports_page, 1);
+  const pageSize = parsePositiveInteger(searchParams?.exports_page_size, 5);
+
+  let response: PaginatedResponse<ReportExportResponse[]> = { data: [], pagination: null };
   try {
-    recentExports = await fetchReportExports({
+    response = await fetchReportExports({
       scanId,
-      limit: 5
+      page,
+      pageSize
     });
   } catch {
-    recentExports = [];
+    response = { data: [], pagination: null };
   }
 
-  if (recentExports.length === 0) {
-    return null;
-  }
+  const recentExports = response.data ?? [];
+  const pagination = response.pagination ?? null;
+
+  const hasExports = recentExports.length > 0;
+  const total = pagination?.total ?? 0;
+  const emptyMessage = total > 0
+    ? 'No exports available for this page. Use the controls below to navigate.'
+    : 'No persisted exports recorded yet.';
+
+  const paginationConfig = pagination ? buildExportsPaginationConfig(pagination, searchParams, basePath) : null;
 
   return (
-    <div className="w-full max-w-sm rounded border border-surface-muted/40 bg-surface-muted/10 p-3">
-      <h4 className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Recent exports</h4>
-      <ul className="mt-2 space-y-1">
-        {recentExports.map((record) => (
-          <li key={record.report_id} className="flex items-center justify-between gap-2 text-[11px] text-gray-300">
-            <span className="font-mono text-[10px] text-gray-500">
-              {record.report_id.slice(0, 8)} • {record.format.toUpperCase()} • {new Date(record.generated_at).toLocaleString()}
-            </span>
-            <a
-              href={`/api/reports/export?reportId=${record.report_id}&format=${record.format}`}
-              className="text-[10px] font-semibold uppercase tracking-wide text-sky-400 hover:text-sky-300"
-            >
-              Download
-            </a>
-          </li>
-        ))}
-      </ul>
-    </div>
+    <section
+      role="region"
+      aria-labelledby="findings-recent-exports-heading"
+      className="w-full max-w-sm rounded border border-surface-muted/40 bg-surface-muted/10 p-3"
+    >
+      <h4
+        id="findings-recent-exports-heading"
+        className="text-[10px] font-semibold uppercase tracking-wide text-gray-400"
+      >
+        Recent exports
+      </h4>
+      {hasExports ? (
+        <ul className="mt-2 space-y-1">
+          {recentExports.map((record) => (
+            <li key={record.report_id} className="flex items-center justify-between gap-2 text-[11px] text-gray-300">
+              <span className="font-mono text-[10px] text-gray-500">
+                {record.report_id.slice(0, 8)} • {record.format.toUpperCase()} • {new Date(record.generated_at).toLocaleString()}
+              </span>
+              <a
+                href={`/api/reports/export?reportId=${record.report_id}&format=${record.format}`}
+                className="text-[10px] font-semibold uppercase tracking-wide text-sky-400 hover:text-sky-300"
+              >
+                Download
+              </a>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-[11px] text-gray-500">{emptyMessage}</p>
+      )}
+      {paginationConfig ? (
+        <div className="mt-3">
+          <DataTablePager pagination={paginationConfig} />
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -260,7 +340,11 @@ export default function FindingsPage({ searchParams }: FindingsPageProps) {
             {exportEnabled ? (
               <Suspense fallback={null}>
                 {/* @ts-expect-error Async Server Component */}
-                <FindingsExportsBoundary scanId={query.scanId} />
+                <FindingsExportsBoundary
+                  scanId={query.scanId}
+                  searchParams={searchParams}
+                  basePath="/findings"
+                />
               </Suspense>
             ) : null}
           </div>

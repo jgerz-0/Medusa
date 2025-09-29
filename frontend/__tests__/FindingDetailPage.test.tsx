@@ -94,7 +94,7 @@ describe('FindingDetailPage RBAC notice', () => {
     mockFetchFinding.mockResolvedValue(baseFinding);
     mockFetchFindingComments.mockResolvedValue([] as FindingComment[]);
     mockFetchFindingTimeline.mockResolvedValue([] as FindingTimelineEvent[]);
-    mockFetchReportExports.mockResolvedValue([]);
+    mockFetchReportExports.mockResolvedValue({ data: [], pagination: null });
 
     const ui = await FindingDetailPage({ params: { findingId: baseFinding.id } });
 
@@ -115,7 +115,7 @@ describe('FindingDetailPage RBAC notice', () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2024-01-01T05:00:00.000Z'));
 
-    mockFetchReportExports.mockResolvedValue([]);
+    mockFetchReportExports.mockResolvedValue({ data: [], pagination: null });
 
     const findingWithTickets: Finding = {
       ...baseFinding,
@@ -153,7 +153,7 @@ describe('FindingDetailPage RBAC notice', () => {
     mockFetchFinding.mockResolvedValue(findingWithTickets);
     mockFetchFindingComments.mockResolvedValue([] as FindingComment[]);
     mockFetchFindingTimeline.mockResolvedValue([] as FindingTimelineEvent[]);
-    mockFetchReportExports.mockResolvedValue([]);
+    mockFetchReportExports.mockResolvedValue({ data: [], pagination: null });
 
     const ui = await FindingDetailPage({ params: { findingId: findingWithTickets.id } });
 
