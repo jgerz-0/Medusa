@@ -13,6 +13,25 @@ export const FINDING_STATUSES = [
 export type FindingStatus = (typeof FINDING_STATUSES)[number];
 export type SeverityLevel = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
+export const FINDING_CATEGORIES = [
+  'web',
+  'binary_static',
+  'binary_fuzzing',
+  'binary_symbolic',
+] as const;
+
+export type FindingCategory = (typeof FINDING_CATEGORIES)[number];
+
+export const FINDING_VALIDATION_STATUSES = [
+  'pending',
+  'queued',
+  'running',
+  'passed',
+  'failed',
+] as const;
+
+export type FindingValidationStatus = (typeof FINDING_VALIDATION_STATUSES)[number];
+
 export interface Target {
   id: string;
   name: string;
@@ -90,7 +109,7 @@ export interface Finding {
   scanner: string;
   sample_id: string | null;
   tool: string | null;
-  category: string | null;
+  category: FindingCategory | null;
   title: string;
   description: string;
   cve_id?: string | null;
@@ -107,7 +126,24 @@ export interface Finding {
   tags: string[];
   comment_count: number;
   tickets: FindingTicket[];
+  validation_status: FindingValidationStatus;
+  validated_at: string | null;
+  validations: FindingValidation[];
+  cvss: number;
   scope_status: 'unknown' | 'in_scope' | 'out_of_scope' | 'mixed';
+}
+
+export interface FindingValidation {
+  id: string;
+  job_id: string;
+  status: Extract<FindingValidationStatus, 'passed' | 'failed'>;
+  validator: string;
+  executed_at: string;
+  requested_by?: string | null;
+  requested_at?: string | null;
+  notes?: string | null;
+  metadata: Record<string, unknown>;
+  evidence: Record<string, unknown>;
 }
 
 export interface CVEAdvisory {

@@ -22,7 +22,7 @@ describe('FindingsTable', () => {
         scanner: 'nuclei',
         sample_id: null,
         tool: null,
-        category: 'network',
+        category: 'web',
         title: 'TLS certificate expired',
         description: 'TLS certificate expired',
         cve_id: null,
@@ -58,6 +58,22 @@ describe('FindingsTable', () => {
         tags: ['tls', 'expired'],
         comment_count: 1,
         tickets: [],
+        validation_status: 'passed',
+        validated_at: '2024-02-01T09:50:00Z',
+        validations: [
+          {
+            id: 'validation-1',
+            job_id: 'validator-job-1',
+            status: 'passed',
+            validator: 'validator:nuclei',
+            executed_at: '2024-02-01T09:50:00Z',
+            requested_by: 'analyst',
+            requested_at: '2024-02-01T09:45:00Z',
+            metadata: {},
+            evidence: {}
+          }
+        ],
+        cvss: 8,
         scope_status: 'unknown'
       },
       {
@@ -66,7 +82,7 @@ describe('FindingsTable', () => {
         scanner: 'nuclei',
         sample_id: null,
         tool: null,
-        category: 'network',
+        category: 'web',
         title: 'Directory listing enabled',
         description: 'Directory listing enabled',
         cve_id: null,
@@ -80,6 +96,10 @@ describe('FindingsTable', () => {
         tags: [],
         comment_count: 0,
         tickets: [],
+        validation_status: 'pending',
+        validated_at: null,
+        validations: [],
+        cvss: 6,
         scope_status: 'unknown'
       }
     ];
@@ -104,7 +124,7 @@ describe('FindingsTable', () => {
         scanner: 'zap',
         sample_id: null,
         tool: 'zap-baseline',
-        category: 'network',
+        category: 'web',
         title: 'Cross-site scripting',
         description: 'Reflected XSS detected',
         cve_id: 'CVE-2024-9999',
@@ -129,6 +149,10 @@ describe('FindingsTable', () => {
             metadata: {}
           }
         ],
+        validation_status: 'running',
+        validated_at: null,
+        validations: [],
+        cvss: 8,
         scope_status: 'in_scope'
       },
       {
@@ -137,7 +161,7 @@ describe('FindingsTable', () => {
         scanner: 'sqlmap',
         sample_id: null,
         tool: 'sqlmap',
-        category: 'network',
+        category: 'web',
         title: 'Boolean-based SQLi',
         description: 'Time based injection',
         cve_id: null,
@@ -152,6 +176,10 @@ describe('FindingsTable', () => {
         tags: ['injection'],
         comment_count: 0,
         tickets: [],
+        validation_status: 'queued',
+        validated_at: null,
+        validations: [],
+        cvss: 6,
         scope_status: 'unknown'
       }
     ];
