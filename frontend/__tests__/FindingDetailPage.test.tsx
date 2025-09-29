@@ -181,4 +181,61 @@ describe('FindingDetailPage RBAC notice', () => {
 
     jest.useRealTimers();
   });
+
+  it('summarizes validation workflow details and surfaces the cvss score', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2024-01-03T00:00:00.000Z'));
+
+    const findingWithValidation: Finding = {
+      ...baseFinding,
+      validation_status: 'passed',
+      validated_at: '2024-01-02T12:00:00.000Z',
+      validations: [
+        {
+          id: 'validation-1',
+          job_id: 'job-001',
+          status: 'passed',
+          validator: 'validator.one',
+          executed_at: '2024-01-02T12:00:00.000Z',
+          requested_by: 'analyst',
+          requested_at: '2024-01-02T11:00:00.000Z',
+          notes: 'SQL injection blocked in WAF.',
+          metadata: {},
+          evidence: {}
+        },
+        {
+          id: 'validation-0',
+          job_id: 'job-000',
+          status: 'failed',
+          validator: 'validator.one',
+          executed_at: '2024-01-01T12:00:00.000Z',
+          requested_by: 'analyst',
+          requested_at: '2024-01-01T11:00:00.000Z',
+          notes: null,
+          metadata: {},
+          evidence: {}
+        }
+      ]
+    };
+
+    mockFetchFinding.mockResolvedValue(findingWithValidation);
+    mockFetchFindingComments.mockResolvedValue([] as FindingComment[]);
+    mockFetchFindingTimeline.mockResolvedValue([] as FindingTimelineEvent[]);
+    mockFetchReportExports.mockResolvedValue({ data: [], pagination: null });
+
+    const ui = await FindingDetailPage({ params: { findingId: findingWithValidation.id } });
+
+    render(ui);
+
+    const cvssBadge = screen.getByText('CVSS').closest('span');
+    expect(cvssBadge).toHaveTextContent('CVSS9.5');
+    expect(screen.getAllByTestId('status-passed').length).toBeGreaterThan(0);
+    const latestRunTimes = screen.getAllByTitle('2024-01-02T12:00:00.000Z');
+    expect(latestRunTimes.length).toBeGreaterThan(0);
+    expect(screen.getByTitle('2024-01-01T12:00:00.000Z')).toBeInTheDocument();
+    expect(screen.getByText('SQL injection blocked in WAF.')).toBeInTheDocument();
+    expect(screen.getByText('No analyst notes recorded.')).toBeInTheDocument();
+
+    jest.useRealTimers();
+  });
 });
