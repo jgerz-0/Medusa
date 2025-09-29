@@ -1,3 +1,4 @@
+import { render, screen } from '@testing-library/react';
 import {
   assignFindingAction,
   updateStatusAction,
@@ -7,6 +8,7 @@ import {
   createGitHubTicketAction,
   createInitialActionState
 } from '@/app/findings/[findingId]/actions';
+import { UpdateStatusForm } from '@/app/findings/[findingId]/forms';
 import {
   assignFinding,
   updateFindingStatus,
@@ -34,11 +36,26 @@ jest.mock('next/cache', () => ({
   revalidatePath: jest.fn()
 }));
 
+jest.mock('react-dom', () => {
+  const actual = jest.requireActual('react-dom');
+  return {
+    ...actual,
+    useFormState: jest.fn(() => [{ status: 'idle', message: null }, jest.fn()]),
+    useFormStatus: jest.fn(() => ({ pending: false }))
+  };
+});
+
 const { revalidatePath } = jest.requireMock('next/cache');
+const { useFormState, useFormStatus } = jest.requireMock('react-dom');
 
 describe('finding workflow actions', () => {
   beforeEach(() => {
     jest.resetAllMocks();
+    (useFormState as jest.Mock).mockReturnValue([
+      { status: 'idle', message: null },
+      jest.fn()
+    ]);
+    (useFormStatus as jest.Mock).mockReturnValue({ pending: false });
   });
 
   it('updates assignment and revalidates the listing on success', async () => {
@@ -68,6 +85,35 @@ describe('finding workflow actions', () => {
     expect(result.message).toMatch(/assignee/i);
     expect(assignFinding).not.toHaveBeenCalled();
     expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported status transitions before calling the controller', async () => {
+    const formData = new FormData();
+    formData.set('findingId', 'finding-21');
+    formData.set('status', 'invalidated');
+
+    const result = await updateStatusAction(createInitialActionState(), formData);
+
+    expect(result.status).toBe('error');
+    expect(result.message).toBe('Select a valid status before updating the workflow.');
+    expect(updateFindingStatus).not.toHaveBeenCalled();
+  });
+
+  it('only renders status options that the controller accepts', () => {
+    render(
+      <UpdateStatusForm findingId="finding-21" currentStatus="pending_validation" />
+    );
+
+    const options = screen.getAllByRole('option') as HTMLOptionElement[];
+    const optionValues = options.map((option) => option.value);
+
+    expect(optionValues).toEqual([
+      'pending_validation',
+      'open',
+      'acknowledged',
+      'resolved'
+    ]);
+    expect(options[0]).toBeDisabled();
   });
 
   it.each([

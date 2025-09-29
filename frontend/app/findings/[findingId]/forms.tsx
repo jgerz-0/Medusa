@@ -11,10 +11,21 @@ import {
   createInitialActionState,
   type ActionState
 } from './actions';
-import { FINDING_STATUSES, type FindingStatus } from '@/lib/types';
+import {
+  FINDING_STATUS_UPDATE_OPTIONS,
+  type FindingStatus,
+  type FindingStatusUpdateOption
+} from '@/lib/types';
 
 function mergeClasses(...classes: (string | undefined)[]): string {
   return classes.filter(Boolean).join(' ');
+}
+
+function formatStatusLabel(status: string): string {
+  return status
+    .split('_')
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(' ');
 }
 
 function FormAlert({ state }: { state: ActionState }) {
@@ -98,17 +109,15 @@ export function UpdateStatusForm({
 }) {
   const [state, formAction] = useFormState(updateStatusAction, createInitialActionState());
 
-  // Controller forbids manually forcing a finding back to pending validation; surface
-  // it as read-only so analysts understand the current lifecycle state.
-  const statusOptions: { value: FindingStatus; label: string; disabled?: boolean }[] = FINDING_STATUSES.map(
-    (status) => ({
+  const statusOptions: { value: FindingStatusUpdateOption; label: string }[] =
+    FINDING_STATUS_UPDATE_OPTIONS.map((status) => ({
       value: status,
-      label: status
-        .split('_')
-        .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-        .join(' '),
-      disabled: status === 'pending_validation',
-    })
+      label: formatStatusLabel(status)
+    }));
+  // Controller restricts updates to a narrow set. Preserve the current status as
+  // read-only context when it falls outside the allowed transitions.
+  const isCurrentStatusUpdatable = FINDING_STATUS_UPDATE_OPTIONS.includes(
+    currentStatus as FindingStatusUpdateOption
   );
 
   return (
@@ -117,8 +126,13 @@ export function UpdateStatusForm({
       <label className="text-xs uppercase tracking-wide text-gray-400">
         Status
         <select name="status" defaultValue={currentStatus} className="input mt-1">
+          {!isCurrentStatusUpdatable && (
+            <option value={currentStatus} disabled>
+              {formatStatusLabel(currentStatus)} (Read only)
+            </option>
+          )}
           {statusOptions.map((option) => (
-            <option key={option.value} value={option.value} disabled={option.disabled}>
+            <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
