@@ -109,7 +109,7 @@ export function UpdateStatusForm({
 }) {
   const [state, formAction] = useFormState(updateStatusAction, createInitialActionState());
 
-  const statusOptions: { value: FindingStatusUpdateOption; label: string }[] =
+  const allowedStatusOptions: { value: FindingStatusUpdateOption; label: string }[] =
     FINDING_STATUS_UPDATE_OPTIONS.map((status) => ({
       value: status,
       label: formatStatusLabel(status)
@@ -119,19 +119,20 @@ export function UpdateStatusForm({
   const isCurrentStatusUpdatable = FINDING_STATUS_UPDATE_OPTIONS.includes(
     currentStatus as FindingStatusUpdateOption
   );
+  const defaultStatusValue = isCurrentStatusUpdatable ? currentStatus : '';
 
   return (
     <form action={formAction} className={mergeClasses('flex flex-col gap-2', className)}>
       <input type="hidden" name="findingId" value={findingId} />
       <label className="text-xs uppercase tracking-wide text-gray-400">
         Status
-        <select name="status" defaultValue={currentStatus} className="input mt-1">
+        <select name="status" defaultValue={defaultStatusValue} className="input mt-1">
           {!isCurrentStatusUpdatable && (
-            <option value={currentStatus} disabled>
+            <option value="" disabled>
               {formatStatusLabel(currentStatus)} (Read only)
             </option>
           )}
-          {statusOptions.map((option) => (
+          {allowedStatusOptions.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>

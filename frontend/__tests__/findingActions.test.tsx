@@ -105,15 +105,14 @@ describe('finding workflow actions', () => {
     );
 
     const options = screen.getAllByRole('option') as HTMLOptionElement[];
-    const optionValues = options.map((option) => option.value);
+    const selectableValues = options
+      .filter((option) => !option.disabled)
+      .map((option) => option.value);
 
-    expect(optionValues).toEqual([
-      'pending_validation',
-      'open',
-      'acknowledged',
-      'resolved'
-    ]);
+    expect(selectableValues).toEqual(['open', 'acknowledged', 'resolved']);
     expect(options[0]).toBeDisabled();
+    expect(options[0].value).toBe('');
+    expect(screen.queryByRole('option', { name: /Invalidated/i })).not.toBeInTheDocument();
   });
 
   it.each([
