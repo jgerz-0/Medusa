@@ -395,6 +395,10 @@ export async function fetchScans(params?: FetchScansParams): Promise<PaginatedRe
 }
 
 export async function fetchFindings(query?: FindingsQuery): Promise<PaginatedResponse<Finding[]>> {
+  const limit = query?.pageSize ? Math.max(1, Math.trunc(query.pageSize)) : undefined;
+  const page = query?.page ? Math.max(1, Math.trunc(query.page)) : undefined;
+  const offset = page && limit ? (page - 1) * limit : undefined;
+
   const path = buildPath('/findings', {
     target_id: query?.targetId,
     scan_id: query?.scanId,
@@ -405,8 +409,8 @@ export async function fetchFindings(query?: FindingsQuery): Promise<PaginatedRes
     from: query?.from,
     to: query?.to,
     scope: query?.scope,
-    page: query?.page ? `${query.page}` : undefined,
-    page_size: query?.pageSize ? `${query.pageSize}` : undefined
+    limit: limit !== undefined ? `${limit}` : undefined,
+    offset: offset !== undefined ? `${offset}` : undefined
   });
   const payload = await request<ApiCollectionResponse<Finding[]>>(path);
   return {
