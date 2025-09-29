@@ -11,7 +11,11 @@ import {
   ControllerError,
   ControllerValidationError
 } from '@/lib/api';
-import type { FindingStatus } from '@/lib/types';
+import {
+  FINDING_STATUS_UPDATE_OPTIONS,
+  type FindingStatus,
+  type FindingStatusUpdateOption
+} from '@/lib/types';
 
 function parseFindingId(formData: FormData): string {
   const raw = formData.get('findingId');
@@ -97,7 +101,17 @@ export async function updateStatusAction(
     return createErrorState('Select a valid status before updating the workflow.');
   }
 
-  const normalizedStatus = statusValue.trim() as FindingStatus;
+  const trimmedStatus = statusValue.trim();
+  const isAllowedStatus = (
+    value: string
+  ): value is FindingStatusUpdateOption =>
+    FINDING_STATUS_UPDATE_OPTIONS.includes(value as FindingStatusUpdateOption);
+
+  if (!isAllowedStatus(trimmedStatus)) {
+    return createErrorState('Select a valid status before updating the workflow.');
+  }
+
+  const normalizedStatus: FindingStatus = trimmedStatus;
 
   try {
     await updateFindingStatus(findingId, normalizedStatus);

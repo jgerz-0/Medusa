@@ -11,6 +11,12 @@ export const FINDING_STATUSES = [
 ] as const;
 
 export type FindingStatus = (typeof FINDING_STATUSES)[number];
+export const FINDING_STATUS_UPDATE_OPTIONS = [
+  'open',
+  'acknowledged',
+  'resolved',
+] as const satisfies readonly FindingStatus[];
+export type FindingStatusUpdateOption = (typeof FINDING_STATUS_UPDATE_OPTIONS)[number];
 export type SeverityLevel = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
 export const FINDING_CATEGORIES = [
