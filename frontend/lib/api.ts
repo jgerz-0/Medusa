@@ -382,10 +382,14 @@ export interface FetchScansParams extends PaginationQuery {
 }
 
 export async function fetchScans(params?: FetchScansParams): Promise<PaginatedResponse<Scan[]>> {
+  const limit = params?.pageSize ? Math.max(1, Math.trunc(params.pageSize)) : undefined;
+  const page = params?.page ? Math.max(1, Math.trunc(params.page)) : undefined;
+  const offset = page && limit ? (page - 1) * limit : undefined;
+
   const path = buildPath('/scans', {
     target_id: params?.targetId,
-    page: params?.page ? `${params.page}` : undefined,
-    page_size: params?.pageSize ? `${params.pageSize}` : undefined
+    limit: limit !== undefined ? `${limit}` : undefined,
+    offset: offset !== undefined ? `${offset}` : undefined
   });
   const payload = await request<ApiCollectionResponse<Scan[]>>(path);
   return {
