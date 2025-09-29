@@ -7,8 +7,8 @@ jest.mock('react', () => {
     Suspense: ({ fallback }: { fallback?: ReactNode }) => fallback ?? null
   };
 });
-import { render, screen } from '@testing-library/react';
-import FindingsPage from '@/app/findings/page';
+import { render, screen, within } from '@testing-library/react';
+import FindingsPage, { FindingsExportsBoundary } from '@/app/findings/page';
 import { fetchFindings, fetchFindingsTimeline, fetchReportExports } from '@/lib/api';
 
 jest.mock('next/link', () => ({
@@ -46,7 +46,7 @@ describe('FindingsPage filter normalization', () => {
       pagination: { page: 1, pageSize: 50, total: 0 }
     });
     mockFetchFindingsTimeline.mockResolvedValue([]);
-    mockFetchReportExports.mockResolvedValue([]);
+    mockFetchReportExports.mockResolvedValue({ data: [], pagination: null });
 
     const ui = await FindingsPage({
       searchParams: {
@@ -74,7 +74,7 @@ describe('FindingsPage filter normalization', () => {
       pagination: { page: 1, pageSize: 50, total: 0 }
     });
     mockFetchFindingsTimeline.mockResolvedValue([]);
-    mockFetchReportExports.mockResolvedValue([]);
+    mockFetchReportExports.mockResolvedValue({ data: [], pagination: null });
 
     const searchParams = {
       scan: 'abc-123',
@@ -111,5 +111,78 @@ describe('FindingsPage filter normalization', () => {
     const htmlUrl = new URL(htmlLink.getAttribute('href') ?? '', 'https://example.com');
     expect(htmlUrl.searchParams.get('format')).toBe('html');
     expect(htmlUrl.searchParams.get('scanId')).toBe(searchParams.scan);
+  });
+});
+
+describe('Findings exports pagination', () => {
+  const mockFetchReportExports = fetchReportExports as jest.MockedFunction<typeof fetchReportExports>;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('preserves pagination state in export navigation links', async () => {
+    mockFetchReportExports.mockResolvedValue({
+      data: [
+        {
+          report_id: 'rep-1',
+          format: 'pdf',
+          generated_at: '2024-01-01T00:00:00.000Z',
+          finding_count: 3,
+          checksum: 'abc123',
+          requested_by: 'analyst',
+          storage: { bucket: 'reports', key: 'rep-1.pdf', content_type: 'application/pdf' },
+          metadata: {}
+        }
+      ],
+      pagination: { page: 2, pageSize: 10, total: 25 }
+    });
+
+    const ui = await FindingsExportsBoundary({
+      scanId: 'scan-1',
+      searchParams: { exports_page: '2', exports_page_size: '10' },
+      basePath: '/findings'
+    });
+
+    render(ui);
+
+    expect(mockFetchReportExports).toHaveBeenCalledWith({
+      scanId: 'scan-1',
+      page: 2,
+      pageSize: 10
+    });
+
+    const exportsRegion = screen.getByRole('region', { name: /recent exports/i });
+    const nextLink = within(exportsRegion).getByRole('link', { name: /next/i });
+    expect(nextLink.getAttribute('href')).toContain('/findings');
+    expect(nextLink.getAttribute('href')).toContain('exports_page=3');
+    expect(nextLink.getAttribute('href')).toContain('exports_page_size=10');
+
+    const prevLink = within(exportsRegion).getByRole('link', { name: /prev/i });
+    expect(prevLink.getAttribute('href')).toContain('exports_page=1');
+  });
+
+  it('renders empty state messaging when paginated exports have no rows on current page', async () => {
+    mockFetchReportExports.mockResolvedValue({
+      data: [],
+      pagination: { page: 3, pageSize: 5, total: 7 }
+    });
+
+    const ui = await FindingsExportsBoundary({
+      scanId: 'scan-2',
+      searchParams: { exports_page: '3', exports_page_size: '5' },
+      basePath: '/findings'
+    });
+
+    render(ui);
+
+    const exportsRegion = screen.getByRole('region', { name: /recent exports/i });
+    expect(
+      within(exportsRegion).getByText(/no exports available for this page/i)
+    ).toBeInTheDocument();
+
+    const statusRegion = within(exportsRegion).getByRole('status');
+    expect(statusRegion).toHaveTextContent('Showing 6–7 of 7');
+    expect(statusRegion).toHaveTextContent('Page 2 of 2');
   });
 });

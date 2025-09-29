@@ -8,10 +8,13 @@ import {
   fetchFindingTimeline,
   fetchReportExports
 } from '@/lib/api';
+import type { PaginatedResponse, PaginationState } from '@/lib/api';
 import type { FindingComment, FindingTimelineEvent, ReportExportResponse } from '@/lib/types';
 import { ROLE_ANALYST, ROLE_REPORT_EXPORT, ROLE_TICKETING_CREATE } from '@/lib/rbac';
 import { StatusBadge } from '@/components/StatusBadge';
+import { DataTablePager, type DataTablePaginationConfig } from '@/components/DataTable';
 import { RequiredRolesNotice, type RoleRequirement } from '@/components/RequiredRolesNotice';
+import { buildSearchParamsHref, type SearchParamsInput } from '@/lib/searchParams';
 import {
   AssignFindingForm,
   UpdateStatusForm,
@@ -25,6 +28,7 @@ interface FindingDetailPageProps {
   params: {
     findingId: string;
   };
+  searchParams?: SearchParamsInput;
 }
 
 export async function generateMetadata({ params }: FindingDetailPageProps): Promise<Metadata> {
@@ -76,6 +80,59 @@ function formatTicketMetadataKey(key: string): string {
     .filter((segment) => segment)
     .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
     .join(' ');
+}
+
+function parsePositiveInteger(value: string | string[] | undefined, fallback: number): number {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== 'string') {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function buildExportsPaginationConfig(
+  pagination: PaginationState,
+  searchParams: SearchParamsInput,
+  basePath: string
+): DataTablePaginationConfig {
+  const safePageSize = pagination.pageSize > 0 ? Math.trunc(pagination.pageSize) : 5;
+
+  return {
+    ...pagination,
+    pageSize: safePageSize,
+    pageSizeOptions: [5, 10, 20],
+    onPageChange: (page) => {
+      if (!Number.isFinite(page) || page < 1) {
+        return undefined;
+      }
+
+      return buildSearchParamsHref({
+        basePath,
+        params: searchParams,
+        updates: {
+          exports_page: `${Math.trunc(page)}`,
+          exports_page_size: `${safePageSize}`
+        }
+      });
+    },
+    onPageSizeChange: (pageSize) => {
+      if (!Number.isFinite(pageSize) || pageSize < 1) {
+        return undefined;
+      }
+
+      const normalized = Math.trunc(pageSize);
+      return buildSearchParamsHref({
+        basePath,
+        params: searchParams,
+        updates: {
+          exports_page: '1',
+          exports_page_size: `${normalized}`
+        }
+      });
+    }
+  } satisfies DataTablePaginationConfig;
 }
 
 function formatTicketMetadataValue(value: unknown): string {
@@ -184,7 +241,7 @@ function TicketStatusBadge({ status }: { status: string }) {
   );
 }
 
-export default async function FindingDetailPage({ params }: FindingDetailPageProps) {
+export default async function FindingDetailPage({ params, searchParams }: FindingDetailPageProps) {
   let error: string | null = null;
 
   const finding = await fetchFinding(params.findingId).catch((err) => {
@@ -215,10 +272,30 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
   const timeline = await fetchFindingTimeline(params.findingId).catch(
     (): FindingTimelineEvent[] => []
   );
-  const reportHistory = await fetchReportExports({
+  const exportsPage = parsePositiveInteger(searchParams?.exports_page, 1);
+  const exportsPageSize = parsePositiveInteger(searchParams?.exports_page_size, 5);
+  const reportHistoryResponse = await fetchReportExports({
     findingId: params.findingId,
-    limit: 5
-  }).catch((): ReportExportResponse[] => []);
+    page: exportsPage,
+    pageSize: exportsPageSize
+  }).catch(
+    (): PaginatedResponse<ReportExportResponse[]> => ({ data: [], pagination: null })
+  );
+
+  const reportHistory = reportHistoryResponse.data ?? [];
+  const reportHistoryPagination = reportHistoryResponse.pagination ?? null;
+  const exportsEmptyMessage =
+    reportHistoryPagination && reportHistoryPagination.total > 0
+      ? 'No exports available for this page. Use the controls below to navigate.'
+      : 'No persisted exports recorded yet.';
+
+  const exportsPaginationConfig = reportHistoryPagination
+    ? buildExportsPaginationConfig(
+        reportHistoryPagination,
+        searchParams,
+        `/findings/${params.findingId}`
+      )
+    : null;
 
   const metadataScanner =
     typeof finding.metadata?.['scanner'] === 'string'
@@ -473,17 +550,29 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
             Generate HTML
           </a>
         </div>
-        <section className="rounded border border-surface-muted/40 bg-surface-muted/10 p-3">
+        <section
+          className="rounded border border-surface-muted/40 bg-surface-muted/10 p-3"
+          role="region"
+          aria-labelledby="finding-recent-exports-heading"
+        >
           <header className="mb-2 flex items-center justify-between">
-            <h4 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Recent exports</h4>
+            <h4
+              id="finding-recent-exports-heading"
+              className="text-[11px] font-semibold uppercase tracking-wide text-gray-400"
+            >
+              Recent exports
+            </h4>
             <span className="text-[10px] uppercase tracking-wide text-gray-500">Stored in MinIO/S3</span>
           </header>
           {reportHistory.length === 0 ? (
-            <p className="text-xs text-gray-500">No persisted exports recorded yet.</p>
+            <p className="text-xs text-gray-500">{exportsEmptyMessage}</p>
           ) : (
             <ul className="divide-y divide-surface-muted/40">
               {reportHistory.map((record) => (
-                <li key={record.report_id} className="flex flex-col gap-1 py-2 text-xs text-gray-300 md:flex-row md:items-center md:justify-between">
+                <li
+                  key={record.report_id}
+                  className="flex flex-col gap-1 py-2 text-xs text-gray-300 md:flex-row md:items-center md:justify-between"
+                >
                   <div>
                     <p className="font-mono text-[11px] text-gray-400">
                       {record.report_id.slice(0, 8)} • {record.format.toUpperCase()} • {formatTimestamp(record.generated_at)}
@@ -502,6 +591,11 @@ export default async function FindingDetailPage({ params }: FindingDetailPagePro
               ))}
             </ul>
           )}
+          {exportsPaginationConfig ? (
+            <div className="mt-3">
+              <DataTablePager pagination={exportsPaginationConfig} />
+            </div>
+          ) : null}
         </section>
       </article>
 

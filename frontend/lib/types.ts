@@ -191,6 +191,11 @@ export interface ReportExportResponse {
 
 export interface ReportExportCollectionResponse {
   data: ReportExportResponse[];
+  meta?: {
+    total: number;
+    limit: number;
+    offset: number;
+  };
 }
 
 export interface AnomalyEvent {

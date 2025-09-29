@@ -86,7 +86,7 @@ function safeInvoke(handler: ((value: number) => string | undefined) | undefined
   }
 }
 
-function TablePager({ pagination }: { pagination: DataTablePaginationConfig }) {
+export function DataTablePager({ pagination }: { pagination: DataTablePaginationConfig }) {
   // Render navigation purely with server-computed links to keep pagination deterministic and auditable.
   const safePageSize =
     Number.isFinite(pagination.pageSize) && pagination.pageSize > 0
@@ -259,7 +259,7 @@ export function DataTable<T>({
         </div>
       )}
 
-      {pagination && !showSkeleton ? <TablePager pagination={pagination} /> : null}
+      {pagination && !showSkeleton ? <DataTablePager pagination={pagination} /> : null}
       {showSkeleton && showPaginationSkeleton ? (
         <div className="card border-surface-muted/60 bg-surface-muted/20 px-4 py-3">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
