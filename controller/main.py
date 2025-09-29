@@ -2136,6 +2136,7 @@ class ReportExportResponse(BaseModel):
 
 class ReportExportCollectionResponse(BaseModel):
     data: List[ReportExportResponse]
+    meta: PaginationMetadata
 
 
 class JiraTicketRequest(BaseModel):
@@ -8096,13 +8097,19 @@ def export_findings_report(
             findings_map[str(record.id)] = serialize_finding(record)
 
     if request.scan_id:
-        scan_findings, static_findings, fuzzing_findings = _retrieve_finding_records(
-            db, target_id=None, scan_id=request.scan_id
-        )
+        (
+            scan_findings,
+            static_findings,
+            symbolic_findings,
+            fuzzing_findings,
+        ) = _retrieve_finding_records(db, target_id=None, scan_id=request.scan_id)
         for record in scan_findings:
             findings_map[str(record.id)] = serialize_finding(record)
         for record in static_findings:
             finding_response = serialize_binary_static_finding(record)
+            findings_map[finding_response.id] = finding_response
+        for record in symbolic_findings:
+            finding_response = serialize_binary_symbolic_finding(record)
             findings_map[finding_response.id] = finding_response
         for record in fuzzing_findings:
             finding_response = serialize_binary_fuzzing_finding(record)
@@ -8220,6 +8227,7 @@ def list_report_exports(
     scan_id: Optional[str] = Query(None),
     finding_id: Optional[str] = Query(None, alias="findingId"),
     limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
 ) -> ReportExportCollectionResponse:
     enforce_roles(
         principal,
@@ -8236,19 +8244,30 @@ def list_report_exports(
         resource_id="/reports/export",
     )
 
-    query = db.query(ReportExport).order_by(ReportExport.generated_at.desc())
+    query = db.query(ReportExport)
     if scan_id:
         query = query.filter(ReportExport.scan_id == scan_id)
-    records = query.limit(limit).all()
+    if finding_id:
+        bind = db.get_bind()
+        if bind is not None and bind.dialect.name == "sqlite":
+            query = query.filter(ReportExport.finding_ids.like(f'%"{finding_id}"%'))
+        else:
+            query = query.filter(ReportExport.finding_ids.contains([finding_id]))
 
-    filtered: List[ReportExport] = []
-    for record in records:
-        if finding_id and finding_id not in (record.finding_ids or []):
-            continue
-        filtered.append(record)
+    total = query.count()
 
-    payload = [serialize_report_export(record) for record in filtered]
-    return ReportExportCollectionResponse(data=payload)
+    records = (
+        query.order_by(ReportExport.generated_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    payload = [serialize_report_export(record) for record in records]
+    return ReportExportCollectionResponse(
+        data=payload,
+        meta=PaginationMetadata(total=total, limit=limit, offset=offset),
+    )
 
 
 @app.get("/reports/{report_id}")

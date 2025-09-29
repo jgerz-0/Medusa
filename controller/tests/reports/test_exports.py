@@ -1,4 +1,4 @@
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Union, cast
 
 import pytest
 from fastapi import status
@@ -21,7 +21,8 @@ def _create_finding(
     severity: str = "medium",
     status_value: str = "pending_validation",
     title: str = "Synthetic finding",
-) -> str:
+    return_scan_id: bool = False,
+) -> Union[str, Tuple[str, str]]:
     """Persist a minimal target/scan/finding triple for report exports."""
 
     with session_factory() as session:
@@ -54,6 +55,8 @@ def _create_finding(
         )
         session.add(finding)
         session.commit()
+        if return_scan_id:
+            return str(finding.id), str(scan.id)
         return str(finding.id)
 
 
@@ -207,7 +210,9 @@ def test_export_report_pdf_and_download_workflow(
         headers={"X-API-Key": "test-key"},
     )
     assert listing.status_code == status.HTTP_200_OK
-    items = listing.json()["data"]
+    listing_payload = listing.json()
+    assert listing_payload["meta"] == {"total": 1, "limit": 20, "offset": 0}
+    items = listing_payload["data"]
     assert len(items) == 1
     assert items[0]["report_id"] == report_id
 
@@ -217,7 +222,9 @@ def test_export_report_pdf_and_download_workflow(
         headers={"X-API-Key": "test-key"},
     )
     assert empty_listing.status_code == status.HTTP_200_OK
-    assert empty_listing.json()["data"] == []
+    empty_payload = empty_listing.json()
+    assert empty_payload["data"] == []
+    assert empty_payload["meta"] == {"total": 0, "limit": 20, "offset": 0}
 
     with session_factory() as session:
         audit_actions = [
@@ -234,6 +241,117 @@ def test_export_report_pdf_and_download_workflow(
         )
         assert download_entry.evidence_snapshot["format"] == "pdf"
         assert download_entry.evidence_snapshot["report_id"] == report_id
+
+
+def test_list_report_exports_pagination_and_filters(
+    api_client: Tuple[TestClient, object, sessionmaker, object]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    first_finding = cast(str, _create_finding(session_factory, title="Primary finding"))
+    second_finding = cast(
+        str,
+        _create_finding(
+            session_factory,
+            severity="low",
+            status_value="resolved",
+            title="Secondary finding",
+        ),
+    )
+    third_finding, third_scan_id = cast(
+        Tuple[str, str],
+        _create_finding(
+            session_factory,
+            severity="critical",
+            status_value="open",
+            title="Scan scoped finding",
+            return_scan_id=True,
+        ),
+    )
+
+    first_response = _export_report(
+        client, format_="html", finding_ids=(first_finding,)
+    ).json()
+    second_response = _export_report(
+        client, format_="html", finding_ids=(second_finding,)
+    ).json()
+    scan_response = client.post(
+        "/reports/export",
+        json={"format": "html", "scan_id": third_scan_id},
+        headers={"X-API-Key": "test-key"},
+    )
+    assert scan_response.status_code == status.HTTP_200_OK
+    scan_payload = scan_response.json()
+
+    listing = client.get(
+        "/reports/export",
+        headers={"X-API-Key": "test-key"},
+    )
+    assert listing.status_code == status.HTTP_200_OK
+    listing_payload = listing.json()
+    assert listing_payload["meta"] == {"total": 3, "limit": 20, "offset": 0}
+    assert [
+        item["report_id"] for item in listing_payload["data"]
+    ] == [
+        scan_payload["report_id"],
+        second_response["report_id"],
+        first_response["report_id"],
+    ]
+
+    paginated = client.get(
+        "/reports/export",
+        params={"limit": 1, "offset": 1},
+        headers={"X-API-Key": "test-key"},
+    )
+    assert paginated.status_code == status.HTTP_200_OK
+    paginated_payload = paginated.json()
+    assert paginated_payload["meta"] == {"total": 3, "limit": 1, "offset": 1}
+    assert len(paginated_payload["data"]) == 1
+    assert paginated_payload["data"][0]["report_id"] == second_response["report_id"]
+
+    out_of_range = client.get(
+        "/reports/export",
+        params={"offset": 5},
+        headers={"X-API-Key": "test-key"},
+    )
+    assert out_of_range.status_code == status.HTTP_200_OK
+    out_of_range_payload = out_of_range.json()
+    assert out_of_range_payload["data"] == []
+    assert out_of_range_payload["meta"] == {"total": 3, "limit": 20, "offset": 5}
+
+    scan_filtered = client.get(
+        "/reports/export",
+        params={"scan_id": third_scan_id},
+        headers={"X-API-Key": "test-key"},
+    )
+    assert scan_filtered.status_code == status.HTTP_200_OK
+    scan_filtered_payload = scan_filtered.json()
+    assert scan_filtered_payload["meta"] == {"total": 1, "limit": 20, "offset": 0}
+    assert [item["report_id"] for item in scan_filtered_payload["data"]] == [
+        scan_payload["report_id"]
+    ]
+
+    combined = client.get(
+        "/reports/export",
+        params={"scan_id": third_scan_id, "findingId": third_finding},
+        headers={"X-API-Key": "test-key"},
+    )
+    assert combined.status_code == status.HTTP_200_OK
+    combined_payload = combined.json()
+    assert combined_payload["meta"] == {"total": 1, "limit": 20, "offset": 0}
+    assert [item["report_id"] for item in combined_payload["data"]] == [
+        scan_payload["report_id"]
+    ]
+
+    mismatch = client.get(
+        "/reports/export",
+        params={"scan_id": third_scan_id, "findingId": first_finding},
+        headers={"X-API-Key": "test-key"},
+    )
+    assert mismatch.status_code == status.HTTP_200_OK
+    mismatch_payload = mismatch.json()
+    assert mismatch_payload["data"] == []
+    assert mismatch_payload["meta"] == {"total": 0, "limit": 20, "offset": 0}
 
 
 def test_export_report_storage_failure_returns_502(
