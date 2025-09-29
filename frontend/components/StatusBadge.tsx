@@ -9,7 +9,10 @@ const badgeStyles: Record<StatusKind, string> = {
   completed: 'bg-status-completed/15 text-status-completed border-status-completed/40',
   failed: 'bg-status-failed/15 text-status-failed border-status-failed/40',
   open: 'bg-status-open/15 text-status-open border-status-open/40',
+  pending_validation:
+    'bg-status-pending-validation/15 text-status-pending-validation border-status-pending-validation/40',
   acknowledged: 'bg-status-acknowledged/15 text-status-acknowledged border-status-acknowledged/40',
+  invalidated: 'bg-status-invalidated/15 text-status-invalidated border-status-invalidated/40',
   resolved: 'bg-status-resolved/15 text-status-resolved border-status-resolved/40',
   critical: 'bg-severity-critical/15 text-severity-critical border-severity-critical/40',
   high: 'bg-severity-high/15 text-severity-high border-severity-high/40',

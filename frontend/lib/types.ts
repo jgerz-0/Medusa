@@ -1,5 +1,7 @@
 export type ScanStatus = 'queued' | 'running' | 'completed' | 'failed';
 
+// Finding status lifecycle is controlled by the controller; keep this
+// canonical list in sync with API contracts.
 export const FINDING_STATUSES = [
   'open',
   'pending_validation',

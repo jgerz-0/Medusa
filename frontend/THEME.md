@@ -23,7 +23,9 @@ is intentionally minimal to keep focus on severity signals.
 | `status.completed` | `#10B981` | Successful completion. |
 | `status.failed` | `#EF4444` | Terminal failure / triage required. |
 | `status.open` | `#F97316` | Open finding awaiting validation. |
+| `status.pending-validation` | `#38BDF8` | Awaiting analyst validation review. |
 | `status.acknowledged` | `#EAB308` | Finding acknowledged by analyst. |
+| `status.invalidated` | `#94A3B8` | Dismissed finding with no customer impact. |
 | `status.resolved` | `#22C55E` | Remediated finding pending verification. |
 | `severity.critical` | `#7F1D1D` | Priority 0 incidents. |
 | `severity.high` | `#B91C1C` | Priority 1 incidents. |
