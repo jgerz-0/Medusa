@@ -41,6 +41,11 @@ function formatTimestamp(value: string) {
   return formatDistanceToNow(new Date(value), { addSuffix: true });
 }
 
+function safeParseDate(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
 function formatOptionalTimestamp(value: string | null | undefined) {
   if (!value) {
     return null;
@@ -213,8 +218,12 @@ const statusBadgeValues = new Set<StatusBadgeValue>([
   'running',
   'completed',
   'failed',
+  'pending',
+  'passed',
   'open',
+  'pending_validation',
   'acknowledged',
+  'invalidated',
   'resolved',
   'critical',
   'high',
@@ -302,6 +311,13 @@ export default async function FindingDetailPage({ params, searchParams }: Findin
       ? (finding.metadata['scanner'] as string)
       : null;
   const scannerValue = metadataScanner ?? finding.scanner;
+  const validatedAtRelative = formatOptionalTimestamp(finding.validated_at);
+  const latestValidations = [...finding.validations]
+    .sort((first, second) => safeParseDate(second.executed_at) - safeParseDate(first.executed_at))
+    .slice(0, 3);
+  const formattedCvss = Number.isFinite(finding.cvss)
+    ? finding.cvss.toFixed(1)
+    : 'N/A';
 
   const roleRequirements: RoleRequirement[] = [
     {
@@ -339,13 +355,17 @@ export default async function FindingDetailPage({ params, searchParams }: Findin
           <div className="flex flex-wrap items-center gap-3">
             <StatusBadge value={finding.severity} />
             <StatusBadge value={finding.status} />
+            <span className="inline-flex items-center gap-1 rounded-full border border-surface-muted/60 bg-surface-muted/30 px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-gray-200">
+              CVSS
+              <span className="font-mono text-gray-300">{formattedCvss}</span>
+            </span>
             <span className="rounded-full bg-surface-muted/60 px-2.5 py-0.5 text-xs font-mono text-gray-300">
               Scanner {scannerValue} • Rule {finding.template_id}
             </span>
           </div>
         </header>
 
-        <section className="grid gap-4 md:grid-cols-2">
+        <section className="grid gap-4 md:grid-cols-3">
           <div className="rounded-lg border border-surface-muted/50 bg-surface-muted/20 p-4">
             <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">Workflow</h3>
             <dl className="mt-2 space-y-1 text-sm text-gray-200">
@@ -380,6 +400,67 @@ export default async function FindingDetailPage({ params, searchParams }: Findin
                 <dd className="font-mono text-gray-300">{finding.scan_id}</dd>
               </div>
             </dl>
+          </div>
+          <div className="rounded-lg border border-surface-muted/50 bg-surface-muted/20 p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">Validation</h3>
+            <dl className="mt-2 space-y-2 text-sm text-gray-200">
+              <div className="flex items-center justify-between gap-2">
+                <dt>Status</dt>
+                <dd>
+                  <StatusBadge value={finding.validation_status} />
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt>Validated</dt>
+                <dd className="font-mono text-gray-300">
+                  {finding.validated_at ? (
+                    <time dateTime={finding.validated_at} title={finding.validated_at}>
+                      {validatedAtRelative ?? finding.validated_at}
+                    </time>
+                  ) : (
+                    'Awaiting first validation'
+                  )}
+                </dd>
+              </div>
+            </dl>
+            <div className="mt-3">
+              <h4 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Latest runs</h4>
+              {latestValidations.length > 0 ? (
+                <ul className="mt-2 space-y-2">
+                  {latestValidations.map((validation) => (
+                    <li
+                      key={validation.id}
+                      className="rounded border border-surface-muted/40 bg-surface-muted/10 p-2 text-xs text-gray-200"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className="max-w-[70%] truncate font-mono text-[11px] text-gray-300"
+                          title={validation.job_id}
+                        >
+                          Job {validation.job_id}
+                        </span>
+                        <StatusBadge value={validation.status} />
+                      </div>
+                      <div className="mt-1 text-[11px] text-gray-400">
+                        <span>Executed </span>
+                        <time dateTime={validation.executed_at} title={validation.executed_at}>
+                          {formatTimestamp(validation.executed_at)}
+                        </time>
+                      </div>
+                      <p className="mt-1 text-xs text-gray-300">
+                        {validation.notes?.trim()
+                          ? validation.notes
+                          : 'No analyst notes recorded.'}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-2 text-[11px] text-gray-500">
+                  No validation jobs have been recorded yet.
+                </p>
+              )}
+            </div>
           </div>
         </section>
 

@@ -1,7 +1,12 @@
 import clsx from 'clsx';
-import type { FindingStatus, ScanStatus, SeverityLevel } from '@/lib/types';
+import type {
+  FindingStatus,
+  FindingValidationStatus,
+  ScanStatus,
+  SeverityLevel
+} from '@/lib/types';
 
-type StatusKind = ScanStatus | FindingStatus | SeverityLevel;
+type StatusKind = ScanStatus | FindingStatus | SeverityLevel | FindingValidationStatus;
 
 const badgeStyles: Record<StatusKind, string> = {
   queued: 'bg-status-queued/15 text-status-queued border-status-queued/40',
@@ -14,6 +19,8 @@ const badgeStyles: Record<StatusKind, string> = {
   acknowledged: 'bg-status-acknowledged/15 text-status-acknowledged border-status-acknowledged/40',
   invalidated: 'bg-status-invalidated/15 text-status-invalidated border-status-invalidated/40',
   resolved: 'bg-status-resolved/15 text-status-resolved border-status-resolved/40',
+  pending: 'bg-status-pending-validation/15 text-status-pending-validation border-status-pending-validation/40',
+  passed: 'bg-status-completed/15 text-status-completed border-status-completed/40',
   critical: 'bg-severity-critical/15 text-severity-critical border-severity-critical/40',
   high: 'bg-severity-high/15 text-severity-high border-severity-high/40',
   medium: 'bg-severity-medium/15 text-severity-medium border-severity-medium/40',
