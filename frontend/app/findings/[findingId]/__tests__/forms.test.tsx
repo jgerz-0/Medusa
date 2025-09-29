@@ -13,7 +13,7 @@ jest.mock('react-dom', () => {
 });
 
 describe('UpdateStatusForm', () => {
-  it('disables pending validation status to prevent manual regression', () => {
+  it('only exposes controller-approved status transitions', () => {
     render(
       <UpdateStatusForm
         findingId="finding-123"
@@ -21,10 +21,17 @@ describe('UpdateStatusForm', () => {
       />
     );
 
-    const pendingOption = screen.getByRole('option', { name: 'Pending Validation' }) as HTMLOptionElement;
-    const invalidatedOption = screen.getByRole('option', { name: 'Invalidated' }) as HTMLOptionElement;
+    const options = screen.getAllByRole('option') as HTMLOptionElement[];
+    const readOnlyOption = screen.getByRole('option', { name: /Pending Validation/i }) as HTMLOptionElement;
 
-    expect(pendingOption.disabled).toBe(true);
-    expect(invalidatedOption.disabled).toBe(false);
+    expect(readOnlyOption.disabled).toBe(true);
+    expect(readOnlyOption.value).toBe('');
+
+    const enabledStatuses = options
+      .filter((option) => !option.disabled)
+      .map((option) => option.value);
+
+    expect(enabledStatuses).toEqual(['open', 'acknowledged', 'resolved']);
+    expect(screen.queryByRole('option', { name: /Invalidated/i })).not.toBeInTheDocument();
   });
 });
