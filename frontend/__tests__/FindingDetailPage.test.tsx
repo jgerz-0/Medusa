@@ -69,6 +69,10 @@ describe('FindingDetailPage RBAC notice', () => {
     tags: ['workflow:triage'],
     comment_count: 0,
     tickets: [],
+    validation_status: 'pending',
+    validated_at: null,
+    validations: [],
+    cvss: 9.5,
     scope_status: 'in_scope'
   };
 
