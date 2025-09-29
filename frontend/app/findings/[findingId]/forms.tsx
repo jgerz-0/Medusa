@@ -11,7 +11,7 @@ import {
   createInitialActionState,
   type ActionState
 } from './actions';
-import type { FindingStatus } from '@/lib/types';
+import { FINDING_STATUSES, type FindingStatus } from '@/lib/types';
 
 function mergeClasses(...classes: (string | undefined)[]): string {
   return classes.filter(Boolean).join(' ');
@@ -98,15 +98,30 @@ export function UpdateStatusForm({
 }) {
   const [state, formAction] = useFormState(updateStatusAction, createInitialActionState());
 
+  // Controller forbids manually forcing a finding back to pending validation; surface
+  // it as read-only so analysts understand the current lifecycle state.
+  const statusOptions: { value: FindingStatus; label: string; disabled?: boolean }[] = FINDING_STATUSES.map(
+    (status) => ({
+      value: status,
+      label: status
+        .split('_')
+        .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+        .join(' '),
+      disabled: status === 'pending_validation',
+    })
+  );
+
   return (
     <form action={formAction} className={mergeClasses('flex flex-col gap-2', className)}>
       <input type="hidden" name="findingId" value={findingId} />
       <label className="text-xs uppercase tracking-wide text-gray-400">
         Status
         <select name="status" defaultValue={currentStatus} className="input mt-1">
-          <option value="open">open</option>
-          <option value="acknowledged">acknowledged</option>
-          <option value="resolved">resolved</option>
+          {statusOptions.map((option) => (
+            <option key={option.value} value={option.value} disabled={option.disabled}>
+              {option.label}
+            </option>
+          ))}
         </select>
       </label>
       <SubmitButton

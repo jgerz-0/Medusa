@@ -25,7 +25,9 @@ const config: Config = {
           completed: '#10B981',
           failed: '#EF4444',
           open: '#F97316',
+          'pending-validation': '#38BDF8',
           acknowledged: '#EAB308',
+          invalidated: '#94A3B8',
           resolved: '#22C55E'
         },
         severity: {
