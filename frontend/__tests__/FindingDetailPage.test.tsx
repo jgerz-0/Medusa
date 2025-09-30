@@ -238,4 +238,76 @@ describe('FindingDetailPage RBAC notice', () => {
 
     jest.useRealTimers();
   });
+
+  it('renders enrichment records when available', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2024-01-01T05:00:00.000Z'));
+
+    const findingWithEnrichment: Finding = {
+      ...baseFinding,
+      enrichments: [
+        {
+          id: 'enrichment-1',
+          job_id: 'job-100',
+          generated_at: '2024-01-01T04:00:00.000Z',
+          recorded_at: '2024-01-01T04:05:00.000Z',
+          advisories: [
+            {
+              source: 'nvd',
+              identifier: 'CVE-2024-0001',
+              summary: null,
+              severity: null,
+              cvss_score: null,
+              published: null,
+              modified: null,
+              references: [],
+              raw: {}
+            },
+            {
+              source: 'ghsa',
+              identifier: 'GHSA-1234',
+              summary: null,
+              severity: null,
+              cvss_score: null,
+              published: null,
+              modified: null,
+              references: [],
+              raw: {}
+            }
+          ],
+          advisories_hash: 'adv-hash',
+          errors: {
+            enricher: 'timeout contacting API'
+          },
+          errors_hash: 'err-hash',
+          provenance: {
+            orchestrator: 'agent-enrich',
+            signature: 'sha256:1234'
+          },
+          provenance_hash: 'prov-hash',
+          payload_hash: 'payload-hash'
+        }
+      ]
+    };
+
+    mockFetchFinding.mockResolvedValue(findingWithEnrichment);
+    mockFetchFindingComments.mockResolvedValue([] as FindingComment[]);
+    mockFetchFindingTimeline.mockResolvedValue([] as FindingTimelineEvent[]);
+    mockFetchReportExports.mockResolvedValue({ data: [], pagination: null });
+
+    const ui = await FindingDetailPage({ params: { findingId: findingWithEnrichment.id } });
+
+    render(ui);
+
+    expect(screen.getByText('Enrichment')).toBeInTheDocument();
+    expect(screen.getByText('Advisories 2')).toBeInTheDocument();
+    expect(screen.getByText(/Provenance hash/i)).toBeInTheDocument();
+    expect(screen.getByText('prov-hash')).toBeInTheDocument();
+    expect(screen.getByText('Errors 1')).toBeInTheDocument();
+    expect(screen.getByText('orchestrator')).toBeInTheDocument();
+    expect(screen.getByText('agent-enrich')).toBeInTheDocument();
+    expect(screen.getByText('timeout contacting API')).toBeInTheDocument();
+
+    jest.useRealTimers();
+  });
 });
