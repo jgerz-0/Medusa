@@ -12,7 +12,9 @@ import smtplib
 import textwrap
 import time
 import uuid
+from collections import Counter
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from io import BytesIO
@@ -41,6 +43,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 from redis import Redis
+from sqlalchemy import func, literal, select, union_all
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -7160,70 +7163,452 @@ def anomaly_callback(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _retrieve_finding_records(
-    db: Session,
+@dataclass(frozen=True)
+class FindingQueryFilters:
+    """Normalized filters applied when fetching findings from the database."""
+
+    severity: Optional[str]
+    status: Optional[str]
+    tag: Optional[str]
+    assigned_to: Optional[str]
+    since: Optional[datetime]
+    until: Optional[datetime]
+    scope_status: Optional[str]
+
+
+@dataclass(frozen=True)
+class RetrievedFindingRecord:
+    """Container linking a category to the ORM record used for serialization."""
+
+    category: str
+    detected_at: datetime
+    record: Union[
+        Finding,
+        BinaryStaticAnalysisFinding,
+        BinarySymbolicExecutionFinding,
+        BinaryFuzzingFinding,
+    ]
+
+
+@dataclass(frozen=True)
+class FindingRetrievalResult:
+    """Structured result for paginated or full finding lookups."""
+
+    records: List[RetrievedFindingRecord]
+    total: int
+
+
+def _normalize_finding_filters(
     *,
+    severity: Optional[str],
+    status_filter: Optional[str],
+    tag: Optional[str],
+    assigned_to: Optional[str],
+    since: Optional[datetime],
+    until: Optional[datetime],
+    scope_status: Optional[str],
+) -> Tuple[FindingQueryFilters, Dict[str, Optional[str]]]:
+    """Normalize API filter inputs so SQL comparisons remain deterministic."""
+
+    normalized_severity = severity.lower().strip() if severity else None
+    normalized_status = status_filter.lower().strip() if status_filter else None
+    normalized_tag = tag.lower().strip() if tag else None
+    normalized_assignee = assigned_to.strip() if assigned_to else None
+    normalized_scope = scope_status.lower().strip() if scope_status else None
+
+    filters = FindingQueryFilters(
+        severity=normalized_severity,
+        status=normalized_status,
+        tag=normalized_tag,
+        assigned_to=normalized_assignee,
+        since=since,
+        until=until,
+        scope_status=normalized_scope,
+    )
+
+    metadata = {
+        "severity": normalized_severity,
+        "status": normalized_status,
+        "tag": normalized_tag,
+        "assigned_to": normalized_assignee,
+        "scope": normalized_scope,
+        "from": since.isoformat() if since else None,
+        "to": until.isoformat() if until else None,
+    }
+
+    return filters, metadata
+
+
+def _binary_categories_allowed(filters: FindingQueryFilters) -> bool:
+    """Return ``True`` if binary categories can satisfy the requested filters."""
+
+    if filters.status and filters.status != FINDING_STATUS_OPEN:
+        return False
+    if filters.tag:
+        return False
+    if filters.assigned_to:
+        return False
+    if filters.scope_status and filters.scope_status != FINDING_SCOPE_STATUS_UNKNOWN:
+        return False
+    return True
+
+
+def _apply_finding_filters_to_query(
+    query,
+    *,
+    filters: FindingQueryFilters,
     target_id: Optional[str],
     scan_id: Optional[str],
-) -> Tuple[
-    List[Finding],
-    List[BinaryStaticAnalysisFinding],
-    List[BinarySymbolicExecutionFinding],
-    List[BinaryFuzzingFinding],
-]:
-    query = db.query(Finding).options(
-        selectinload(Finding.enrichments),
-        selectinload(Finding.comments),
-        selectinload(Finding.tickets),
-        selectinload(Finding.validations),
-    )
+):
+    """Apply normalized filters to a ``Finding`` ORM query."""
+
     if scan_id is not None:
         query = query.filter(Finding.scan_id == scan_id)
     elif target_id is not None:
         query = query.join(Finding.scan).filter(Scan.target_id == target_id)
 
-    findings = query.order_by(Finding.created_at.desc()).all()
+    if filters.severity:
+        query = query.filter(func.lower(Finding.severity) == filters.severity)
+    if filters.status:
+        query = query.filter(func.lower(Finding.status) == filters.status)
+    if filters.tag:
+        query = query.filter(Finding.tags.contains([filters.tag]))
+    if filters.assigned_to:
+        query = query.filter(Finding.assigned_to == filters.assigned_to)
+    if filters.scope_status:
+        query = query.filter(func.lower(Finding.scope_status) == filters.scope_status)
+    if filters.since:
+        query = query.filter(Finding.created_at >= filters.since)
+    if filters.until:
+        query = query.filter(Finding.created_at <= filters.until)
+    return query
 
-    static_query = db.query(BinaryStaticAnalysisFinding).options(
-        selectinload(BinaryStaticAnalysisFinding.scan)
-    )
-    symbolic_query = db.query(BinarySymbolicExecutionFinding).options(
-        selectinload(BinarySymbolicExecutionFinding.scan)
-    )
-    fuzzing_query = db.query(BinaryFuzzingFinding).options(
-        selectinload(BinaryFuzzingFinding.scan)
-    )
+
+def _apply_binary_filters_to_query(
+    query,
+    model,
+    *,
+    filters: FindingQueryFilters,
+    target_id: Optional[str],
+    scan_id: Optional[str],
+):
+    """Apply scan/target/time filters to binary finding ORM queries."""
 
     if scan_id is not None:
-        static_query = static_query.filter(
-            BinaryStaticAnalysisFinding.scan_id == scan_id
-        )
-        symbolic_query = symbolic_query.filter(
-            BinarySymbolicExecutionFinding.scan_id == scan_id
-        )
-        fuzzing_query = fuzzing_query.filter(BinaryFuzzingFinding.scan_id == scan_id)
+        query = query.filter(model.scan_id == scan_id)
     elif target_id is not None:
-        static_query = static_query.join(BinaryStaticAnalysisFinding.scan).filter(
-            Scan.target_id == target_id
+        query = query.join(model.scan).filter(Scan.target_id == target_id)
+
+    if filters.severity:
+        query = query.filter(func.lower(model.severity) == filters.severity)
+    if filters.since:
+        query = query.filter(model.executed_at >= filters.since)
+    if filters.until:
+        query = query.filter(model.executed_at <= filters.until)
+    return query
+
+
+def _hydrate_paginated_records(
+    db: Session,
+    rows: List[Tuple[str, str, datetime]],
+) -> List[RetrievedFindingRecord]:
+    """Fetch ORM objects for paginated rows without disturbing ordering."""
+
+    id_buckets: Dict[str, List[str]] = {}
+    for category, record_id, _detected_at in rows:
+        bucket = id_buckets.setdefault(category, [])
+        bucket.append(record_id)
+
+    results: Dict[str, Dict[str, RetrievedFindingRecord]] = {}
+
+    if ids := id_buckets.get("web"):
+        records = (
+            db.query(Finding)
+            .options(
+                selectinload(Finding.enrichments),
+                selectinload(Finding.comments),
+                selectinload(Finding.tickets),
+                selectinload(Finding.validations),
+            )
+            .filter(Finding.id.in_(ids))
+            .all()
         )
-        symbolic_query = symbolic_query.join(
-            BinarySymbolicExecutionFinding.scan
-        ).filter(Scan.target_id == target_id)
-        fuzzing_query = fuzzing_query.join(BinaryFuzzingFinding.scan).filter(
-            Scan.target_id == target_id
+        results["web"] = {
+            str(record.id): RetrievedFindingRecord(
+                category="web", detected_at=record.created_at, record=record
+            )
+            for record in records
+        }
+
+    if ids := id_buckets.get("binary_static"):
+        records = (
+            db.query(BinaryStaticAnalysisFinding)
+            .options(selectinload(BinaryStaticAnalysisFinding.scan))
+            .filter(BinaryStaticAnalysisFinding.id.in_(ids))
+            .all()
+        )
+        results["binary_static"] = {
+            str(record.id): RetrievedFindingRecord(
+                category="binary_static",
+                detected_at=record.executed_at,
+                record=record,
+            )
+            for record in records
+        }
+
+    if ids := id_buckets.get("binary_symbolic"):
+        records = (
+            db.query(BinarySymbolicExecutionFinding)
+            .options(selectinload(BinarySymbolicExecutionFinding.scan))
+            .filter(BinarySymbolicExecutionFinding.id.in_(ids))
+            .all()
+        )
+        results["binary_symbolic"] = {
+            str(record.id): RetrievedFindingRecord(
+                category="binary_symbolic",
+                detected_at=record.executed_at,
+                record=record,
+            )
+            for record in records
+        }
+
+    if ids := id_buckets.get("binary_fuzzing"):
+        records = (
+            db.query(BinaryFuzzingFinding)
+            .options(selectinload(BinaryFuzzingFinding.scan))
+            .filter(BinaryFuzzingFinding.id.in_(ids))
+            .all()
+        )
+        results["binary_fuzzing"] = {
+            str(record.id): RetrievedFindingRecord(
+                category="binary_fuzzing",
+                detected_at=record.executed_at,
+                record=record,
+            )
+            for record in records
+        }
+
+    ordered: List[RetrievedFindingRecord] = []
+    for category, record_id, detected_at in rows:
+        category_records = results.get(category, {})
+        record = category_records.get(record_id)
+        if record is None:
+            continue
+        # ``detected_at`` may be truncated when read from SQLite so we reapply it.
+        ordered.append(
+            RetrievedFindingRecord(
+                category=record.category, detected_at=detected_at, record=record.record
+            )
         )
 
-    static_findings = static_query.order_by(
-        BinaryStaticAnalysisFinding.executed_at.desc()
-    ).all()
-    symbolic_findings = symbolic_query.order_by(
-        BinarySymbolicExecutionFinding.executed_at.desc()
-    ).all()
-    fuzzing_findings = fuzzing_query.order_by(
-        BinaryFuzzingFinding.executed_at.desc()
-    ).all()
+    return ordered
 
-    return findings, static_findings, symbolic_findings, fuzzing_findings
+
+def _retrieve_finding_records(
+    db: Session,
+    *,
+    target_id: Optional[str],
+    scan_id: Optional[str],
+    filters: FindingQueryFilters,
+    paginate: bool,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> FindingRetrievalResult:
+    """Apply filters and pagination directly in SQL before serialization."""
+
+    include_binary = _binary_categories_allowed(filters)
+
+    base_finding_query = _apply_finding_filters_to_query(
+        db.query(Finding),
+        filters=filters,
+        target_id=target_id,
+        scan_id=scan_id,
+    )
+    web_select = base_finding_query.with_entities(
+        literal("web").label("category"),
+        Finding.id.label("record_id"),
+        Finding.created_at.label("detected_at"),
+    ).statement
+
+    select_statements = [web_select]
+
+    if include_binary:
+        static_select = _apply_binary_filters_to_query(
+            db.query(BinaryStaticAnalysisFinding),
+            BinaryStaticAnalysisFinding,
+            filters=filters,
+            target_id=target_id,
+            scan_id=scan_id,
+        ).with_entities(
+            literal("binary_static").label("category"),
+            BinaryStaticAnalysisFinding.id.label("record_id"),
+            BinaryStaticAnalysisFinding.executed_at.label("detected_at"),
+        ).statement
+
+        symbolic_select = _apply_binary_filters_to_query(
+            db.query(BinarySymbolicExecutionFinding),
+            BinarySymbolicExecutionFinding,
+            filters=filters,
+            target_id=target_id,
+            scan_id=scan_id,
+        ).with_entities(
+            literal("binary_symbolic").label("category"),
+            BinarySymbolicExecutionFinding.id.label("record_id"),
+            BinarySymbolicExecutionFinding.executed_at.label("detected_at"),
+        ).statement
+
+        fuzzing_select = _apply_binary_filters_to_query(
+            db.query(BinaryFuzzingFinding),
+            BinaryFuzzingFinding,
+            filters=filters,
+            target_id=target_id,
+            scan_id=scan_id,
+        ).with_entities(
+            literal("binary_fuzzing").label("category"),
+            BinaryFuzzingFinding.id.label("record_id"),
+            BinaryFuzzingFinding.executed_at.label("detected_at"),
+        ).statement
+
+        select_statements.extend([static_select, symbolic_select, fuzzing_select])
+
+    if paginate:
+        if limit is None or offset is None:
+            raise ValueError("Pagination requires explicit limit and offset")
+
+        combined = (
+            select_statements[0].subquery()
+            if len(select_statements) == 1
+            else union_all(*select_statements).subquery()
+        )
+
+        total = db.execute(select(func.count()).select_from(combined)).scalar_one()
+        if total == 0:
+            return FindingRetrievalResult(records=[], total=0)
+
+        windowed = (
+            select(
+                combined.c.category,
+                combined.c.record_id,
+                combined.c.detected_at,
+                func.row_number()
+                .over(order_by=combined.c.detected_at.desc())
+                .label("row_number"),
+            ).subquery()
+        )
+
+        page_stmt = (
+            select(
+                windowed.c.category,
+                windowed.c.record_id,
+                windowed.c.detected_at,
+            )
+            .where(windowed.c.row_number > offset)
+            .where(windowed.c.row_number <= offset + limit)
+            .order_by(windowed.c.row_number)
+        )
+
+        rows = [
+            (row.category, str(row.record_id), row.detected_at)
+            for row in db.execute(page_stmt).all()
+        ]
+
+        records = _hydrate_paginated_records(db, rows)
+        return FindingRetrievalResult(records=records, total=total)
+
+    # ``paginate`` disabled for timeline generation; fetch all filtered records.
+    web_records = (
+        _apply_finding_filters_to_query(
+            db.query(Finding)
+            .options(
+                selectinload(Finding.enrichments),
+                selectinload(Finding.comments),
+                selectinload(Finding.tickets),
+                selectinload(Finding.validations),
+            ),
+            filters=filters,
+            target_id=target_id,
+            scan_id=scan_id,
+        )
+        .order_by(Finding.created_at.desc())
+        .all()
+    )
+
+    records: List[RetrievedFindingRecord] = [
+        RetrievedFindingRecord(
+            category="web", detected_at=record.created_at, record=record
+        )
+        for record in web_records
+    ]
+
+    if include_binary:
+        static_records = (
+            _apply_binary_filters_to_query(
+                db.query(BinaryStaticAnalysisFinding).options(
+                    selectinload(BinaryStaticAnalysisFinding.scan)
+                ),
+                BinaryStaticAnalysisFinding,
+                filters=filters,
+                target_id=target_id,
+                scan_id=scan_id,
+            )
+            .order_by(BinaryStaticAnalysisFinding.executed_at.desc())
+            .all()
+        )
+        records.extend(
+            RetrievedFindingRecord(
+                category="binary_static",
+                detected_at=record.executed_at,
+                record=record,
+            )
+            for record in static_records
+        )
+
+        symbolic_records = (
+            _apply_binary_filters_to_query(
+                db.query(BinarySymbolicExecutionFinding).options(
+                    selectinload(BinarySymbolicExecutionFinding.scan)
+                ),
+                BinarySymbolicExecutionFinding,
+                filters=filters,
+                target_id=target_id,
+                scan_id=scan_id,
+            )
+            .order_by(BinarySymbolicExecutionFinding.executed_at.desc())
+            .all()
+        )
+        records.extend(
+            RetrievedFindingRecord(
+                category="binary_symbolic",
+                detected_at=record.executed_at,
+                record=record,
+            )
+            for record in symbolic_records
+        )
+
+        fuzzing_records = (
+            _apply_binary_filters_to_query(
+                db.query(BinaryFuzzingFinding).options(
+                    selectinload(BinaryFuzzingFinding.scan)
+                ),
+                BinaryFuzzingFinding,
+                filters=filters,
+                target_id=target_id,
+                scan_id=scan_id,
+            )
+            .order_by(BinaryFuzzingFinding.executed_at.desc())
+            .all()
+        )
+        records.extend(
+            RetrievedFindingRecord(
+                category="binary_fuzzing",
+                detected_at=record.executed_at,
+                record=record,
+            )
+            for record in fuzzing_records
+        )
+
+    records.sort(key=lambda item: item.detected_at, reverse=True)
+    return FindingRetrievalResult(records=records, total=len(records))
 
 
 def _get_mutable_finding(db: Session, finding_id: str) -> Finding:
@@ -7244,53 +7629,6 @@ def _get_mutable_finding(db: Session, finding_id: str) -> Finding:
             status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
         )
     return finding
-
-
-def _filter_finding_responses(
-    responses: Iterable[FindingResponse],
-    *,
-    severity: Optional[str],
-    status_filter: Optional[str],
-    tag: Optional[str],
-    assigned_to: Optional[str],
-    since: Optional[datetime],
-    until: Optional[datetime],
-    scope_status: Optional[str],
-) -> Tuple[List[FindingResponse], Dict[str, Optional[str]]]:
-    normalized_severity = severity.lower().strip() if severity else None
-    normalized_status = status_filter.lower().strip() if status_filter else None
-    normalized_tag = tag.lower().strip() if tag else None
-    normalized_assignee = assigned_to.strip() if assigned_to else None
-    normalized_scope = scope_status.lower().strip() if scope_status else None
-
-    def _matches(record: FindingResponse) -> bool:
-        if normalized_severity and record.severity != normalized_severity:
-            return False
-        if normalized_status and record.status != normalized_status:
-            return False
-        if normalized_tag and normalized_tag not in record.tags:
-            return False
-        if normalized_assignee and record.assigned_to != normalized_assignee:
-            return False
-        if normalized_scope and record.scope_status != normalized_scope:
-            return False
-        if since and record.detected_at < since:
-            return False
-        if until and record.detected_at > until:
-            return False
-        return True
-
-    filtered = [record for record in responses if _matches(record)]
-    metadata = {
-        "severity": normalized_severity,
-        "status": normalized_status,
-        "tag": normalized_tag,
-        "assigned_to": normalized_assignee,
-        "scope": normalized_scope,
-        "from": since.isoformat() if since else None,
-        "to": until.isoformat() if until else None,
-    }
-    return filtered, metadata
 
 
 def _build_timeline_buckets(
@@ -7494,34 +7832,7 @@ def list_findings(
         resource_id="/findings",
     )
 
-    (
-        findings,
-        static_findings,
-        symbolic_findings,
-        fuzzing_findings,
-    ) = _retrieve_finding_records(db, target_id=target_id, scan_id=scan_id)
-
-    aggregated: List[Tuple[datetime, FindingResponse]] = []
-    for record in findings:
-        aggregated.append((record.created_at, serialize_finding(record)))
-    for record in static_findings:
-        aggregated.append((record.executed_at, serialize_binary_static_finding(record)))
-    for record in symbolic_findings:
-        aggregated.append(
-            (record.executed_at, serialize_binary_symbolic_finding(record))
-        )
-    for record in fuzzing_findings:
-        aggregated.append(
-            (record.executed_at, serialize_binary_fuzzing_finding(record))
-        )
-
-    ordered = [
-        response
-        for _, response in sorted(aggregated, key=lambda item: item[0], reverse=True)
-    ]
-
-    filtered, metadata_filters = _filter_finding_responses(
-        ordered,
+    filters, metadata_filters = _normalize_finding_filters(
         severity=severity,
         status_filter=status_filter,
         tag=tag,
@@ -7531,16 +7842,35 @@ def list_findings(
         scope_status=scope,
     )
 
-    total_records = len(filtered)
-    window = filtered[offset : offset + limit]
+    result = _retrieve_finding_records(
+        db,
+        target_id=target_id,
+        scan_id=scan_id,
+        filters=filters,
+        paginate=True,
+        limit=limit,
+        offset=offset,
+    )
+
+    serialized: List[FindingResponse] = []
+    for record in result.records:
+        if record.category == "web":
+            serialized.append(serialize_finding(record.record))
+        elif record.category == "binary_static":
+            serialized.append(serialize_binary_static_finding(record.record))
+        elif record.category == "binary_symbolic":
+            serialized.append(serialize_binary_symbolic_finding(record.record))
+        elif record.category == "binary_fuzzing":
+            serialized.append(serialize_binary_fuzzing_finding(record.record))
+
+    category_counts = Counter(record.category for record in result.records)
+    total_records = result.total
 
     # Track category totals for the returned window to monitor data disclosure.
-    web_count = sum(1 for record in window if record.category == "web")
-    static_count = sum(1 for record in window if record.category == "binary_static")
-    symbolic_count = sum(
-        1 for record in window if record.category == "binary_symbolic"
-    )
-    fuzzing_count = sum(1 for record in window if record.category == "binary_fuzzing")
+    web_count = category_counts.get("web", 0)
+    static_count = category_counts.get("binary_static", 0)
+    symbolic_count = category_counts.get("binary_symbolic", 0)
+    fuzzing_count = category_counts.get("binary_fuzzing", 0)
 
     record_audit_event(
         db,
@@ -7553,7 +7883,7 @@ def list_findings(
             "target_id": target_id,
             "limit": limit,
             "offset": offset,
-            "returned": len(window),
+            "returned": len(serialized),
             "total_available": total_records,
             "web_count": web_count,
             "binary_static_count": static_count,
@@ -7564,7 +7894,7 @@ def list_findings(
     )
 
     return FindingCollectionResponse(
-        data=window,
+        data=serialized,
         meta=PaginationMetadata(total=total_records, limit=limit, offset=offset),
     )
 
@@ -7598,34 +7928,7 @@ def list_findings_timeline(
         resource_id="/findings/timeline",
     )
 
-    (
-        findings,
-        static_findings,
-        symbolic_findings,
-        fuzzing_findings,
-    ) = _retrieve_finding_records(db, target_id=target_id, scan_id=scan_id)
-
-    aggregated: List[Tuple[datetime, FindingResponse]] = []
-    for record in findings:
-        aggregated.append((record.created_at, serialize_finding(record)))
-    for record in static_findings:
-        aggregated.append((record.executed_at, serialize_binary_static_finding(record)))
-    for record in symbolic_findings:
-        aggregated.append(
-            (record.executed_at, serialize_binary_symbolic_finding(record))
-        )
-    for record in fuzzing_findings:
-        aggregated.append(
-            (record.executed_at, serialize_binary_fuzzing_finding(record))
-        )
-
-    ordered = [
-        response
-        for _, response in sorted(aggregated, key=lambda item: item[0], reverse=True)
-    ]
-
-    filtered, metadata_filters = _filter_finding_responses(
-        ordered,
+    filters, metadata_filters = _normalize_finding_filters(
         severity=severity,
         status_filter=status_filter,
         tag=tag,
@@ -7635,7 +7938,26 @@ def list_findings_timeline(
         scope_status=scope,
     )
 
-    buckets = _build_timeline_buckets(filtered)
+    result = _retrieve_finding_records(
+        db,
+        target_id=target_id,
+        scan_id=scan_id,
+        filters=filters,
+        paginate=False,
+    )
+
+    responses: List[FindingResponse] = []
+    for record in result.records:
+        if record.category == "web":
+            responses.append(serialize_finding(record.record))
+        elif record.category == "binary_static":
+            responses.append(serialize_binary_static_finding(record.record))
+        elif record.category == "binary_symbolic":
+            responses.append(serialize_binary_symbolic_finding(record.record))
+        elif record.category == "binary_fuzzing":
+            responses.append(serialize_binary_fuzzing_finding(record.record))
+
+    buckets = _build_timeline_buckets(responses)
 
     record_audit_event(
         db,
