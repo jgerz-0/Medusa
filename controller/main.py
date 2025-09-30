@@ -7632,37 +7632,43 @@ def _get_mutable_finding(db: Session, finding_id: str) -> Finding:
 
 
 def _build_timeline_buckets(
-    responses: Iterable[FindingResponse],
+    rows: Iterable[Tuple[datetime, str, int]],
 ) -> List[FindingTimelineBucket]:
-    timeline: Dict[date, Dict[str, int]] = {}
-    for record in responses:
-        detected = record.detected_at.astimezone(timezone.utc)
-        key = detected.date()
+    """Translate aggregated SQL rows into timeline response buckets."""
+
+    timeline: Dict[datetime, Dict[str, int]] = {}
+    for bucket_time, status, count in rows:
+        if status not in FINDING_TIMELINE_STATUSES:
+            # Ignore legacy workflow states that the UI no longer displays.
+            continue
+
+        normalized = bucket_time
+        if normalized.tzinfo is None:
+            normalized = normalized.replace(tzinfo=timezone.utc)
+        normalized = normalized.astimezone(timezone.utc)
+        normalized = normalized.replace(hour=0, minute=0, second=0, microsecond=0)
+
         bucket = timeline.setdefault(
-            key, {status: 0 for status in FINDING_TIMELINE_STATUSES}
+            normalized, {state: 0 for state in FINDING_TIMELINE_STATUSES}
         )
-        if record.status not in bucket:
-            bucket[record.status] = 0
-        bucket[record.status] += 1
+        bucket[status] += int(count)
 
     ordered: List[FindingTimelineBucket] = []
-    for day in sorted(timeline.keys()):
-        counts = timeline[day]
-        timestamp = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
-        total = sum(counts.get(status, 0) for status in FINDING_TIMELINE_STATUSES)
+    for timestamp in sorted(timeline.keys()):
+        counts = timeline[timestamp]
+        total = sum(counts[state] for state in FINDING_TIMELINE_STATUSES)
         ordered.append(
             FindingTimelineBucket(
                 date=timestamp,
-                pending_validation=counts.get(
-                    FINDING_STATUS_PENDING_VALIDATION, 0
-                ),
-                open=counts.get(FINDING_STATUS_OPEN, 0),
-                invalidated=counts.get(FINDING_STATUS_INVALIDATED, 0),
-                acknowledged=counts.get(FINDING_STATUS_ACKNOWLEDGED, 0),
-                resolved=counts.get(FINDING_STATUS_RESOLVED, 0),
+                pending_validation=counts[FINDING_STATUS_PENDING_VALIDATION],
+                open=counts[FINDING_STATUS_OPEN],
+                invalidated=counts[FINDING_STATUS_INVALIDATED],
+                acknowledged=counts[FINDING_STATUS_ACKNOWLEDGED],
+                resolved=counts[FINDING_STATUS_RESOLVED],
                 total=total,
             )
         )
+
     return ordered
 
 
@@ -7938,26 +7944,84 @@ def list_findings_timeline(
         scope_status=scope,
     )
 
-    result = _retrieve_finding_records(
-        db,
+    bind = db.get_bind()
+    dialect_name = bind.dialect.name if bind is not None else ""
+
+    def _bucket_expression(column):
+        if dialect_name == "sqlite":
+            return func.date(column)
+        return func.date_trunc("day", column)
+
+    bucket_column = _bucket_expression(Finding.created_at)
+    status_column = func.lower(Finding.status)
+    count_column = func.count(Finding.id)
+
+    query = db.query(
+        bucket_column.label("bucket"),
+        status_column.label("status"),
+        count_column.label("count"),
+    )
+    query = _apply_finding_filters_to_query(
+        query,
+        filters=filters,
         target_id=target_id,
         scan_id=scan_id,
-        filters=filters,
-        paginate=False,
     )
 
-    responses: List[FindingResponse] = []
-    for record in result.records:
-        if record.category == "web":
-            responses.append(serialize_finding(record.record))
-        elif record.category == "binary_static":
-            responses.append(serialize_binary_static_finding(record.record))
-        elif record.category == "binary_symbolic":
-            responses.append(serialize_binary_symbolic_finding(record.record))
-        elif record.category == "binary_fuzzing":
-            responses.append(serialize_binary_fuzzing_finding(record.record))
+    aggregated_rows: List[Tuple[object, str, int]] = [
+        (row.bucket, row.status, row.count)
+        for row in query.group_by(bucket_column, status_column)
+        .order_by(bucket_column.asc())
+        .all()
+    ]
 
-    buckets = _build_timeline_buckets(responses)
+    if _binary_categories_allowed(filters):
+        binary_models = (
+            BinaryStaticAnalysisFinding,
+            BinarySymbolicExecutionFinding,
+            BinaryFuzzingFinding,
+        )
+        for model in binary_models:
+            executed_bucket = _bucket_expression(model.executed_at)
+            binary_query = _apply_binary_filters_to_query(
+                db.query(
+                    executed_bucket.label("bucket"),
+                    literal(FINDING_STATUS_OPEN).label("status"),
+                    func.count(model.id).label("count"),
+                ),
+                model,
+                filters=filters,
+                target_id=target_id,
+                scan_id=scan_id,
+            )
+            aggregated_rows.extend(
+                (row.bucket, row.status, row.count)
+                for row in binary_query.group_by(executed_bucket)
+                .order_by(executed_bucket.asc())
+                .all()
+            )
+
+    def _normalize_bucket(value: object) -> datetime:
+        if isinstance(value, datetime):
+            normalized = value
+        elif isinstance(value, date):
+            normalized = datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc)
+        elif isinstance(value, str):
+            # SQLite ``date`` emits ISO-8601 strings without timezone data.
+            normalized = datetime.fromisoformat(value.replace(" ", "T"))
+        else:
+            raise TypeError(f"Unsupported timeline bucket type: {type(value)!r}")
+
+        if normalized.tzinfo is None:
+            normalized = normalized.replace(tzinfo=timezone.utc)
+        return normalized
+
+    normalized_rows: List[Tuple[datetime, str, int]] = [
+        (_normalize_bucket(bucket), status, int(count))
+        for bucket, status, count in aggregated_rows
+    ]
+
+    buckets = _build_timeline_buckets(normalized_rows)
 
     record_audit_event(
         db,
