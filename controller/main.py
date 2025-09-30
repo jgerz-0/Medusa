@@ -2031,9 +2031,20 @@ class FindingResponse(BaseModel):
     ]
 
 
+class WorkflowCounts(BaseModel):
+    """Aggregate counts for findings grouped by workflow status."""
+
+    pending_validation: int = Field(0, ge=0)
+    open: int = Field(0, ge=0)
+    invalidated: int = Field(0, ge=0)
+    acknowledged: int = Field(0, ge=0)
+    resolved: int = Field(0, ge=0)
+
+
 class FindingCollectionResponse(BaseModel):
     data: List[FindingResponse]
     meta: PaginationMetadata
+    workflow_counts: WorkflowCounts
 
 
 class FindingItemResponse(BaseModel):
@@ -5577,9 +5588,7 @@ def list_scans(
         query = query.filter(Scan.target_id == target_id)
 
     total = query.count()
-    scans = (
-        query.order_by(Scan.created_at.desc()).offset(offset).limit(limit).all()
-    )
+    scans = query.order_by(Scan.created_at.desc()).offset(offset).limit(limit).all()
 
     serialized_scans = [serialize_scan(scan) for scan in scans]
 
@@ -7308,6 +7317,69 @@ def _apply_binary_filters_to_query(
     return query
 
 
+def _empty_workflow_counts() -> Dict[str, int]:
+    """Return a zeroed mapping for all supported workflow states."""
+
+    return {
+        FINDING_STATUS_PENDING_VALIDATION: 0,
+        FINDING_STATUS_OPEN: 0,
+        FINDING_STATUS_INVALIDATED: 0,
+        FINDING_STATUS_ACKNOWLEDGED: 0,
+        FINDING_STATUS_RESOLVED: 0,
+    }
+
+
+def _count_findings_by_workflow_state(
+    db: Session,
+    *,
+    target_id: Optional[str],
+    scan_id: Optional[str],
+    filters: FindingQueryFilters,
+) -> Dict[str, int]:
+    """Aggregate filtered findings grouped by workflow status."""
+
+    counts = _empty_workflow_counts()
+
+    status_column = func.lower(Finding.status)
+    status_query = db.query(
+        status_column.label("status"), func.count(Finding.id).label("count")
+    )
+    status_query = _apply_finding_filters_to_query(
+        status_query,
+        filters=filters,
+        target_id=target_id,
+        scan_id=scan_id,
+    )
+
+    for row in status_query.group_by(status_column).all():
+        normalized = (row.status or FINDING_STATUS_OPEN).strip().lower()
+        if normalized not in counts:
+            # Ignore legacy states so the API contract remains stable.
+            continue
+        counts[normalized] = int(row.count)
+
+    if _binary_categories_allowed(filters):
+        binary_models = (
+            BinaryStaticAnalysisFinding,
+            BinarySymbolicExecutionFinding,
+            BinaryFuzzingFinding,
+        )
+        open_total = counts[FINDING_STATUS_OPEN]
+        for model in binary_models:
+            binary_query = _apply_binary_filters_to_query(
+                db.query(func.count(model.id)),
+                model,
+                filters=filters,
+                target_id=target_id,
+                scan_id=scan_id,
+            )
+            result = binary_query.scalar()
+            open_total += int(result or 0)
+        counts[FINDING_STATUS_OPEN] = open_total
+
+    return counts
+
+
 def _hydrate_paginated_records(
     db: Session,
     rows: List[Tuple[str, str, datetime]],
@@ -7433,41 +7505,53 @@ def _retrieve_finding_records(
     select_statements = [web_select]
 
     if include_binary:
-        static_select = _apply_binary_filters_to_query(
-            db.query(BinaryStaticAnalysisFinding),
-            BinaryStaticAnalysisFinding,
-            filters=filters,
-            target_id=target_id,
-            scan_id=scan_id,
-        ).with_entities(
-            literal("binary_static").label("category"),
-            BinaryStaticAnalysisFinding.id.label("record_id"),
-            BinaryStaticAnalysisFinding.executed_at.label("detected_at"),
-        ).statement
+        static_select = (
+            _apply_binary_filters_to_query(
+                db.query(BinaryStaticAnalysisFinding),
+                BinaryStaticAnalysisFinding,
+                filters=filters,
+                target_id=target_id,
+                scan_id=scan_id,
+            )
+            .with_entities(
+                literal("binary_static").label("category"),
+                BinaryStaticAnalysisFinding.id.label("record_id"),
+                BinaryStaticAnalysisFinding.executed_at.label("detected_at"),
+            )
+            .statement
+        )
 
-        symbolic_select = _apply_binary_filters_to_query(
-            db.query(BinarySymbolicExecutionFinding),
-            BinarySymbolicExecutionFinding,
-            filters=filters,
-            target_id=target_id,
-            scan_id=scan_id,
-        ).with_entities(
-            literal("binary_symbolic").label("category"),
-            BinarySymbolicExecutionFinding.id.label("record_id"),
-            BinarySymbolicExecutionFinding.executed_at.label("detected_at"),
-        ).statement
+        symbolic_select = (
+            _apply_binary_filters_to_query(
+                db.query(BinarySymbolicExecutionFinding),
+                BinarySymbolicExecutionFinding,
+                filters=filters,
+                target_id=target_id,
+                scan_id=scan_id,
+            )
+            .with_entities(
+                literal("binary_symbolic").label("category"),
+                BinarySymbolicExecutionFinding.id.label("record_id"),
+                BinarySymbolicExecutionFinding.executed_at.label("detected_at"),
+            )
+            .statement
+        )
 
-        fuzzing_select = _apply_binary_filters_to_query(
-            db.query(BinaryFuzzingFinding),
-            BinaryFuzzingFinding,
-            filters=filters,
-            target_id=target_id,
-            scan_id=scan_id,
-        ).with_entities(
-            literal("binary_fuzzing").label("category"),
-            BinaryFuzzingFinding.id.label("record_id"),
-            BinaryFuzzingFinding.executed_at.label("detected_at"),
-        ).statement
+        fuzzing_select = (
+            _apply_binary_filters_to_query(
+                db.query(BinaryFuzzingFinding),
+                BinaryFuzzingFinding,
+                filters=filters,
+                target_id=target_id,
+                scan_id=scan_id,
+            )
+            .with_entities(
+                literal("binary_fuzzing").label("category"),
+                BinaryFuzzingFinding.id.label("record_id"),
+                BinaryFuzzingFinding.executed_at.label("detected_at"),
+            )
+            .statement
+        )
 
         select_statements.extend([static_select, symbolic_select, fuzzing_select])
 
@@ -7485,16 +7569,14 @@ def _retrieve_finding_records(
         if total == 0:
             return FindingRetrievalResult(records=[], total=0)
 
-        windowed = (
-            select(
-                combined.c.category,
-                combined.c.record_id,
-                combined.c.detected_at,
-                func.row_number()
-                .over(order_by=combined.c.detected_at.desc())
-                .label("row_number"),
-            ).subquery()
-        )
+        windowed = select(
+            combined.c.category,
+            combined.c.record_id,
+            combined.c.detected_at,
+            func.row_number()
+            .over(order_by=combined.c.detected_at.desc())
+            .label("row_number"),
+        ).subquery()
 
         page_stmt = (
             select(
@@ -7518,8 +7600,7 @@ def _retrieve_finding_records(
     # ``paginate`` disabled for timeline generation; fetch all filtered records.
     web_records = (
         _apply_finding_filters_to_query(
-            db.query(Finding)
-            .options(
+            db.query(Finding).options(
                 selectinload(Finding.enrichments),
                 selectinload(Finding.comments),
                 selectinload(Finding.tickets),
@@ -7858,6 +7939,13 @@ def list_findings(
         offset=offset,
     )
 
+    workflow_counts = _count_findings_by_workflow_state(
+        db,
+        target_id=target_id,
+        scan_id=scan_id,
+        filters=filters,
+    )
+
     serialized: List[FindingResponse] = []
     for record in result.records:
         if record.category == "web":
@@ -7902,6 +7990,7 @@ def list_findings(
     return FindingCollectionResponse(
         data=serialized,
         meta=PaginationMetadata(total=total_records, limit=limit, offset=offset),
+        workflow_counts=WorkflowCounts(**workflow_counts),
     )
 
 
@@ -8005,7 +8094,9 @@ def list_findings_timeline(
         if isinstance(value, datetime):
             normalized = value
         elif isinstance(value, date):
-            normalized = datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc)
+            normalized = datetime.combine(
+                value, datetime.min.time(), tzinfo=timezone.utc
+            )
         elif isinstance(value, str):
             # SQLite ``date`` emits ISO-8601 strings without timezone data.
             normalized = datetime.fromisoformat(value.replace(" ", "T"))

@@ -33,6 +33,10 @@ type ApiItemResponse<T> = {
 
 interface FindingItemResponse extends ApiItemResponse<Finding> {}
 
+interface FindingCollectionResponse extends ApiCollectionResponse<Finding[]> {
+  workflow_counts: WorkflowCounts;
+}
+
 interface ReconDiscoveryCollectionResponse
   extends ApiCollectionResponse<ReconDiscovery[]> {}
 
@@ -54,6 +58,7 @@ export interface PaginationState {
 export interface PaginatedResponse<T> {
   data: T;
   pagination: PaginationState | null;
+  workflowCounts?: WorkflowCounts;
 }
 
 export interface PaginationQuery {
@@ -73,6 +78,14 @@ export interface FindingsQuery {
   scope?: string;
   page?: number;
   pageSize?: number;
+}
+
+export interface WorkflowCounts {
+  pending_validation: number;
+  open: number;
+  invalidated: number;
+  acknowledged: number;
+  resolved: number;
 }
 
 export interface AnomalyQuery extends PaginationQuery {
@@ -416,10 +429,11 @@ export async function fetchFindings(query?: FindingsQuery): Promise<PaginatedRes
     limit: limit !== undefined ? `${limit}` : undefined,
     offset: offset !== undefined ? `${offset}` : undefined
   });
-  const payload = await request<ApiCollectionResponse<Finding[]>>(path);
+  const payload = await request<FindingCollectionResponse>(path);
   return {
     data: payload.data,
-    pagination: deserializePagination(payload.meta)
+    pagination: deserializePagination(payload.meta),
+    workflowCounts: payload.workflow_counts
   } satisfies PaginatedResponse<Finding[]>;
 }
 

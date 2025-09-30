@@ -15,6 +15,28 @@ Phase 6 extends the Medusa controller and dashboard with analyst workflows, expo
 * `/findings/timeline` produces per-day buckets of open, acknowledged, and resolved findings for dashboards.
 * The dashboard exposes filter controls and a timeline card to highlight workflow trends.
 
+### `/findings` response structure
+
+The controller now returns aggregate workflow counts alongside the paginated dataset so analysts can gauge backlog distribution without issuing a second query.
+
+```json
+{
+  "data": [
+    { "id": "…", "status": "open", "category": "web", "tags": [] }
+  ],
+  "meta": { "total": 6, "limit": 50, "offset": 0 },
+  "workflow_counts": {
+    "pending_validation": 1,
+    "open": 2,
+    "invalidated": 1,
+    "acknowledged": 1,
+    "resolved": 1
+  }
+}
+```
+
+Binary static/symbolic/fuzzing findings are normalized as `open` because they lack per-record workflow transitions.
+
 ## Export Pipeline
 
 * `POST /reports/export` renders deterministic HTML or PDF snapshots, persists the artifact to MinIO/S3, and records a `report_exports` row capturing storage bucket/key, SHA-256 checksum, requester, and filter metadata.
