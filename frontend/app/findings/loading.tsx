@@ -41,6 +41,23 @@ export function FindingsFiltersSkeleton({ label }: { label: string }) {
   );
 }
 
+export function FindingsWorkflowSummarySkeleton() {
+  return (
+    <div className="card border-surface-muted/60 bg-surface-muted/20 px-4 py-3 text-xs text-gray-300">
+      <Skeleton className="h-3 w-32" data-testid="table-skeleton-line" />
+      <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
+        {Array.from({ length: 5 }).map((_, index) => (
+          <div key={index} className="flex flex-col gap-2">
+            <Skeleton className="h-2 w-24" data-testid="table-skeleton-line" />
+            <Skeleton className="h-4 w-12" data-testid="table-skeleton-line" />
+          </div>
+        ))}
+      </div>
+      <Skeleton className="mt-2 h-3 w-32" data-testid="table-skeleton-line" />
+    </div>
+  );
+}
+
 export function FindingsTableSkeleton() {
   return (
     <div
@@ -99,6 +116,7 @@ export default function FindingsLoading() {
           ]}
         />
         <FindingsFiltersSkeleton label="Loading findings filters" />
+        <FindingsWorkflowSummarySkeleton />
       </header>
       <FindingsTableSkeleton />
       <FindingsTimelineSkeleton />

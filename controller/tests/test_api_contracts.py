@@ -32,6 +32,11 @@ from controller.main import (
     CALLBACK_TOKEN_HEADER,
     DEFAULT_ADMIN_ROLES,
     DEFAULT_ANALYST_ROLES,
+    FINDING_STATUS_ACKNOWLEDGED,
+    FINDING_STATUS_INVALIDATED,
+    FINDING_STATUS_OPEN,
+    FINDING_STATUS_PENDING_VALIDATION,
+    FINDING_STATUS_RESOLVED,
     NUCLEI_TEMPLATE_PROFILES,
     Settings,
     _hash_json_payload,
@@ -537,9 +542,7 @@ def test_symbolic_execution_enqueue_flow(
     assert job["metadata"]["target_scope"] == target_payload["scope"]
     assert job["metadata"]["initiated_by"] == "bootstrap-admin"
     assert job["metadata"]["analyst_metadata"] == {"strategy": "dfs"}
-    assert job["callback_url"].endswith(
-        "/internal/binary/symbolic-execution/callback"
-    )
+    assert job["callback_url"].endswith("/internal/binary/symbolic-execution/callback")
 
 
 def test_binary_static_analysis_callback_persists_findings(
@@ -1310,7 +1313,7 @@ def test_finding_contracts(
 
 
 def test_validation_enqueue_flow(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, queue, session_factory, settings = api_client
 
@@ -1364,7 +1367,7 @@ def test_validation_enqueue_flow(
 
 
 def test_validation_force_allows_requeue(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, queue, session_factory, _settings = api_client
 
@@ -1496,7 +1499,9 @@ def test_validator_callback_records_validation(
         stored = session.get(Finding, finding_id)
         assert stored is not None
         assert stored.validation_status == "passed"
-        validations = session.query(FindingValidation).filter_by(finding_id=finding_id).all()
+        validations = (
+            session.query(FindingValidation).filter_by(finding_id=finding_id).all()
+        )
         assert len(validations) == 1
         assert validations[0].validator == "retest-agent"
         assert len(validations[0].evidence_hash) == 64
@@ -1564,7 +1569,7 @@ def test_findings_detail_rbac_regression(
 
 
 def test_anomalies_list_filters_and_audit(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, _queue, session_factory, _settings = api_client
 
@@ -1602,7 +1607,9 @@ def test_anomalies_list_filters_and_audit(
     assert "<" not in sanitized_metadata["actors"][0]
 
     with session_factory() as session:
-        audit_entries = session.query(AuditLog).filter(AuditLog.action == "list_anomalies").all()
+        audit_entries = (
+            session.query(AuditLog).filter(AuditLog.action == "list_anomalies").all()
+        )
         assert len(audit_entries) == 1
         snapshot = audit_entries[0].evidence_snapshot
         assert snapshot["filters"]["anomaly_type"] == "login_spike"
@@ -1610,7 +1617,7 @@ def test_anomalies_list_filters_and_audit(
 
 
 def test_anomaly_detail_sanitizes_metadata_and_audits(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, _queue, session_factory, _settings = api_client
 
@@ -1628,9 +1635,7 @@ def test_anomaly_detail_sanitizes_metadata_and_audits(
 
     with session_factory() as session:
         audit_entry = (
-            session.query(AuditLog)
-            .filter(AuditLog.action == "view_anomaly")
-            .one()
+            session.query(AuditLog).filter(AuditLog.action == "view_anomaly").one()
         )
         snapshot = audit_entry.evidence_snapshot
         assert snapshot.get("resource_id") == anomaly_id
@@ -1638,7 +1643,7 @@ def test_anomaly_detail_sanitizes_metadata_and_audits(
 
 
 def test_anomalies_require_finding_roles(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, _queue, session_factory, _settings = api_client
     anomaly_id = _create_anomaly_event(session_factory)
@@ -1650,13 +1655,13 @@ def test_anomalies_require_finding_roles(
     forbidden_list = client.get("/anomalies", headers=limited_headers)
     assert forbidden_list.status_code == 403
 
-    forbidden_detail = client.get(
-        f"/anomalies/{anomaly_id}", headers=limited_headers
-    )
+    forbidden_detail = client.get(f"/anomalies/{anomaly_id}", headers=limited_headers)
     assert forbidden_detail.status_code == 403
 
 
-def test_findings_scope_filter(api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]) -> None:
+def test_findings_scope_filter(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
     client, _queue, session_factory, _settings = api_client
 
     with session_factory() as session:
@@ -1744,6 +1749,104 @@ def test_findings_scope_filter(api_client: Tuple[TestClient, InMemoryQueue, sess
     in_timeline_payload = in_timeline.json()["data"]
     assert sum(bucket["total"] for bucket in in_timeline_payload) == 1
     assert all(bucket["open"] == bucket["total"] for bucket in in_timeline_payload)
+
+
+def test_findings_listing_includes_workflow_counts(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+
+    with session_factory() as session:
+        target = Target(
+            name="Counts Target", scope="counts.example", is_authorized=True
+        )
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="nuclei",
+            status="completed",
+            initiated_by="analyst",
+            parameters={},
+        )
+        session.add(scan)
+        session.flush()
+
+        evidence_template = {"request": "GET /health"}
+        statuses = [
+            FINDING_STATUS_PENDING_VALIDATION,
+            FINDING_STATUS_OPEN,
+            FINDING_STATUS_ACKNOWLEDGED,
+            FINDING_STATUS_RESOLVED,
+            FINDING_STATUS_INVALIDATED,
+        ]
+
+        for index, status in enumerate(statuses):
+            evidence_payload = {**evidence_template, "index": index}
+            finding = Finding(
+                scan_id=scan.id,
+                title=f"Workflow finding {index}",
+                severity="medium",
+                description="Workflow count seed",
+                metadata_json={},
+                evidence=evidence_payload,
+                evidence_hash=_hash_json_payload(evidence_payload),
+                status=status,
+            )
+            session.add(finding)
+
+        sample_metadata: dict[str, Any] = {}
+        sample = BinarySample(
+            scan_id=scan.id,
+            target_id=target.id,
+            file_name="counts.bin",
+            sha256="ab" * 32,
+            file_size=512,
+            mime_type="application/octet-stream",
+            magic_type="ELF 64-bit",
+            policy_status="allowed",
+            policy_reasons=[],
+            storage_bucket="binary-artifacts",
+            storage_key="reports/counts.bin",
+            metadata_json=sample_metadata,
+            metadata_hash=_hash_json_payload(sample_metadata),
+            processed_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(sample)
+        session.flush()
+
+        static_evidence = {"raw": "analysis"}
+        static_finding = BinaryStaticAnalysisFinding(
+            sample_id=sample.id,
+            scan_id=scan.id,
+            job_id="job-workflow-counts",
+            tool="checksec",
+            severity="medium",
+            title="NX disabled",
+            description="Binary missing NX",
+            metadata_json={},
+            evidence=static_evidence,
+            evidence_hash=_hash_json_payload(static_evidence),
+            artifact_bucket="binary-artifacts",
+            artifact_key="reports/checksec.json",
+            executed_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(static_finding)
+        session.commit()
+
+    response = client.get("/findings", headers=auth_headers())
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    assert payload["meta"] == {"total": 6, "limit": 50, "offset": 0}
+    assert payload["workflow_counts"] == {
+        "pending_validation": 1,
+        "open": 2,
+        "invalidated": 1,
+        "acknowledged": 1,
+        "resolved": 1,
+    }
 
 
 def _persist_sample_finding(session_factory: sessionmaker) -> tuple[str, str]:
@@ -2121,7 +2224,9 @@ def test_scans_listing_applies_limit_offset_and_returns_metadata(
     now = datetime.now(tz=timezone.utc)
 
     with session_factory() as session:
-        target = Target(name="Paginated Target", scope="paginate.example", is_authorized=True)
+        target = Target(
+            name="Paginated Target", scope="paginate.example", is_authorized=True
+        )
         session.add(target)
         session.flush()
 
@@ -2152,7 +2257,9 @@ def test_scans_listing_applies_limit_offset_and_returns_metadata(
     )
     assert response.status_code == 201
 
-    token = jwt.encode({"sub": "pager@example.com"}, settings.jwt_secret, algorithm="HS256")
+    token = jwt.encode(
+        {"sub": "pager@example.com"}, settings.jwt_secret, algorithm="HS256"
+    )
 
     paged_response = client.get(
         "/scans",
@@ -2180,7 +2287,9 @@ def test_findings_listing_applies_limit_offset_and_returns_metadata(
     now = datetime.now(tz=timezone.utc)
 
     with session_factory() as session:
-        target = Target(name="Paginated Findings", scope="paginate.findings", is_authorized=True)
+        target = Target(
+            name="Paginated Findings", scope="paginate.findings", is_authorized=True
+        )
         session.add(target)
         session.flush()
 
@@ -2221,6 +2330,7 @@ def test_findings_listing_applies_limit_offset_and_returns_metadata(
     first_detected = datetime.fromisoformat(payload["data"][0]["detected_at"])
     second_detected = datetime.fromisoformat(payload["data"][1]["detected_at"])
     assert first_detected >= second_detected
+
 
 def test_audit_log_listing_filters_and_audits(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
@@ -2465,8 +2575,9 @@ def test_api_key_revocation_enforced_and_audited(
         audit_actions = [entry.action for entry in session.query(AuditLog).all()]
     assert audit_actions.count("list_targets") == initial_audit_count
 
+
 def test_finding_workflow_and_reporting(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, _queue, session_factory, _settings = api_client
 
@@ -2569,7 +2680,10 @@ def test_finding_workflow_and_reporting(
     )
     assert download_response.status_code == 200
     assert download_response.headers["content-type"].startswith("text/html")
-    assert hashlib.sha256(download_response.content).hexdigest() == report_payload["checksum"]
+    assert (
+        hashlib.sha256(download_response.content).hexdigest()
+        == report_payload["checksum"]
+    )
 
     history_response = client.get(
         "/reports/export",
@@ -2605,7 +2719,7 @@ def test_finding_workflow_and_reporting(
 
 
 def test_report_download_requires_export_role(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, _queue, session_factory, _settings = api_client
 
@@ -2655,7 +2769,7 @@ def test_report_download_requires_export_role(
 
 
 def test_finding_detail_includes_ticket_sync_state(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, _queue, session_factory, _settings = api_client
 
@@ -2698,7 +2812,7 @@ def test_finding_detail_includes_ticket_sync_state(
 
 
 def test_recon_active_job_flow(
-    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings]
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
 ) -> None:
     client, queue, session_factory, settings = api_client
 
@@ -2721,7 +2835,11 @@ def test_recon_active_job_flow(
                     "seed_assets": ["Portal.Example.com"],
                 }
             ],
-            "tools": {"subfinder": True, "amass": True, "httpx": {"enabled": True, "httpx_ports": [80]}},
+            "tools": {
+                "subfinder": True,
+                "amass": True,
+                "httpx": {"enabled": True, "httpx_ports": [80]},
+            },
             "labels": ["attack-surface"],
         },
         headers=auth_headers(),

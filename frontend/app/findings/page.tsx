@@ -1,8 +1,8 @@
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { fetchFindings, fetchFindingsTimeline, fetchReportExports } from '@/lib/api';
-import type { PaginatedResponse, PaginationState } from '@/lib/api';
-import type { ReportExportResponse } from '@/lib/types';
+import type { PaginatedResponse, PaginationState, WorkflowCounts } from '@/lib/api';
+import type { Finding, ReportExportResponse } from '@/lib/types';
 import { DataTablePager, type DataTablePaginationConfig } from '@/components/DataTable';
 import { FindingsTable } from '@/components/FindingsTable';
 import { FindingsFilters } from '@/components/FindingsFilters';
@@ -34,10 +34,10 @@ function parsePositiveInteger(value: string | string[] | undefined, fallback: nu
 }
 
 async function FindingsTableBoundary(props?: {
-  query: FindingsQueryState;
+  responsePromise: Promise<PaginatedResponse<Finding[]>>;
   searchParams?: SearchParamsInput;
 }) {
-  if (!props || !props.query) {
+  if (!props || !props.responsePromise) {
     return (
       <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200" role="alert">
         Failed to load findings.
@@ -45,10 +45,10 @@ async function FindingsTableBoundary(props?: {
     );
   }
 
-  const { query, searchParams } = props;
+  const { responsePromise, searchParams } = props;
 
   try {
-    const findingsResponse = await fetchFindings(query);
+    const findingsResponse = await responsePromise;
     return (
       <FindingsTable
         findings={findingsResponse.data ?? []}
@@ -84,6 +84,80 @@ async function FindingsTimelineBoundary(props?: { query: FindingsTimelineQuerySt
     const message = err instanceof Error ? err.message : 'Failed to load timeline.';
     return (
       <div className="card border-red-500/40 bg-red-950/40 p-4 text-sm text-red-200" role="alert">
+        {message}
+      </div>
+    );
+  }
+}
+
+function FindingsWorkflowSummaryFallback() {
+  return (
+    <div className="mt-3 border-t border-surface-muted/40 pt-3 text-[11px] text-gray-500">
+      Loading workflow counts…
+    </div>
+  );
+}
+
+async function FindingsWorkflowSummary({
+  responsePromise
+}: {
+  responsePromise: Promise<PaginatedResponse<Finding[]>>;
+}) {
+  if (!responsePromise) {
+    return (
+      <div className="mt-3 border-t border-surface-muted/40 pt-3 text-[11px] text-gray-500">
+        Workflow counts unavailable.
+      </div>
+    );
+  }
+
+  try {
+    const findingsResponse = await responsePromise;
+    const counts = findingsResponse.workflowCounts;
+
+    if (!counts) {
+      return (
+        <div className="mt-3 border-t border-surface-muted/40 pt-3 text-[11px] text-gray-500">
+          Workflow counts unavailable.
+        </div>
+      );
+    }
+
+    const summaryItems: Array<{ key: keyof WorkflowCounts; label: string }> = [
+      { key: 'pending_validation', label: 'Pending validation' },
+      { key: 'open', label: 'Open' },
+      { key: 'invalidated', label: 'Invalidated' },
+      { key: 'acknowledged', label: 'Acknowledged' },
+      { key: 'resolved', label: 'Resolved' }
+    ];
+
+    const total = summaryItems.reduce((sum, item) => sum + counts[item.key], 0);
+
+    return (
+      <div className="mt-3 border-t border-surface-muted/40 pt-3">
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+          Workflow totals
+        </p>
+        <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-xs text-gray-200 sm:grid-cols-3 md:grid-cols-5">
+          {summaryItems.map((item) => (
+            <div key={item.key} className="flex flex-col">
+              <dt className="text-[10px] uppercase tracking-wide text-gray-500">{item.label}</dt>
+              <dd className="text-lg font-semibold text-white">
+                {counts[item.key].toLocaleString()}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-2 text-[11px] text-gray-400">
+          Total findings:{' '}
+          <span className="font-semibold text-white">{total.toLocaleString()}</span>
+        </p>
+      </div>
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unable to load workflow counts.';
+    return (
+      <div className="mt-3 border-t border-surface-muted/40 pt-3 text-[11px] text-red-200">
         {message}
       </div>
     );
@@ -209,7 +283,7 @@ export async function FindingsExportsBoundary({
   );
 }
 
-export default function FindingsPage({ searchParams }: FindingsPageProps) {
+export default async function FindingsPage({ searchParams }: FindingsPageProps) {
   const page = parsePositiveInteger(searchParams?.page, 1);
   const pageSize = parsePositiveInteger(searchParams?.page_size, 50);
 
@@ -254,6 +328,8 @@ export default function FindingsPage({ searchParams }: FindingsPageProps) {
     from: query.from,
     to: query.to
   };
+
+  const findingsPromise = fetchFindings(query);
 
   const hasFilters = Boolean(
     filterParams.scan ||
@@ -364,9 +440,9 @@ export default function FindingsPage({ searchParams }: FindingsPageProps) {
           ]}
         />
         <FindingsFilters searchParams={filterParams} />
-        {hasFilters ? (
-          <div className="card border-surface-muted/60 bg-surface-muted/20 px-4 py-3 text-xs text-gray-300">
-            <p className="font-semibold uppercase tracking-wide text-gray-400">Active Filters</p>
+        <div className="card border-surface-muted/60 bg-surface-muted/20 px-4 py-3 text-xs text-gray-300">
+          <p className="font-semibold uppercase tracking-wide text-gray-400">Active Filters</p>
+          {hasFilters ? (
             <ul className="mt-1 flex flex-wrap gap-2 font-mono">
               {filterParams.scan && <li>scan_id={filterParams.scan}</li>}
               {filterParams.severity && <li>severity={filterParams.severity}</li>}
@@ -377,12 +453,18 @@ export default function FindingsPage({ searchParams }: FindingsPageProps) {
               {filterParams.from && <li>from={filterParams.from}</li>}
               {filterParams.to && <li>to={filterParams.to}</li>}
             </ul>
-          </div>
-        ) : null}
+          ) : (
+            <p className="mt-1 text-[11px] text-gray-500">No filters applied. Showing all findings.</p>
+          )}
+          <Suspense fallback={<FindingsWorkflowSummaryFallback />}>
+            {/* @ts-expect-error Async Server Component */}
+            <FindingsWorkflowSummary responsePromise={findingsPromise} />
+          </Suspense>
+        </div>
       </header>
       <Suspense fallback={<FindingsTableSkeleton />}>
         {/* @ts-expect-error Async Server Component */}
-        <FindingsTableBoundary query={query} searchParams={searchParams} />
+        <FindingsTableBoundary responsePromise={findingsPromise} searchParams={searchParams} />
       </Suspense>
       <Suspense fallback={<FindingsTimelineSkeleton />}>
         {/* @ts-expect-error Async Server Component */}
