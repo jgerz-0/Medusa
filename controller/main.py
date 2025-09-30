@@ -8574,22 +8574,34 @@ def export_findings_report(
             findings_map[str(record.id)] = serialize_finding(record)
 
     if request.scan_id:
-        (
-            scan_findings,
-            static_findings,
-            symbolic_findings,
-            fuzzing_findings,
-        ) = _retrieve_finding_records(db, target_id=None, scan_id=request.scan_id)
-        for record in scan_findings:
-            findings_map[str(record.id)] = serialize_finding(record)
-        for record in static_findings:
-            finding_response = serialize_binary_static_finding(record)
-            findings_map[finding_response.id] = finding_response
-        for record in symbolic_findings:
-            finding_response = serialize_binary_symbolic_finding(record)
-            findings_map[finding_response.id] = finding_response
-        for record in fuzzing_findings:
-            finding_response = serialize_binary_fuzzing_finding(record)
+        scan_filters = FindingQueryFilters(
+            severity=None,
+            status=None,
+            tag=None,
+            assigned_to=None,
+            since=None,
+            until=None,
+            scope_status=None,
+        )
+        result = _retrieve_finding_records(
+            db,
+            target_id=None,
+            scan_id=request.scan_id,
+            filters=scan_filters,
+            paginate=False,
+        )
+        for record in result.records:
+            if record.category == "web":
+                finding_response = serialize_finding(record.record)
+            elif record.category == "binary_static":
+                finding_response = serialize_binary_static_finding(record.record)
+            elif record.category == "binary_symbolic":
+                finding_response = serialize_binary_symbolic_finding(record.record)
+            elif record.category == "binary_fuzzing":
+                finding_response = serialize_binary_fuzzing_finding(record.record)
+            else:
+                # Skip legacy/unknown categories until explicitly supported.
+                continue
             findings_map[finding_response.id] = finding_response
 
     responses = list(findings_map.values())

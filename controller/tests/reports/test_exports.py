@@ -243,6 +243,48 @@ def test_export_report_pdf_and_download_workflow(
         assert download_entry.evidence_snapshot["report_id"] == report_id
 
 
+def test_export_report_scan_path_succeeds(
+    api_client: Tuple[TestClient, object, sessionmaker, object]
+) -> None:
+    """Ensure exporting by scan reuses the consolidated retrieval helper."""
+
+    client, _queue, session_factory, _settings = api_client
+    finding_id, scan_id = cast(
+        Tuple[str, str],
+        _create_finding(
+            session_factory,
+            severity="medium",
+            status_value="pending_validation",
+            return_scan_id=True,
+        ),
+    )
+
+    response = client.post(
+        "/reports/export",
+        json={"format": "html", "scan_id": scan_id},
+        headers={"X-API-Key": "test-key"},
+    )
+    assert response.status_code == status.HTTP_200_OK
+
+    payload = response.json()
+    assert payload["finding_count"] == 1
+    assert payload["metadata"]["scan_id"] == scan_id
+    assert payload["metadata"]["requested_findings"] == []
+    assert payload["metadata"]["severity_counts"] == {"medium": 1}
+    assert payload["metadata"]["status_counts"] == {"pending_validation": 1}
+    assert payload["metadata"]["format"] == "html"
+
+    with session_factory() as session:
+        export_record = (
+            session.query(ReportExport)
+            .filter(ReportExport.id == payload["report_id"])
+            .one()
+        )
+        assert export_record.scan_id == scan_id
+        assert export_record.finding_count == 1
+        assert finding_id in export_record.finding_ids
+
+
 def test_list_report_exports_pagination_and_filters(
     api_client: Tuple[TestClient, object, sessionmaker, object]
 ) -> None:
