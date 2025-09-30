@@ -318,6 +318,9 @@ export default async function FindingDetailPage({ params, searchParams }: Findin
   const formattedCvss = Number.isFinite(finding.cvss)
     ? finding.cvss.toFixed(1)
     : 'N/A';
+  const enrichments = [...finding.enrichments].sort(
+    (first, second) => safeParseDate(second.generated_at) - safeParseDate(first.generated_at)
+  );
 
   const roleRequirements: RoleRequirement[] = [
     {
@@ -475,6 +478,102 @@ export default async function FindingDetailPage({ params, searchParams }: Findin
             {finding.remediation ??
               'Remediation guidance will be attached here once enrichment agents generate analyst-approved actions.'}
           </p>
+        </section>
+
+        <section className="rounded-lg border border-surface-muted/50 bg-surface-muted/20 p-4">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">Enrichment</h3>
+          {enrichments.length === 0 ? (
+            <p className="mt-2 text-sm text-gray-500">
+              No enrichment jobs have recorded provenance for this finding yet.
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-3">
+              {enrichments.map((enrichment) => {
+                const advisoriesCount = enrichment.advisories?.length ?? 0;
+                const errorEntries = Object.entries(enrichment.errors ?? {});
+                const provenanceEntries = Object.entries(enrichment.provenance ?? {});
+
+                return (
+                  <li
+                    key={enrichment.id}
+                    className="rounded border border-surface-muted/40 bg-surface-muted/10 p-3 text-xs text-gray-300"
+                  >
+                    <header className="flex flex-col gap-2 border-b border-surface-muted/30 pb-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex flex-col gap-1">
+                        <span className="font-mono text-[11px] text-gray-400">
+                          Job {enrichment.job_id}
+                        </span>
+                        <span>
+                          Generated{' '}
+                          <time
+                            dateTime={enrichment.generated_at}
+                            title={enrichment.generated_at}
+                            className="font-semibold text-gray-200"
+                          >
+                            {formatTimestamp(enrichment.generated_at)}
+                          </time>
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-gray-400">
+                        <span className="rounded-full border border-surface-muted/40 bg-surface-muted/20 px-2 py-0.5 font-semibold uppercase tracking-wide text-gray-200">
+                          Advisories {advisoriesCount}
+                        </span>
+                        <span className="rounded-full border border-surface-muted/40 bg-surface-muted/20 px-2 py-0.5 font-semibold uppercase tracking-wide text-gray-200">
+                          Provenance hash <code className="font-mono text-[11px] text-sky-300">{enrichment.provenance_hash}</code>
+                        </span>
+                        <span className="rounded-full border border-surface-muted/40 bg-surface-muted/20 px-2 py-0.5 font-semibold uppercase tracking-wide text-gray-200">
+                          Errors {errorEntries.length}
+                        </span>
+                      </div>
+                    </header>
+
+                    {provenanceEntries.length > 0 ? (
+                      <dl className="mt-3 grid gap-x-3 gap-y-2 sm:grid-cols-[auto,1fr]">
+                        {provenanceEntries.map(([key, value]) => (
+                          <div key={key} className="contents">
+                            <dt>
+                              <code className="rounded bg-surface-muted/40 px-1 py-0.5 text-[11px] uppercase tracking-wide text-sky-300">
+                                {key}
+                              </code>
+                            </dt>
+                            <dd className="text-gray-300">
+                              {formatTicketMetadataValue(value)}
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : (
+                      <p className="mt-3 text-[11px] text-gray-500">
+                        No provenance attributes captured.
+                      </p>
+                    )}
+
+                    <div className="mt-3">
+                      <h4 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                        Errors
+                      </h4>
+                      {errorEntries.length > 0 ? (
+                        <ul className="mt-2 space-y-1">
+                          {errorEntries.map(([key, value]) => (
+                            <li key={key} className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-[11px] text-red-200">
+                              <code className="mr-1 rounded bg-red-500/20 px-1 py-0.5 text-[10px] uppercase tracking-wide text-red-100">
+                                {key}
+                              </code>
+                              {value}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-[11px] text-gray-500">
+                          No enrichment errors logged.
+                        </p>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </section>
       </article>
 
