@@ -19,14 +19,14 @@ export const FINDING_STATUS_UPDATE_OPTIONS = [
 export type FindingStatusUpdateOption = (typeof FINDING_STATUS_UPDATE_OPTIONS)[number];
 export type SeverityLevel = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
+export type FindingCategory = 'web' | 'binary_static' | 'binary_fuzzing' | 'binary_symbolic';
+
 export const FINDING_CATEGORIES = [
   'web',
   'binary_static',
   'binary_fuzzing',
   'binary_symbolic',
-] as const;
-
-export type FindingCategory = (typeof FINDING_CATEGORIES)[number];
+] as const satisfies readonly FindingCategory[];
 
 export const FINDING_VALIDATION_STATUSES = [
   'pending',
@@ -115,7 +115,7 @@ export interface Finding {
   scanner: string;
   sample_id: string | null;
   tool: string | null;
-  category: FindingCategory | null;
+  category: FindingCategory;
   title: string;
   description: string;
   cve_id?: string | null;
