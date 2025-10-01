@@ -62,4 +62,25 @@ Binary static/symbolic/fuzzing findings are normalized as `open` because they la
 * UI download links include the recorded checksum so recipients can verify integrity outside the platform.
 * Local development without MinIO credentials falls back to ephemeral in-memory storage so engineers can exercise the workflow without external dependencies. This mode is non-persistent by design.
 
+### `/reports/export` request payload
+
+Analysts can scope exports explicitly by providing finding IDs, a scan identifier, or filter values that mirror the `/findings` collection endpoint. Payloads default to HTML generation but can request PDF snapshots as needed.
+
+```json
+{
+  "format": "pdf",
+  "finding_ids": ["finding-uuid-1"],
+  "scan_id": "scan-uuid-1",
+  "severity": "critical",
+  "status": "open",
+  "scope": "in_scope",
+  "tag": "ops",
+  "assigned_to": "analyst@example.com",
+  "from": "2024-01-15T00:00:00+00:00",
+  "to": "2024-01-20T00:00:00+00:00"
+}
+```
+
+The export metadata stored alongside each artifact echoes the normalized filters (lower-cased values, ISO-8601 timestamps) so audit consumers can reconstruct the scope that produced a report.
+
 Consult the updated API tests (`controller/tests/test_api_contracts.py`) for example payloads and regression coverage.

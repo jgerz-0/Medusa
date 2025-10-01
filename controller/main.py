@@ -2105,6 +2105,15 @@ class ReportExportRequest(BaseModel):
     format: Literal["html", "pdf"] = "html"
     finding_ids: List[str] = Field(default_factory=list)
     scan_id: Optional[str] = None
+    severity: Optional[str] = None
+    status: Optional[str] = None
+    scope: Optional[str] = None
+    tag: Optional[str] = None
+    assigned_to: Optional[str] = Field(default=None, alias="assigned_to")
+    since: Optional[datetime] = Field(default=None, alias="from")
+    until: Optional[datetime] = Field(default=None, alias="to")
+
+    model_config = ConfigDict(populate_by_name=True)
 
     @field_validator("finding_ids", mode="before")
     @classmethod
@@ -2126,8 +2135,21 @@ class ReportExportRequest(BaseModel):
 
     @model_validator(mode="after")
     def _ensure_scope(self) -> "ReportExportRequest":
-        if not self.finding_ids and not self.scan_id:
-            raise ValueError("Provide at least one finding_id or scan_id for export")
+        scoped_fields = [
+            bool(self.finding_ids),
+            bool(self.scan_id),
+            bool(self.severity),
+            bool(self.status),
+            bool(self.scope),
+            bool(self.tag),
+            bool(self.assigned_to),
+            bool(self.since),
+            bool(self.until),
+        ]
+        if not any(scoped_fields):
+            raise ValueError(
+                "Provide at least one finding_id, scan_id, or filter value for export"
+            )
         return self
 
 
@@ -8556,6 +8578,16 @@ def export_findings_report(
         resource_id="/reports/export",
     )
 
+    filters, metadata_filters = _normalize_finding_filters(
+        severity=request.severity,
+        status_filter=request.status,
+        tag=request.tag,
+        assigned_to=request.assigned_to,
+        since=request.since,
+        until=request.until,
+        scope_status=request.scope,
+    )
+
     findings_map: Dict[str, FindingResponse] = {}
 
     if request.finding_ids:
@@ -8573,21 +8605,24 @@ def export_findings_report(
         for record in query.all():
             findings_map[str(record.id)] = serialize_finding(record)
 
-    if request.scan_id:
-        scan_filters = FindingQueryFilters(
-            severity=None,
-            status=None,
-            tag=None,
-            assigned_to=None,
-            since=None,
-            until=None,
-            scope_status=None,
+    filter_requested = any(
+        (
+            filters.severity,
+            filters.status,
+            filters.tag,
+            filters.assigned_to,
+            filters.since,
+            filters.until,
+            filters.scope_status,
         )
+    )
+
+    if request.scan_id or filter_requested:
         result = _retrieve_finding_records(
             db,
             target_id=None,
             scan_id=request.scan_id,
-            filters=scan_filters,
+            filters=filters,
             paginate=False,
         )
         for record in result.records:
@@ -8654,6 +8689,7 @@ def export_findings_report(
         "severity_counts": severity_counts,
         "status_counts": status_counts,
         "format": request.format,
+        "filters": metadata_filters,
     }
 
     export_record = ReportExport(
