@@ -1,4 +1,5 @@
-from typing import Dict, Tuple, Union, cast
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import pytest
 from fastapi import status
@@ -22,6 +23,10 @@ def _create_finding(
     status_value: str = "pending_validation",
     title: str = "Synthetic finding",
     return_scan_id: bool = False,
+    assigned_to: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    scope_status: str = "unknown",
+    created_at: Optional[datetime] = None,
 ) -> Union[str, Tuple[str, str]]:
     """Persist a minimal target/scan/finding triple for report exports."""
 
@@ -41,18 +46,25 @@ def _create_finding(
         session.flush()
 
         evidence_payload = {"proof": "GET /?id=1"}
-        finding = Finding(
-            scan_id=scan.id,
-            title=title,
-            severity=severity,
-            cve_id="CVE-2099-0001",
-            description="Regression finding used for export coverage.",
-            metadata_json={"scanner": "nuclei"},
-            evidence=evidence_payload,
-            evidence_hash=_hash_json_payload(evidence_payload),
-            status=status_value,
-            tags=["regression"],
-        )
+        finding_kwargs: Dict[str, Any] = {
+            "scan_id": scan.id,
+            "title": title,
+            "severity": severity,
+            "cve_id": "CVE-2099-0001",
+            "description": "Regression finding used for export coverage.",
+            "metadata_json": {"scanner": "nuclei"},
+            "evidence": evidence_payload,
+            "evidence_hash": _hash_json_payload(evidence_payload),
+            "status": status_value,
+            "tags": tags if tags is not None else ["regression"],
+            "scope_status": scope_status,
+        }
+        if assigned_to is not None:
+            finding_kwargs["assigned_to"] = assigned_to
+        if created_at is not None:
+            finding_kwargs["created_at"] = created_at
+
+        finding = Finding(**finding_kwargs)
         session.add(finding)
         session.commit()
         if return_scan_id:
@@ -64,11 +76,18 @@ def _export_report(
     client: TestClient,
     *,
     format_: str,
-    finding_ids: Tuple[str, ...],
+    finding_ids: Tuple[str, ...] = (),
+    extra_payload: Optional[Dict[str, Any]] = None,
 ) -> Response:
+    payload: Dict[str, Any] = {"format": format_}
+    if finding_ids:
+        payload["finding_ids"] = list(finding_ids)
+    if extra_payload:
+        payload.update(extra_payload)
+
     response = client.post(
         "/reports/export",
-        json={"format": format_, "finding_ids": list(finding_ids)},
+        json=payload,
         headers={"X-API-Key": "test-key"},
     )
     assert response.status_code == status.HTTP_200_OK
@@ -113,6 +132,15 @@ def test_export_report_html_success_records_audit(
     assert payload["storage"]["key"].endswith(".html")
     assert payload["metadata"]["severity_counts"]["medium"] == 1
     assert payload["metadata"]["status_counts"]["pending_validation"] == 1
+    assert payload["metadata"]["filters"] == {
+        "severity": None,
+        "status": None,
+        "tag": None,
+        "assigned_to": None,
+        "scope": None,
+        "from": None,
+        "to": None,
+    }
 
     assert captured["extension"] == "html"
     assert captured["content_type"] == "text/html; charset=utf-8"
@@ -126,6 +154,15 @@ def test_export_report_html_success_records_audit(
         assert record.id == payload["report_id"]
         assert record.format == "html"
         assert record.metadata_json["severity_counts"]["medium"] == 1
+        assert record.metadata_json["filters"] == {
+            "severity": None,
+            "status": None,
+            "tag": None,
+            "assigned_to": None,
+            "scope": None,
+            "from": None,
+            "to": None,
+        }
 
         audit_entries = session.query(AuditLog).all()
         assert len(audit_entries) == 1
@@ -192,6 +229,15 @@ def test_export_report_pdf_and_download_workflow(
     assert payload["storage"]["key"].endswith(".pdf")
     assert payload["metadata"]["severity_counts"] == {"high": 1, "low": 1}
     assert payload["metadata"]["status_counts"] == {"open": 1, "resolved": 1}
+    assert payload["metadata"]["filters"] == {
+        "severity": None,
+        "status": None,
+        "tag": None,
+        "assigned_to": None,
+        "scope": None,
+        "from": None,
+        "to": None,
+    }
 
     report_id = payload["report_id"]
     download = client.get(
@@ -273,6 +319,15 @@ def test_export_report_scan_path_succeeds(
     assert payload["metadata"]["severity_counts"] == {"medium": 1}
     assert payload["metadata"]["status_counts"] == {"pending_validation": 1}
     assert payload["metadata"]["format"] == "html"
+    assert payload["metadata"]["filters"] == {
+        "severity": None,
+        "status": None,
+        "tag": None,
+        "assigned_to": None,
+        "scope": None,
+        "from": None,
+        "to": None,
+    }
 
     with session_factory() as session:
         export_record = (
@@ -283,7 +338,103 @@ def test_export_report_scan_path_succeeds(
         assert export_record.scan_id == scan_id
         assert export_record.finding_count == 1
         assert finding_id in export_record.finding_ids
+        assert export_record.metadata_json["filters"] == {
+            "severity": None,
+            "status": None,
+            "tag": None,
+            "assigned_to": None,
+            "scope": None,
+            "from": None,
+            "to": None,
+        }
 
+
+def test_export_report_filter_scope(
+    api_client: Tuple[TestClient, object, sessionmaker, object]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    window_end = datetime.now(tz=timezone.utc) - timedelta(days=1)
+    window_start = window_end - timedelta(days=2)
+
+    matching_finding = cast(
+        str,
+        _create_finding(
+            session_factory,
+            severity="critical",
+            status_value="open",
+            title="Filter eligible finding",
+            assigned_to="analyst",
+            tags=["ops"],
+            scope_status="in_scope",
+            created_at=window_start + timedelta(hours=1),
+        ),
+    )
+
+    _create_finding(
+        session_factory,
+        severity="critical",
+        status_value="open",
+        title="Out of scope finding",
+        assigned_to="analyst",
+        tags=["ops"],
+        scope_status="out_of_scope",
+        created_at=window_start + timedelta(hours=2),
+    )
+
+    _create_finding(
+        session_factory,
+        severity="low",
+        status_value="resolved",
+        title="Resolved finding",
+        assigned_to="analyst",
+        tags=["ops"],
+        scope_status="in_scope",
+        created_at=window_start + timedelta(hours=3),
+    )
+
+    response = _export_report(
+        client,
+        format_="html",
+        extra_payload={
+            "status": "OPEN",
+            "assigned_to": "analyst",
+            "tag": "OPS",
+            "scope": "IN_SCOPE",
+            "from": window_start.isoformat(),
+            "to": window_end.isoformat(),
+        },
+    )
+    assert response.status_code == status.HTTP_200_OK
+
+    payload = response.json()
+    assert payload["finding_count"] == 1
+    assert payload["metadata"]["requested_findings"] == []
+    assert payload["metadata"]["scan_id"] is None
+    assert payload["metadata"]["severity_counts"] == {"critical": 1}
+    assert payload["metadata"]["status_counts"] == {"open": 1}
+    assert payload["metadata"]["filters"] == {
+        "severity": None,
+        "status": "open",
+        "tag": "ops",
+        "assigned_to": "analyst",
+        "scope": "in_scope",
+        "from": window_start.isoformat(),
+        "to": window_end.isoformat(),
+    }
+
+    with session_factory() as session:
+        export_record = session.query(ReportExport).order_by(ReportExport.created_at.desc()).first()
+        assert export_record is not None
+        assert export_record.finding_ids == [matching_finding]
+        assert export_record.metadata_json["filters"] == {
+            "severity": None,
+            "status": "open",
+            "tag": "ops",
+            "assigned_to": "analyst",
+            "scope": "in_scope",
+            "from": window_start.isoformat(),
+            "to": window_end.isoformat(),
+        }
 
 def test_list_report_exports_pagination_and_filters(
     api_client: Tuple[TestClient, object, sessionmaker, object]
