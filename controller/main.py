@@ -8605,6 +8605,33 @@ def export_findings_report(
         for record in query.all():
             findings_map[str(record.id)] = serialize_finding(record)
 
+        static_query = (
+            db.query(BinaryStaticAnalysisFinding)
+            .options(selectinload(BinaryStaticAnalysisFinding.scan))
+            .filter(BinaryStaticAnalysisFinding.id.in_(request.finding_ids))
+        )
+        for record in static_query.all():
+            response = serialize_binary_static_finding(record)
+            findings_map[response.id] = response
+
+        symbolic_query = (
+            db.query(BinarySymbolicExecutionFinding)
+            .options(selectinload(BinarySymbolicExecutionFinding.scan))
+            .filter(BinarySymbolicExecutionFinding.id.in_(request.finding_ids))
+        )
+        for record in symbolic_query.all():
+            response = serialize_binary_symbolic_finding(record)
+            findings_map[response.id] = response
+
+        fuzzing_query = (
+            db.query(BinaryFuzzingFinding)
+            .options(selectinload(BinaryFuzzingFinding.scan))
+            .filter(BinaryFuzzingFinding.id.in_(request.finding_ids))
+        )
+        for record in fuzzing_query.all():
+            response = serialize_binary_fuzzing_finding(record)
+            findings_map[response.id] = response
+
     filter_requested = any(
         (
             filters.severity,

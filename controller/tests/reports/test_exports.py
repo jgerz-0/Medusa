@@ -7,7 +7,15 @@ from fastapi.testclient import TestClient
 from requests import Response
 from sqlalchemy.orm import sessionmaker
 
-from controller.db.models import AuditLog, Finding, ReportExport, Scan, Target
+from controller.db.models import (
+    AuditLog,
+    BinarySample,
+    BinaryStaticAnalysisFinding,
+    Finding,
+    ReportExport,
+    Scan,
+    Target,
+)
 from controller.main import _hash_json_payload
 from controller.storage import (
     ReportStorageError,
@@ -69,6 +77,61 @@ def _create_finding(
         session.commit()
         if return_scan_id:
             return str(finding.id), str(scan.id)
+        return str(finding.id)
+
+
+def _create_binary_static_finding(session_factory: sessionmaker) -> str:
+    with session_factory() as session:
+        target = Target(name="Binary Target", scope="binary.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="binary-static",
+            initiated_by="reporter",
+            status="completed",
+            parameters={"profile": "binary"},
+        )
+        session.add(scan)
+        session.flush()
+
+        sample_metadata: Dict[str, Any] = {"architecture": "x86_64"}
+        sample = BinarySample(
+            scan_id=scan.id,
+            target_id=target.id,
+            file_name="sample.bin",
+            sha256="deadbeef" * 8,
+            file_size=1024,
+            mime_type="application/octet-stream",
+            magic_type="ELF 64-bit",
+            policy_status="allowed",
+            policy_reasons=[],
+            storage_bucket="unit-test-bucket",
+            storage_key="binary/sample.bin",
+            metadata_json=sample_metadata,
+            metadata_hash=_hash_json_payload(sample_metadata),
+        )
+        session.add(sample)
+        session.flush()
+
+        evidence_payload: Dict[str, Any] = {"trace": "0xdeadbeef"}
+        finding = BinaryStaticAnalysisFinding(
+            sample_id=sample.id,
+            scan_id=scan.id,
+            job_id="job-1",
+            tool="ghidra",
+            severity="medium",
+            title="Binary static export finding",
+            description="Binary static finding used for export coverage.",
+            metadata_json={"scanner": "binary-static"},
+            evidence=evidence_payload,
+            evidence_hash=_hash_json_payload(evidence_payload),
+            executed_at=datetime.now(tz=timezone.utc),
+        )
+        session.add(finding)
+        session.commit()
+
         return str(finding.id)
 
 
@@ -287,6 +350,33 @@ def test_export_report_pdf_and_download_workflow(
         )
         assert download_entry.evidence_snapshot["format"] == "pdf"
         assert download_entry.evidence_snapshot["report_id"] == report_id
+
+
+def test_export_report_includes_binary_findings(
+    api_client: Tuple[TestClient, object, sessionmaker, object]
+) -> None:
+    client, _queue, session_factory, _settings = api_client
+    binary_finding = _create_binary_static_finding(session_factory)
+
+    response = _export_report(
+        client,
+        format_="html",
+        finding_ids=(binary_finding,),
+    )
+    payload = response.json()
+
+    assert payload["finding_count"] == 1
+    assert payload["metadata"]["requested_findings"] == [binary_finding]
+    assert payload["metadata"]["severity_counts"] == {"medium": 1}
+    assert payload["metadata"]["status_counts"] == {"open": 1}
+
+    with session_factory() as session:
+        export_record = (
+            session.query(ReportExport)
+            .filter(ReportExport.id == payload["report_id"])
+            .one()
+        )
+        assert export_record.finding_ids == [binary_finding]
 
 
 def test_export_report_scan_path_succeeds(
