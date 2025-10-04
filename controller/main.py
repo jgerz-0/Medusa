@@ -5604,7 +5604,11 @@ def list_scans(
         resource_id="/scans",
     )
     query = db.query(Scan).options(
-        selectinload(Scan.target), selectinload(Scan.findings)
+        selectinload(Scan.target),
+        selectinload(Scan.findings),
+        selectinload(Scan.binary_analysis_findings),
+        selectinload(Scan.binary_symbolic_execution_findings),
+        selectinload(Scan.binary_fuzzing_findings),
     )
     if target_id is not None:
         query = query.filter(Scan.target_id == target_id)
