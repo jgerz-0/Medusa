@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Generator, Optional, Tuple
+from typing import Callable, Generator, Optional, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+
+from sqlalchemy.engine import Engine
 
 from controller.db.models import Base, PrincipalCredential
 from controller.main import (
@@ -65,6 +67,57 @@ class InMemoryReportStorage(ReportStorage):
         if stored is None:
             raise RuntimeError("missing test artifact")
         return stored
+
+
+class SQLQueryProfiler:
+    """Context manager that counts SELECT statements executed against an engine."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+        self.count = 0
+        self._attached = False
+
+    def _before_cursor_execute(self, _conn, _cursor, statement, *_args) -> None:
+        if statement and statement.lstrip().lower().startswith("select"):
+            self.count += 1
+
+    def __enter__(self) -> "SQLQueryProfiler":
+        if not self._attached:
+            event.listen(
+                self._engine,
+                "before_cursor_execute",
+                self._before_cursor_execute,
+            )
+            self._attached = True
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        self.detach()
+
+    def detach(self) -> None:
+        if self._attached:
+            event.remove(
+                self._engine,
+                "before_cursor_execute",
+                self._before_cursor_execute,
+            )
+            self._attached = False
+
+
+@pytest.fixture()
+def query_profiler() -> Callable[[Engine], SQLQueryProfiler]:
+    profilers: list[SQLQueryProfiler] = []
+
+    def factory(engine: Engine) -> SQLQueryProfiler:
+        profiler = SQLQueryProfiler(engine)
+        profilers.append(profiler)
+        return profiler
+
+    try:
+        yield factory
+    finally:
+        for profiler in profilers:
+            profiler.detach()
 
 
 @pytest.fixture()

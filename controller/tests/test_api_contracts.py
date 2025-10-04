@@ -1,7 +1,7 @@
 import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Generator, Optional, Tuple
+from typing import Any, Callable, Generator, Optional, Tuple
 
 from fastapi import status
 from fastapi.testclient import TestClient
@@ -2278,6 +2278,122 @@ def test_scans_listing_applies_limit_offset_and_returns_metadata(
     second_scan_created = datetime.fromisoformat(payload["data"][1]["created_at"])
     assert first_scan_created >= second_scan_created
 
+
+def test_scans_listing_prefetches_binary_findings_with_bounded_queries(
+    api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
+    query_profiler,
+) -> None:
+    client, _queue, session_factory, settings = api_client
+
+    now = datetime.now(tz=timezone.utc)
+
+    with session_factory() as session:
+        target = Target(name="Binary Target", scope="binary.example", is_authorized=True)
+        session.add(target)
+        session.flush()
+
+        scan = Scan(
+            target_id=target.id,
+            scanner="nuclei",
+            parameters={"profile": "baseline"},
+            initiated_by="controller",
+            status="completed",
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(scan)
+        session.flush()
+
+        sample = BinarySample(
+            scan_id=scan.id,
+            target_id=target.id,
+            file_name="binary.exe",
+            sha256=hashlib.sha256(b"binary").hexdigest(),
+            file_size=1024,
+            mime_type="application/octet-stream",
+            magic_type="PE32 executable",
+            policy_status="allowed",
+            policy_reasons=[],
+            storage_bucket="binary-artifacts",
+            storage_key="artifacts/binary.exe",
+            metadata_json={"arch": "x86"},
+            metadata_hash=hashlib.sha256(b"metadata").hexdigest(),
+            processed_at=now,
+        )
+        session.add(sample)
+        session.flush()
+
+        static_finding = BinaryStaticAnalysisFinding(
+            sample_id=sample.id,
+            scan_id=scan.id,
+            job_id="job-static",
+            tool="ghidra",
+            severity="high",
+            title="Static Issue",
+            description="Example static analysis finding",
+            metadata_json={},
+            evidence={},
+            evidence_hash=hashlib.sha256(b"static").hexdigest(),
+            executed_at=now,
+        )
+        symbolic_finding = BinarySymbolicExecutionFinding(
+            sample_id=sample.id,
+            scan_id=scan.id,
+            job_id="job-symbolic",
+            tool="angr",
+            severity="medium",
+            title="Symbolic Issue",
+            description="Example symbolic execution finding",
+            metadata_json={},
+            evidence={},
+            evidence_hash=hashlib.sha256(b"symbolic").hexdigest(),
+            executed_at=now,
+        )
+        fuzzing_finding = BinaryFuzzingFinding(
+            sample_id=sample.id,
+            scan_id=scan.id,
+            job_id="job-fuzz",
+            tool="afl",
+            severity="critical",
+            title="Fuzzing Issue",
+            description="Example fuzzing finding",
+            metadata_json={},
+            evidence={},
+            evidence_hash=hashlib.sha256(b"fuzzing").hexdigest(),
+            executed_at=now,
+        )
+        session.add_all([static_finding, symbolic_finding, fuzzing_finding])
+        session.commit()
+
+    response = client.post(
+        "/principals",
+        json={
+            "subject": "binary-analyst@example.com",
+            "auth_method": "jwt",
+            "roles": ["analyst"],
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == status.HTTP_201_CREATED
+
+    token = jwt.encode(
+        {"sub": "binary-analyst@example.com"}, settings.jwt_secret, algorithm="HS256"
+    )
+
+    engine = session_factory.kw["bind"]
+    with query_profiler(engine) as profiler:
+        listing = client.get(
+            "/scans",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert listing.status_code == status.HTTP_200_OK
+    payload = listing.json()
+    assert payload["meta"] == {"total": 1, "limit": 50, "offset": 0}
+    assert payload["data"][0]["findings_count"] == 3
+    # count + listing + selectin-load queries for the prefetched relationships should
+    # remain bounded to avoid N+1 regressions when binary findings are present.
+    assert profiler.count <= 9
 
 def test_findings_listing_applies_limit_offset_and_returns_metadata(
     api_client: Tuple[TestClient, InMemoryQueue, sessionmaker, Settings],
