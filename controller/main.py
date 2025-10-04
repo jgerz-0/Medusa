@@ -7427,6 +7427,7 @@ def _hydrate_paginated_records(
                 selectinload(Finding.comments),
                 selectinload(Finding.tickets),
                 selectinload(Finding.validations),
+                selectinload(Finding.scan).selectinload(Scan.target),
             )
             .filter(Finding.id.in_(ids))
             .all()
@@ -7441,7 +7442,9 @@ def _hydrate_paginated_records(
     if ids := id_buckets.get("binary_static"):
         records = (
             db.query(BinaryStaticAnalysisFinding)
-            .options(selectinload(BinaryStaticAnalysisFinding.scan))
+            .options(
+                selectinload(BinaryStaticAnalysisFinding.scan).selectinload(Scan.target)
+            )
             .filter(BinaryStaticAnalysisFinding.id.in_(ids))
             .all()
         )
@@ -7457,7 +7460,9 @@ def _hydrate_paginated_records(
     if ids := id_buckets.get("binary_symbolic"):
         records = (
             db.query(BinarySymbolicExecutionFinding)
-            .options(selectinload(BinarySymbolicExecutionFinding.scan))
+            .options(
+                selectinload(BinarySymbolicExecutionFinding.scan).selectinload(Scan.target)
+            )
             .filter(BinarySymbolicExecutionFinding.id.in_(ids))
             .all()
         )
@@ -7473,7 +7478,9 @@ def _hydrate_paginated_records(
     if ids := id_buckets.get("binary_fuzzing"):
         records = (
             db.query(BinaryFuzzingFinding)
-            .options(selectinload(BinaryFuzzingFinding.scan))
+            .options(
+                selectinload(BinaryFuzzingFinding.scan).selectinload(Scan.target)
+            )
             .filter(BinaryFuzzingFinding.id.in_(ids))
             .all()
         )
@@ -7631,6 +7638,7 @@ def _retrieve_finding_records(
                 selectinload(Finding.comments),
                 selectinload(Finding.tickets),
                 selectinload(Finding.validations),
+                selectinload(Finding.scan).selectinload(Scan.target),
             ),
             filters=filters,
             target_id=target_id,
@@ -7651,7 +7659,9 @@ def _retrieve_finding_records(
         static_records = (
             _apply_binary_filters_to_query(
                 db.query(BinaryStaticAnalysisFinding).options(
-                    selectinload(BinaryStaticAnalysisFinding.scan)
+                    selectinload(BinaryStaticAnalysisFinding.scan).selectinload(
+                        Scan.target
+                    )
                 ),
                 BinaryStaticAnalysisFinding,
                 filters=filters,
@@ -7673,7 +7683,9 @@ def _retrieve_finding_records(
         symbolic_records = (
             _apply_binary_filters_to_query(
                 db.query(BinarySymbolicExecutionFinding).options(
-                    selectinload(BinarySymbolicExecutionFinding.scan)
+                    selectinload(BinarySymbolicExecutionFinding.scan).selectinload(
+                        Scan.target
+                    )
                 ),
                 BinarySymbolicExecutionFinding,
                 filters=filters,
@@ -7695,7 +7707,7 @@ def _retrieve_finding_records(
         fuzzing_records = (
             _apply_binary_filters_to_query(
                 db.query(BinaryFuzzingFinding).options(
-                    selectinload(BinaryFuzzingFinding.scan)
+                    selectinload(BinaryFuzzingFinding.scan).selectinload(Scan.target)
                 ),
                 BinaryFuzzingFinding,
                 filters=filters,
